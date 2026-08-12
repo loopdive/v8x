@@ -12,31 +12,65 @@ const ENGINE_NAME: &str = v8::V8X_ENGINE;
 
 #[cfg(feature = "engine_quickjs")]
 const ENGINE_SOURCE: &str = r#"
-let answer = 0;
-for (let index = 0; index < 32; index++) answer += index;
-if (answer !== 496) throw new Error("wrong benchmark result");
-export function benchmarkNoop(value) { return value + 1; }
-export function benchmarkKernel(iterations) {
-  let state = 1;
-  for (let index = 0; index < iterations; index++) {
-    state = (state * 17 + index) % 1000003;
+import { addJS, complexKernel } from "./v8x-engine-workload.ts";
+export function benchmarkAddDynamic(value) { return addJS(value, 1); }
+export function benchmarkAddConstant(_value) { return addJS(1, 2); }
+export function benchmarkComplex(seed) {
+  return complexKernel(seed);
+}
+"#;
+
+#[cfg(feature = "engine_quickjs")]
+const ENGINE_WORKLOAD_SOURCE: &str = r#"
+export function addJS(left, right) { return left + right; }
+export function complexKernel(seed) {
+  let state = seed % 1000003;
+  let checksum = 0;
+  for (let round = 0; round < 512; round++) {
+    state = (state * 48271 + round + 1) % 1000003;
+    if (state % 2 === 0) {
+      state = (state / 2 + 7919) % 1000003;
+    } else {
+      state = (state * 3 + 1) % 1000003;
+    }
+    checksum = (checksum + state * ((round % 17) + 1)) % 1000003;
   }
-  return state;
+  return checksum;
 }
 "#;
 
 #[cfg(feature = "engine_js2wasm")]
 const ENGINE_SOURCE: &str = r#"
-let answer: number = 0;
-for (let index = 0; index < 32; index++) answer += index;
-if (answer !== 496) throw new Error("wrong benchmark result");
-export function benchmarkNoop(value: number): number { return value + 1; }
-export function benchmarkKernel(iterations: number): number {
-  let state: number = 1;
-  for (let index: number = 0; index < iterations; index++) {
-    state = (state * 17 + index) % 1000003;
+import { addJS, complexKernel } from "./v8x-engine-workload.ts";
+export function benchmarkAddDynamic(value: number): number {
+  return addJS(value, 1);
+}
+export function benchmarkAddConstant(_value: number): number {
+  return addJS(1, 2);
+}
+export function benchmarkComplex(seed: number): number {
+  return complexKernel(seed);
+}
+"#;
+
+#[cfg(feature = "engine_js2wasm")]
+const ENGINE_WORKLOAD_SOURCE: &str = r#"
+export function addJS(left: number, right: number): number {
+  return left + right;
+}
+export function complexKernel(seed: number): number {
+  let state: number = seed % 1000003;
+  let checksum: number = 0;
+  for (let round: number = 0; round < 512; round++) {
+    state = (state * 48271 + round + 1) % 1000003;
+    if (state % 2 === 0) {
+      state = (state / 2 + 7919) % 1000003;
+    } else {
+      state = (state * 3 + 1) % 1000003;
+    }
+    checksum = (checksum + state * ((round % 17) + 1)) % 1000003;
   }
-  return state;
+  return checksum;
 }
 "#;
 

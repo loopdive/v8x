@@ -7,6 +7,9 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 const MODULE_NAME: &str = "file:///v8x-engine-benchmark.ts";
+const WORKLOAD_MODULE_NAME: &str = "file:///v8x-engine-workload.ts";
+const WORKLOAD_IMPORT: &str = "./v8x-engine-workload.ts";
+const COMPLEX_ROUNDS: usize = 512;
 
 fn initialize() {
   static ONCE: Once = Once::new();
@@ -65,17 +68,23 @@ fn module_origin<'s>(
 }
 
 #[allow(clippy::unnecessary_wraps)]
-fn reject_dependency<'s>(
+fn resolve_dependency<'s>(
   context: v8::Local<'s, v8::Context>,
   specifier: v8::Local<'s, v8::String>,
   _import_attributes: v8::Local<'s, v8::FixedArray>,
   _referrer: v8::Local<'s, v8::Module>,
 ) -> Option<v8::Local<'s, v8::Module>> {
   v8::callback_scope!(unsafe scope, context);
-  panic!(
-    "the benchmark module has no dependency {:?}",
-    specifier.to_rust_string_lossy(scope)
+  let specifier = specifier.to_rust_string_lossy(scope);
+  assert!(
+    specifier == WORKLOAD_IMPORT || specifier == WORKLOAD_MODULE_NAME,
+    "unexpected benchmark dependency {specifier:?}"
   );
+  let source = v8::String::new(scope, ENGINE_WORKLOAD_SOURCE).unwrap();
+  let name = v8::String::new(scope, WORKLOAD_MODULE_NAME).unwrap().into();
+  let origin = module_origin(scope, name);
+  let mut source = v8::script_compiler::Source::new(source, Some(&origin));
+  v8::script_compiler::compile_module(scope, &mut source)
 }
 
 fn new_exercised_instance() -> LiveInstance {
@@ -90,7 +99,7 @@ fn new_exercised_instance() -> LiveInstance {
     let mut source = v8::script_compiler::Source::new(source, Some(&origin));
     let module =
       v8::script_compiler::compile_module(scope, &mut source).unwrap();
-    assert!(module.instantiate_module(scope, reject_dependency).unwrap());
+    assert!(module.instantiate_module(scope, resolve_dependency).unwrap());
     assert!(module.evaluate(scope).is_some());
     assert_eq!(module.get_status(), v8::ModuleStatus::Evaluated);
     (
@@ -172,12 +181,19 @@ fn call_export_batch(
   .unwrap()
 }
 
-fn expected_kernel(iterations: usize) -> f64 {
-  let mut state = 1_u64;
-  for index in 0..iterations as u64 {
-    state = (state * 17 + index) % 1_000_003;
+fn expected_complex(seed: u64) -> f64 {
+  let mut state = seed % 1_000_003;
+  let mut checksum = 0_u64;
+  for round in 0..COMPLEX_ROUNDS as u64 {
+    state = (state * 48_271 + round + 1) % 1_000_003;
+    if state % 2 == 0 {
+      state = (state / 2 + 7_919) % 1_000_003;
+    } else {
+      state = (state * 3 + 1) % 1_000_003;
+    }
+    checksum = (checksum + state * ((round % 17) + 1)) % 1_000_003;
   }
-  state as f64
+  checksum as f64
 }
 
 #[test]
@@ -272,58 +288,84 @@ fn measure_engine_instances() {
 #[test]
 #[ignore = "run through benchmarks/run-engine-comparison.sh"]
 fn measure_engine_speed() {
-  let noop_calls = env_usize("V8X_BENCH_SPEED_NOOP_CALLS", 200_000);
-  let kernel_calls = env_usize("V8X_BENCH_SPEED_KERNEL_CALLS", 20);
-  let kernel_iterations =
-    env_usize("V8X_BENCH_SPEED_KERNEL_ITERATIONS", 500_000);
-  assert!(noop_calls > 0 && kernel_calls > 0 && kernel_iterations > 0);
+  let dynamic_add_calls =
+    env_usize("V8X_BENCH_SPEED_DYNAMIC_ADD_CALLS", 200_000);
+  let constant_add_calls =
+    env_usize("V8X_BENCH_SPEED_CONSTANT_ADD_CALLS", 200_000);
+  let complex_calls = env_usize("V8X_BENCH_SPEED_COMPLEX_CALLS", 20_000);
+  assert!(
+    dynamic_add_calls > 0 && constant_add_calls > 0 && complex_calls > 0
+  );
 
   initialize();
   let mut instance = new_exercised_instance();
 
-  // Warm the API boundary and give V8 enough loop executions to tier up before
-  // either timed region. QuickJS and Wasmtime execute the same warmup calls.
+  // Warm every export and give V8 time to tier up before any timed region.
+  // The constant call is folded during js2wasm's O4 AOT compilation, while the
+  // dynamic add and complex runtime seed remain unavailable to the compiler.
   assert_eq!(
-    call_export_batch(&mut instance, "benchmarkNoop", 41.0, 10_000),
+    call_export_batch(&mut instance, "benchmarkAddDynamic", 41.0, 10_000),
     42.0
   );
-  let warm_iterations = kernel_iterations.min(10_000);
+  assert_eq!(
+    call_export_batch(&mut instance, "benchmarkAddConstant", 0.0, 10_000),
+    3.0
+  );
+  let complex_seed = std::hint::black_box(123_457_u64);
+  let expected_complex = expected_complex(complex_seed);
   assert_eq!(
     call_export_batch(
       &mut instance,
-      "benchmarkKernel",
-      warm_iterations as f64,
+      "benchmarkComplex",
+      complex_seed as f64,
       100,
     ),
-    expected_kernel(warm_iterations),
+    expected_complex,
   );
 
   let started = Instant::now();
-  let noop_result =
-    call_export_batch(&mut instance, "benchmarkNoop", 41.0, noop_calls);
-  let noop_elapsed = started.elapsed();
-  assert_eq!(noop_result, 42.0);
-  println!(
-    "V8X_ENGINE_SPEED engine={ENGINE_NAME} workload=noop calls={noop_calls} result={noop_result:.0} elapsed_ns={} ns_per_call={:.3}",
-    noop_elapsed.as_nanos(),
-    noop_elapsed.as_nanos() as f64 / noop_calls as f64,
-  );
-
-  let expected = expected_kernel(kernel_iterations);
-  let started = Instant::now();
-  let kernel_result = call_export_batch(
+  let dynamic_add_result = call_export_batch(
     &mut instance,
-    "benchmarkKernel",
-    kernel_iterations as f64,
-    kernel_calls,
+    "benchmarkAddDynamic",
+    41.0,
+    dynamic_add_calls,
   );
-  let kernel_elapsed = started.elapsed();
-  assert_eq!(kernel_result, expected);
-  let total_iterations = kernel_calls * kernel_iterations;
+  let dynamic_add_elapsed = started.elapsed();
+  assert_eq!(dynamic_add_result, 42.0);
   println!(
-    "V8X_ENGINE_SPEED engine={ENGINE_NAME} workload=kernel calls={kernel_calls} iterations_per_call={kernel_iterations} total_iterations={total_iterations} result={kernel_result:.0} elapsed_ns={} ns_per_iteration={:.3}",
-    kernel_elapsed.as_nanos(),
-    kernel_elapsed.as_nanos() as f64 / total_iterations as f64,
+    "V8X_ENGINE_SPEED engine={ENGINE_NAME} workload=add_dynamic calls={dynamic_add_calls} result={dynamic_add_result:.0} elapsed_ns={} ns_per_call={:.3}",
+    dynamic_add_elapsed.as_nanos(),
+    dynamic_add_elapsed.as_nanos() as f64 / dynamic_add_calls as f64,
+  );
+
+  let started = Instant::now();
+  let constant_add_result = call_export_batch(
+    &mut instance,
+    "benchmarkAddConstant",
+    0.0,
+    constant_add_calls,
+  );
+  let constant_add_elapsed = started.elapsed();
+  assert_eq!(constant_add_result, 3.0);
+  println!(
+    "V8X_ENGINE_SPEED engine={ENGINE_NAME} workload=add_constant calls={constant_add_calls} result={constant_add_result:.0} elapsed_ns={} ns_per_call={:.3}",
+    constant_add_elapsed.as_nanos(),
+    constant_add_elapsed.as_nanos() as f64 / constant_add_calls as f64,
+  );
+
+  let started = Instant::now();
+  let complex_result = call_export_batch(
+    &mut instance,
+    "benchmarkComplex",
+    complex_seed as f64,
+    complex_calls,
+  );
+  let complex_elapsed = started.elapsed();
+  assert_eq!(complex_result, expected_complex);
+  println!(
+    "V8X_ENGINE_SPEED engine={ENGINE_NAME} workload=complex calls={complex_calls} rounds_per_call={COMPLEX_ROUNDS} result={complex_result:.0} elapsed_ns={} ns_per_call={:.3}",
+    complex_elapsed.as_nanos(),
+    complex_elapsed.as_nanos() as f64 / complex_calls as f64,
   );
 
   keep_alive(&instance);

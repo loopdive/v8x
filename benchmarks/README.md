@@ -1,6 +1,6 @@
 # V8, QuickJS, and js2wasm engine comparison
 
-This benchmark runs the same small ES module on three backends:
+This benchmark runs the same small ES module graph on three backends:
 
 - real V8 through the official `rusty_v8` 149.4.0 crate;
 - QuickJS-ng through v8x's rusty_v8-shaped API; and
@@ -28,21 +28,31 @@ or loads the module, instantiates it, evaluates it, and samples memory after 1,
 The separate warm-speed process initializes one instance, warms every engine,
 then measures:
 
-- 200,000 calls to a trivial exported numeric function, which emphasizes the
-  native host-to-engine call boundary; and
-- 10,000,000 iterations of the same numeric loop, which emphasizes generated
-  or interpreted code execution.
+- 200,000 calls to a runtime-input adaptation of Deno's `add_js` benchmark;
+- 200,000 calls to its original constant-input `addJS(1, 2)` shape, which the
+  js2wasm O4 build evaluates ahead of time; and
+- 20,000 calls to a 512-round input-dependent kernel with arithmetic, modulo,
+  and branching, which cannot be evaluated ahead of time because its seed
+  comes from the host.
 
-All engines must return the same checked results. Speed excludes source/AOT
-compilation and isolate creation. js2wasm artifact generation is a build-time
-step and is also excluded.
+The `add_js` workload comes from
+[`denoland/deno/tests/bench/deno_common.js`](https://github.com/denoland/deno/blob/1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44/tests/bench/deno_common.js#L8-L12).
+Every engine must return the same checked results: 42 for the runtime-input
+add, 3 for the constant add, and 786,699 for the complex kernel. Speed excludes
+source/AOT compilation and isolate creation.
+
+The js2wasm artifact is compiled with optimization level 4. Its compiler first
+pre-evaluates proven closed calls, then runs Binaryen `wasm-opt -O4`. The
+compiler adapter fails if `wasm-opt` is unavailable or rejects the module, so
+the benchmark cannot silently accept an unoptimized artifact. The preserved
+raw optimized Wasm makes the distinction inspectable: the constant export is a
+literal `3`, while the runtime-input add and the complete mixed loop remain.
 
 The boundary path is not identical: V8 uses rusty_v8, QuickJS uses v8x's
 rusty_v8-shaped API, and js2wasm uses a benchmark-only typed Wasmtime export
 because the experimental js2wasm backend does not yet expose module namespace
-functions through the rusty_v8 ABI. The numeric kernel makes the one-time
-export lookup negligible, but these remain engine microbenchmarks rather than
-full Deno application benchmarks.
+functions through the rusty_v8 ABI. These remain engine microbenchmarks rather
+than full Deno application benchmarks.
 
 ## Run
 
@@ -58,18 +68,21 @@ V8X_BENCH_REPEATS=5 \
 benchmarks/run-engine-comparison.sh
 ```
 
-The runner produces a fresh target-specific Wasmtime-precompiled artifact with
-the development-only Cranelift feature, then rebuilds the measured js2wasm
-runtime without Cranelift or the js2wasm compiler. All three engines use
+The runner produces optimized raw Wasm through js2wasm and `wasm-opt -O4`, then
+creates a target-specific Wasmtime-precompiled artifact with the
+development-only Cranelift feature. It rebuilds the measured js2wasm runtime
+without Cranelift, Binaryen, or the js2wasm compiler. All three engines use
 separate Cargo target directories and fresh processes; run order rotates
 between repetitions. The official V8 baseline is pinned by
 `benchmarks/v8-baseline/Cargo.lock`.
 
-Raw output, stripped executables, and a generated Markdown summary go under
+Raw output, the optimized `.wasm`, the precompiled `.cwasm`, stripped
+executables, and a generated Markdown summary go under
 `target/engine-comparison/`. To reuse a previously generated artifact, set
-`V8X_JS2WASM_AOT_MODULE` instead of `V8X_JS2WASM_COMPILER_SCRIPT`. Precompiled
-artifacts are unsafe to load from untrusted sources and must match the Wasmtime
-version, target, and engine configuration used by this checkout.
+`V8X_JS2WASM_AOT_MODULE` and attest its optimization level with
+`V8X_JS2WASM_AOT_OPTIMIZE=4`. Precompiled artifacts are unsafe to load from
+untrusted sources and must match the Wasmtime version, target, and engine
+configuration used by this checkout.
 
 ## Scope
 

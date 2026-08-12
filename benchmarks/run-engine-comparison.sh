@@ -5,10 +5,12 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output_dir="${V8X_BENCH_OUTPUT_DIR:-$repo_root/target/engine-comparison}"
 instances="${V8X_BENCH_INSTANCES:-100}"
 repeats="${V8X_BENCH_REPEATS:-5}"
-noop_calls="${V8X_BENCH_SPEED_NOOP_CALLS:-200000}"
-kernel_calls="${V8X_BENCH_SPEED_KERNEL_CALLS:-20}"
-kernel_iterations="${V8X_BENCH_SPEED_KERNEL_ITERATIONS:-500000}"
+dynamic_add_calls="${V8X_BENCH_SPEED_DYNAMIC_ADD_CALLS:-200000}"
+constant_add_calls="${V8X_BENCH_SPEED_CONSTANT_ADD_CALLS:-200000}"
+complex_calls="${V8X_BENCH_SPEED_COMPLEX_CALLS:-20000}"
+complex_rounds=512
 artifact="${V8X_JS2WASM_AOT_MODULE:-$output_dir/engine-footprint.cwasm}"
+raw_wasm="$output_dir/engine-footprint.wasm"
 raw_log="$output_dir/results.txt"
 
 mkdir -p "$output_dir"
@@ -46,6 +48,10 @@ if [[ -n "${V8X_JS2WASM_AOT_MODULE:-}" ]]; then
     echo "V8X_JS2WASM_AOT_MODULE does not exist: $artifact" >&2
     exit 2
   fi
+  if [[ "${V8X_JS2WASM_AOT_OPTIMIZE:-}" != "4" ]]; then
+    echo "Set V8X_JS2WASM_AOT_OPTIMIZE=4 to confirm the reused artifact was compiled with js2wasm optimize level 4." >&2
+    exit 2
+  fi
 else
   if [[ -z "${V8X_JS2WASM_COMPILER_SCRIPT:-}" ]]; then
     echo "Set V8X_JS2WASM_COMPILER_SCRIPT or provide V8X_JS2WASM_AOT_MODULE." >&2
@@ -54,6 +60,8 @@ else
   echo "Generating the trusted js2wasm/Wasmtime AOT artifact..."
   V8X_BENCH_INSTANCES=1 \
   V8X_BENCH_GENERATE_ONLY=1 \
+  V8X_JS2WASM_OPTIMIZE=4 \
+  V8X_JS2WASM_WASM_OUTPUT="$raw_wasm" \
   V8X_JS2WASM_ARTIFACT_OUTPUT="$artifact" \
   CARGO_TARGET_DIR="$output_dir/target-js2wasm-compiler" \
     cargo test --manifest-path "$repo_root/Cargo.toml" --locked --release \
@@ -99,7 +107,7 @@ js2wasm_combined_bytes="$((js2wasm_runtime_bytes + artifact_bytes))"
 
 : > "$raw_log"
 {
-  echo "V8X_ENGINE_CONFIG instances=$instances repeats=$repeats noop_calls=$noop_calls kernel_calls=$kernel_calls kernel_iterations=$kernel_iterations"
+  echo "V8X_ENGINE_CONFIG instances=$instances repeats=$repeats dynamic_add_calls=$dynamic_add_calls constant_add_calls=$constant_add_calls complex_calls=$complex_calls complex_rounds=$complex_rounds js2wasm_optimize=4"
   echo "V8X_ENGINE_SIZE engine=v8 executable_bytes=$v8_runtime_bytes artifact_bytes=0 combined_bytes=$v8_runtime_bytes"
   echo "V8X_ENGINE_SIZE engine=quickjs executable_bytes=$quickjs_runtime_bytes artifact_bytes=0 combined_bytes=$quickjs_runtime_bytes"
   echo "V8X_ENGINE_SIZE engine=js2wasm executable_bytes=$js2wasm_runtime_bytes artifact_bytes=$artifact_bytes combined_bytes=$js2wasm_combined_bytes"
@@ -122,9 +130,9 @@ run_engine() {
   echo "V8X_ENGINE_RUN engine=$engine repeat=$repeat phase=speed" \
     | tee -a "$raw_log"
   "${command_env[@]}" \
-    "V8X_BENCH_SPEED_NOOP_CALLS=$noop_calls" \
-    "V8X_BENCH_SPEED_KERNEL_CALLS=$kernel_calls" \
-    "V8X_BENCH_SPEED_KERNEL_ITERATIONS=$kernel_iterations" \
+    "V8X_BENCH_SPEED_DYNAMIC_ADD_CALLS=$dynamic_add_calls" \
+    "V8X_BENCH_SPEED_CONSTANT_ADD_CALLS=$constant_add_calls" \
+    "V8X_BENCH_SPEED_COMPLEX_CALLS=$complex_calls" \
     "$binary" --ignored --exact measure_engine_speed --nocapture \
     | tee -a "$raw_log"
 

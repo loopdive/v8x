@@ -419,12 +419,24 @@ fn compile_graph(
     .arg(entry)
     .arg("--output")
     .arg(&wasm_path);
+  if let Some(optimize) = std::env::var_os("V8X_JS2WASM_OPTIMIZE") {
+    compile.arg("--optimize").arg(optimize);
+  }
   if let Some(workdir) = std::env::var_os("V8X_JS2WASM_WORKDIR") {
     compile.current_dir(workdir);
   }
   run(compile, "js2wasm compilation")?;
-  fs::read(&wasm_path)
-    .map_err(|error| format!("read compiled js2wasm artifact: {error}"))
+  let wasm = fs::read(&wasm_path)
+    .map_err(|error| format!("read compiled js2wasm artifact: {error}"))?;
+  if let Some(output) = std::env::var_os("V8X_JS2WASM_WASM_OUTPUT") {
+    fs::write(&output, &wasm).map_err(|error| {
+      format!(
+        "write raw js2wasm module {}: {error}",
+        Path::new(&output).display()
+      )
+    })?;
+  }
+  Ok(wasm)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]

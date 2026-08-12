@@ -65,7 +65,7 @@ const speeds = Object.fromEntries(
   engines.map((engine) => [
     engine,
     Object.fromEntries(
-      ["noop", "kernel"].map((workload) => [
+      ["add_dynamic", "add_constant", "complex"].map((workload) => [
         workload,
         records(
           "V8X_ENGINE_SPEED ",
@@ -83,7 +83,7 @@ for (const engine of engines) {
       `expected ${repeats} footprint samples for ${engine}, got ${footprints[engine].length}`,
     );
   }
-  for (const workload of ["noop", "kernel"]) {
+  for (const workload of ["add_dynamic", "add_constant", "complex"]) {
     if (speeds[engine][workload].length !== repeats) {
       throw new Error(
         `expected ${repeats} ${workload} samples for ${engine}, got ${speeds[engine][workload].length}`,
@@ -143,6 +143,7 @@ const footprintMetrics = [
 ];
 
 function formatBytes(value) {
+  if (value === 0) return "0 B";
   const kib = 1024;
   const mib = kib * 1024;
   const gib = mib * 1024;
@@ -156,7 +157,15 @@ function formatMicroseconds(value) {
   return `${value.toFixed(1)} µs`;
 }
 
+function formatNanosecondsPerCall(value) {
+  return `${value.toLocaleString("en-US", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })} ns/call`;
+}
+
 function relativeFactor(value, baseline, comparison) {
+  if (value === 0) return "no measurable increase";
   if (comparison === "time") {
     return value < baseline
       ? `${(baseline / value).toFixed(1)}× faster`
@@ -195,12 +204,15 @@ for (const metric of footprintMetrics) {
   );
 }
 
-const v8Noop = speedValue("v8", "noop", "ns_per_call");
-const quickjsNoop = speedValue("quickjs", "noop", "ns_per_call");
-const js2wasmNoop = speedValue("js2wasm", "noop", "ns_per_call");
-const v8Kernel = speedValue("v8", "kernel", "ns_per_iteration");
-const quickjsKernel = speedValue("quickjs", "kernel", "ns_per_iteration");
-const js2wasmKernel = speedValue("js2wasm", "kernel", "ns_per_iteration");
+const v8DynamicAdd = speedValue("v8", "add_dynamic", "ns_per_call");
+const quickjsDynamicAdd = speedValue("quickjs", "add_dynamic", "ns_per_call");
+const js2wasmDynamicAdd = speedValue("js2wasm", "add_dynamic", "ns_per_call");
+const v8ConstantAdd = speedValue("v8", "add_constant", "ns_per_call");
+const quickjsConstantAdd = speedValue("quickjs", "add_constant", "ns_per_call");
+const js2wasmConstantAdd = speedValue("js2wasm", "add_constant", "ns_per_call");
+const v8Complex = speedValue("v8", "complex", "ns_per_call");
+const quickjsComplex = speedValue("quickjs", "complex", "ns_per_call");
+const js2wasmComplex = speedValue("js2wasm", "complex", "ns_per_call");
 
 output.push(
   "",
@@ -210,12 +222,15 @@ output.push(
   "",
   "| Warm workload | V8 | QuickJS | js2wasm |",
   "| --- | ---: | ---: | ---: |",
-  `| Export-call boundary (${Number(config.noop_calls).toLocaleString("en-US")} calls) | ${v8Noop.toFixed(1)} ns/call | ${quickjsNoop.toFixed(1)} ns/call (${relativeFactor(quickjsNoop, v8Noop, "time")}) | ${js2wasmNoop.toFixed(1)} ns/call (${relativeFactor(js2wasmNoop, v8Noop, "time")}) |`,
-  `| Numeric kernel (${(Number(config.kernel_calls) * Number(config.kernel_iterations)).toLocaleString("en-US")} loop iterations) | ${v8Kernel.toFixed(1)} ns/iteration | ${quickjsKernel.toFixed(1)} ns/iteration (${relativeFactor(quickjsKernel, v8Kernel, "time")}) | ${js2wasmKernel.toFixed(1)} ns/iteration (${relativeFactor(js2wasmKernel, v8Kernel, "time")}) |`,
+  `| Deno \`add_js\`, runtime input (${Number(config.dynamic_add_calls).toLocaleString("en-US")} calls) | ${formatNanosecondsPerCall(v8DynamicAdd)} | ${formatNanosecondsPerCall(quickjsDynamicAdd)} (${relativeFactor(quickjsDynamicAdd, v8DynamicAdd, "time")}) | ${formatNanosecondsPerCall(js2wasmDynamicAdd)} (${relativeFactor(js2wasmDynamicAdd, v8DynamicAdd, "time")}) |`,
+  `| Deno \`add_js\`, constant inputs (${Number(config.constant_add_calls).toLocaleString("en-US")} calls) | ${formatNanosecondsPerCall(v8ConstantAdd)} | ${formatNanosecondsPerCall(quickjsConstantAdd)} (${relativeFactor(quickjsConstantAdd, v8ConstantAdd, "time")}) | ${formatNanosecondsPerCall(js2wasmConstantAdd)} (${relativeFactor(js2wasmConstantAdd, v8ConstantAdd, "time")}) |`,
+  `| Input-dependent mixed kernel (${Number(config.complex_calls).toLocaleString("en-US")} calls × ${Number(config.complex_rounds).toLocaleString("en-US")} rounds) | ${formatNanosecondsPerCall(v8Complex)} | ${formatNanosecondsPerCall(quickjsComplex)} (${relativeFactor(quickjsComplex, v8Complex, "time")}) | ${formatNanosecondsPerCall(js2wasmComplex)} (${relativeFactor(js2wasmComplex, v8Complex, "time")}) |`,
   "",
-  "The call-boundary row uses each backend's native host API: rusty_v8 for V8, the rusty_v8-shaped v8x API for QuickJS, and a typed Wasmtime export for js2wasm. The numeric-kernel row makes that one-call setup negligible but is still a microbenchmark, not Deno application throughput.",
+  "The two `add_js` rows adapt Deno's own JavaScript-add benchmark. The runtime-input row keeps the operand dynamic for all engines. In the constant-input row, js2wasm O4 evaluates `addJS(1, 2)` at build time; V8 and QuickJS receive the original JavaScript. The mixed kernel takes its seed from the host, so js2wasm cannot pre-evaluate it.",
   "",
-  "Virtual address space is reserved address range, not committed physical memory. This benchmark module has no linear memory; the js2wasm row is Wasmtime's default WasmGC heap reservation rather than guest allocation.",
+  "Every row uses each backend's native host API: rusty_v8 for V8, the rusty_v8-shaped v8x API for QuickJS, and a typed Wasmtime export for js2wasm. These are engine microbenchmarks, not Deno application throughput.",
+  "",
+  "Virtual address space is reserved address range, not committed physical memory. After js2wasm O4 and `wasm-opt -O4`, this numeric module has no linear memory or WasmGC aggregate types; the median js2wasm virtual-address slope therefore has no measurable increase.",
 );
 
 process.stdout.write(`${output.join("\n")}\n`);
