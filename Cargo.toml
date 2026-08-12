@@ -75,6 +75,8 @@ engine_js2wasm = ["dep:wasmtime"]
 # the v8x process. Production builds use `engine_js2wasm` alone and therefore
 # do not link Cranelift or any other Wasm compiler.
 js2wasm_runtime_compile = ["engine_js2wasm", "wasmtime/cranelift"]
+# Keeps the ignored process-footprint target out of ordinary backend test runs.
+engine_footprint_bench = []
 # Short aliases (README-facing).
 jsc = ["engine_jsc", "vendor_jsc"]
 # System JavaScriptCore.framework (tiny binary, no vendored WebKit). Apple's
@@ -142,6 +144,11 @@ path = "vendor/rusty_v8/tests/test_api.rs"
 name = "js2wasm_spike"
 path = "tests/js2wasm_spike.rs"
 required-features = ["engine_js2wasm"]
+
+[[test]]
+name = "engine_footprint"
+path = "benchmarks/engine_footprint.rs"
+required-features = ["engine_footprint_bench"]
 
 [[test]]
 name = "rv8_test_simdutf"
