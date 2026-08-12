@@ -110,6 +110,12 @@ mod script;
 #[cfg(feature = "engine_jsc")]
 mod jsc;
 
+#[cfg(any(feature = "js2wasm_spike", feature = "engine_js2wasm"))]
+mod js2wasm_spike;
+
+#[cfg(feature = "engine_js2wasm")]
+mod js2wasm;
+
 #[cfg(feature = "engine_quickjs")]
 mod quickjs;
 
@@ -287,6 +293,8 @@ pub const TYPED_ARRAY_MAX_SIZE_IN_HEAP: usize =
 /// The engine backend this build of the shim runs on.
 pub const V8X_ENGINE: &str = if cfg!(feature = "engine_quickjs") {
   "quickjs"
+} else if cfg!(feature = "engine_js2wasm") {
+  "js2wasm"
 } else if cfg!(feature = "vendor_jsc") {
   "jsc"
 } else {
