@@ -304,6 +304,27 @@ impl DenoRuntime {
     }
     Ok(())
   }
+
+  #[cfg(feature = "engine_footprint_bench")]
+  pub(crate) fn run_f64_export_batch_for_benchmark(
+    &mut self,
+    export: &str,
+    argument: f64,
+    calls: usize,
+  ) -> Result<f64, String> {
+    let function = self
+      .instance
+      .get_typed_func::<f64, f64>(&mut self.store, export)
+      .map_err(|error| format!("resolve js2wasm export {export}: {error}"))?;
+    let mut result = 0.0;
+    for _ in 0..calls {
+      result = function
+        .call(&mut self.store, argument)
+        .map_err(|error| format!("call js2wasm export {export}: {error}"))?;
+      std::hint::black_box(result);
+    }
+    Ok(result)
+  }
 }
 
 pub(crate) fn compile_and_instantiate(

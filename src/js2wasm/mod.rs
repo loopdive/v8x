@@ -1676,6 +1676,22 @@ fn mark_evaluated(module: *const Module, seen: &mut HashSet<usize>) {
   }
 }
 
+#[doc(hidden)]
+#[cfg(feature = "engine_footprint_bench")]
+pub fn js2wasm_run_f64_export_batch_for_benchmark(
+  module: &Module,
+  export: &str,
+  argument: f64,
+  calls: usize,
+) -> Result<f64, String> {
+  let state = unsafe { module_state(module) }
+    .ok_or_else(|| "v8x/js2wasm: invalid module handle".to_string())?;
+  let runtime = state.runtime.as_mut().ok_or_else(|| {
+    "v8x/js2wasm: module must be evaluated before calling an export".to_string()
+  })?;
+  runtime.run_f64_export_batch_for_benchmark(export, argument, calls)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Module__Evaluate(
   module: *const Module,

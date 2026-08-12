@@ -120,6 +120,13 @@ pub use js2wasm_spike::{Js2WasmRuntimeStats, js2wasm_runtime_stats};
 #[cfg(feature = "engine_js2wasm")]
 mod js2wasm;
 
+#[cfg(all(
+  feature = "engine_js2wasm",
+  feature = "engine_footprint_bench"
+))]
+#[doc(hidden)]
+pub use js2wasm::js2wasm_run_f64_export_batch_for_benchmark;
+
 #[cfg(feature = "engine_quickjs")]
 mod quickjs;
 

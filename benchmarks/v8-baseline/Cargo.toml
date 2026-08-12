@@ -1,0 +1,19 @@
+[package]
+name = "v8-engine-benchmark"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+# Declared so the shared source can select the v8x js2wasm-only call path
+# without producing an unexpected-cfg warning in this standalone crate.
+engine_js2wasm = []
+
+[dependencies]
+v8 = "=149.4.0"
+
+[[test]]
+name = "engine_footprint"
+path = "engine_footprint.rs"
+
+[workspace]
