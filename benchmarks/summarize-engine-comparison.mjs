@@ -97,6 +97,7 @@ const footprintMetrics = [
     label: "Combined linked payload",
     value: (engine) => numeric(sizes[engine].combined_bytes, `${engine} payload`),
     format: formatBytes,
+    comparison: "size",
   },
   {
     label: "One live instance RSS (shared init included)",
@@ -107,6 +108,7 @@ const footprintMetrics = [
         `${engine} one-instance RSS`,
       ),
     format: formatBytes,
+    comparison: "size",
   },
   {
     label: "Steady RSS per additional instance",
@@ -116,6 +118,7 @@ const footprintMetrics = [
         `${engine} steady RSS`,
       ),
     format: formatBytes,
+    comparison: "size",
   },
   {
     label: "Steady virtual address space per instance",
@@ -125,6 +128,7 @@ const footprintMetrics = [
         `${engine} steady virtual address space`,
       ),
     format: formatBytes,
+    comparison: "size",
   },
   {
     label: "Steady module/isolate creation time",
@@ -133,7 +137,8 @@ const footprintMetrics = [
         footprints[engine].map((sample) => sample.steady_creation_us_per_instance),
         `${engine} steady creation time`,
       ),
-    format: (value) => `${value.toLocaleString("en-US")} µs`,
+    format: formatMicroseconds,
+    comparison: "time",
   },
 ];
 
@@ -141,13 +146,25 @@ function formatBytes(value) {
   const kib = 1024;
   const mib = kib * 1024;
   const gib = mib * 1024;
-  if (value >= gib) return `${(value / gib).toFixed(3)} GiB`;
-  if (value >= mib) return `${(value / mib).toFixed(3)} MiB`;
+  if (value >= gib) return `${(value / gib).toFixed(1)} GiB`;
+  if (value >= mib) return `${(value / mib).toFixed(1)} MiB`;
   return `${(value / kib).toFixed(1)} KiB`;
 }
 
-function ratio(value) {
-  return `${value.toFixed(3)}×`;
+function formatMicroseconds(value) {
+  if (value >= 1000) return `${(value / 1000).toFixed(1)} ms`;
+  return `${value.toFixed(1)} µs`;
+}
+
+function relativeFactor(value, baseline, comparison) {
+  if (comparison === "time") {
+    return value < baseline
+      ? `${(baseline / value).toFixed(1)}× faster`
+      : `${(value / baseline).toFixed(1)}× slower`;
+  }
+  return value < baseline
+    ? `${(baseline / value).toFixed(1)}× smaller`
+    : `${(value / baseline).toFixed(1)}× larger`;
 }
 
 function speedValue(engine, workload, field) {
@@ -164,17 +181,17 @@ output.push(
   "",
   "## Footprint and startup",
   "",
-  "Lower is better. Relative columns divide each absolute result by V8, so V8 is 1.000×.",
+  "Each QuickJS and js2wasm cell shows its factor relative to V8 in parentheses.",
   "",
-  "| Metric | V8 | QuickJS | QuickJS / V8 | js2wasm | js2wasm / V8 |",
-  "| --- | ---: | ---: | ---: | ---: | ---: |",
+  "| Metric | V8 | QuickJS | js2wasm |",
+  "| --- | ---: | ---: | ---: |",
 );
 for (const metric of footprintMetrics) {
   const v8 = metric.value("v8");
   const quickjs = metric.value("quickjs");
   const js2wasm = metric.value("js2wasm");
   output.push(
-    `| ${metric.label} | ${metric.format(v8)} | ${metric.format(quickjs)} | ${ratio(quickjs / v8)} | ${metric.format(js2wasm)} | ${ratio(js2wasm / v8)} |`,
+    `| ${metric.label} | ${metric.format(v8)} | ${metric.format(quickjs)} (${relativeFactor(quickjs, v8, metric.comparison)}) | ${metric.format(js2wasm)} (${relativeFactor(js2wasm, v8, metric.comparison)}) |`,
   );
 }
 
@@ -189,16 +206,16 @@ output.push(
   "",
   "## Warm execution speed",
   "",
-  "Absolute columns are elapsed time, so lower is better. Relative columns report throughput versus V8, so higher is faster and V8 is 1.000×.",
+  "Absolute values are elapsed time. Parentheses show the speed factor relative to V8.",
   "",
-  "| Warm workload | V8 | QuickJS | QuickJS speed vs V8 | js2wasm | js2wasm speed vs V8 |",
-  "| --- | ---: | ---: | ---: | ---: | ---: |",
-  `| Export-call boundary (${Number(config.noop_calls).toLocaleString("en-US")} calls) | ${v8Noop.toFixed(3)} ns/call | ${quickjsNoop.toFixed(3)} ns/call | ${ratio(v8Noop / quickjsNoop)} | ${js2wasmNoop.toFixed(3)} ns/call | ${ratio(v8Noop / js2wasmNoop)} |`,
-  `| Numeric kernel (${(Number(config.kernel_calls) * Number(config.kernel_iterations)).toLocaleString("en-US")} loop iterations) | ${v8Kernel.toFixed(3)} ns/iteration | ${quickjsKernel.toFixed(3)} ns/iteration | ${ratio(v8Kernel / quickjsKernel)} | ${js2wasmKernel.toFixed(3)} ns/iteration | ${ratio(v8Kernel / js2wasmKernel)} |`,
+  "| Warm workload | V8 | QuickJS | js2wasm |",
+  "| --- | ---: | ---: | ---: |",
+  `| Export-call boundary (${Number(config.noop_calls).toLocaleString("en-US")} calls) | ${v8Noop.toFixed(1)} ns/call | ${quickjsNoop.toFixed(1)} ns/call (${relativeFactor(quickjsNoop, v8Noop, "time")}) | ${js2wasmNoop.toFixed(1)} ns/call (${relativeFactor(js2wasmNoop, v8Noop, "time")}) |`,
+  `| Numeric kernel (${(Number(config.kernel_calls) * Number(config.kernel_iterations)).toLocaleString("en-US")} loop iterations) | ${v8Kernel.toFixed(1)} ns/iteration | ${quickjsKernel.toFixed(1)} ns/iteration (${relativeFactor(quickjsKernel, v8Kernel, "time")}) | ${js2wasmKernel.toFixed(1)} ns/iteration (${relativeFactor(js2wasmKernel, v8Kernel, "time")}) |`,
   "",
   "The call-boundary row uses each backend's native host API: rusty_v8 for V8, the rusty_v8-shaped v8x API for QuickJS, and a typed Wasmtime export for js2wasm. The numeric-kernel row makes that one-call setup negligible but is still a microbenchmark, not Deno application throughput.",
   "",
-  "Virtual address space is reserved address range, not committed physical memory. Wasmtime's large reservation therefore does not mean equivalent RSS, but it can limit instance density.",
+  "Virtual address space is reserved address range, not committed physical memory. This benchmark module has no linear memory; the js2wasm row is Wasmtime's default WasmGC heap reservation rather than guest allocation.",
 );
 
 process.stdout.write(`${output.join("\n")}\n`);

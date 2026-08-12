@@ -7,9 +7,11 @@ This benchmark runs the same small ES module on three backends:
 - typed TypeScript compiled ahead of time by js2wasm, then loaded by the
   compiler-free v8x/Wasmtime runtime.
 
-Every reported median includes both the absolute value and a value relative to
-V8. Footprint ratios divide the engine result by V8, so lower is smaller. Speed
-ratios divide V8's elapsed time by the engine result, so higher is faster.
+Every reported median shows the absolute V8 result. The QuickJS and js2wasm
+cells put their factor relative to V8 in parentheses after the absolute value,
+with the direction stated as smaller/larger or faster/slower. Displayed
+measurements and factors are rounded to one decimal place; the raw measurements
+used to compute them retain their full precision.
 
 ## What it measures
 
