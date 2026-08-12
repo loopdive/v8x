@@ -108,7 +108,7 @@ paste = "1.0"
 temporal_capi = { version = "0.2.3", features = ["zoneinfo64"] }
 temporal_rs = { version = "0.2.3", default-features = false }
 timezone_provider = { version = "0.2.3", features = ["zoneinfo64"] }
-wasmtime = { version = "=45.0.3", optional = true, default-features = false, features = ["cranelift", "gc", "gc-drc", "runtime", "std"] }
+wasmtime = { version = "=47.0.3", optional = true, default-features = false, features = ["cranelift", "gc", "gc-drc", "runtime", "std"] }
 
 [build-dependencies]
 cc = "1.0"
