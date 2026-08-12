@@ -64,18 +64,7 @@ fn resolve_dependency<'s>(
   v8::script_compiler::compile_module(scope, &mut source)
 }
 
-#[test]
-fn evaluates_raw_typescript_graph_through_wasmtime() {
-  initialize();
-  if cfg!(feature = "engine_js2wasm") {
-    assert_eq!(v8::V8X_ENGINE, "js2wasm");
-  }
-  assert!(
-    std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT").is_some()
-      || std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some(),
-    "set V8X_JS2WASM_COMPILER_SCRIPT to compile-graph.ts or V8X_JS2WASM_AOT_MODULE to a precompiled artifact"
-  );
-
+fn evaluate_graph_once() {
   let isolate = &mut v8::Isolate::new(Default::default());
   v8::scope!(let scope, isolate);
   let context = v8::Context::new(scope, Default::default());
@@ -151,4 +140,26 @@ fn evaluates_raw_typescript_graph_through_wasmtime() {
 
   assert!(module.evaluate(scope).is_some());
   assert_eq!(module.get_status(), v8::ModuleStatus::Evaluated);
+}
+
+#[test]
+fn evaluates_raw_typescript_graph_through_wasmtime() {
+  initialize();
+  assert_eq!(v8::V8X_ENGINE, "js2wasm");
+  assert!(
+    std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT").is_some()
+      || std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some(),
+    "set V8X_JS2WASM_COMPILER_SCRIPT to compile-graph.ts or V8X_JS2WASM_AOT_MODULE to a trusted Wasmtime-precompiled artifact"
+  );
+
+  let before = v8::js2wasm_runtime_stats().unwrap();
+  evaluate_graph_once();
+
+  if std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some() {
+    evaluate_graph_once();
+    let after = v8::js2wasm_runtime_stats().unwrap();
+    assert_eq!(after.module_loads - before.module_loads, 1);
+    assert_eq!(after.cached_modules - before.cached_modules, 1);
+    assert_eq!(after.instantiations - before.instantiations, 2);
+  }
 }

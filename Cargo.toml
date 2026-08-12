@@ -71,6 +71,10 @@ engine_quickjs = []
 # Engine-free, ahead-of-time module backend. This first vertical slice owns
 # handles in Rust and evaluates linked TypeScript graphs through js2wasm.
 engine_js2wasm = ["dep:wasmtime"]
+# Development-only bridge that invokes js2wasm and precompiles its raw Wasm in
+# the v8x process. Production builds use `engine_js2wasm` alone and therefore
+# do not link Cranelift or any other Wasm compiler.
+js2wasm_runtime_compile = ["engine_js2wasm", "wasmtime/cranelift"]
 # Short aliases (README-facing).
 jsc = ["engine_jsc", "vendor_jsc"]
 # System JavaScriptCore.framework (tiny binary, no vendored WebKit). Apple's
@@ -90,8 +94,8 @@ link_quickjs = []
 # Build JavaScriptCore from the vendored WebKit (JSCOnly port) and link that
 # instead of the system framework. Same C API, so jsc_sys.rs is unchanged.
 vendor_jsc = []
-# Compatibility alias for the initial spike name.
-js2wasm_spike = ["engine_js2wasm"]
+# Compatibility alias for the initial source-compiling spike name.
+js2wasm_spike = ["js2wasm_runtime_compile"]
 
 # v8-crate feature flags Deno toggles; inert here.
 use_custom_libcxx = []
@@ -108,7 +112,7 @@ paste = "1.0"
 temporal_capi = { version = "0.2.3", features = ["zoneinfo64"] }
 temporal_rs = { version = "0.2.3", default-features = false }
 timezone_provider = { version = "0.2.3", features = ["zoneinfo64"] }
-wasmtime = { version = "=47.0.3", optional = true, default-features = false, features = ["cranelift", "gc", "gc-drc", "runtime", "std"] }
+wasmtime = { version = "=47.0.3", optional = true, default-features = false, features = ["gc", "gc-drc", "runtime", "std"] }
 
 [build-dependencies]
 cc = "1.0"
@@ -137,7 +141,7 @@ path = "vendor/rusty_v8/tests/test_api.rs"
 [[test]]
 name = "js2wasm_spike"
 path = "tests/js2wasm_spike.rs"
-required-features = ["js2wasm_spike"]
+required-features = ["engine_js2wasm"]
 
 [[test]]
 name = "rv8_test_simdutf"

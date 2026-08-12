@@ -1,20 +1,33 @@
 //! Experimental js2wasm module backend.
 //!
-//! js2wasm remains a build-time compiler. At runtime v8x embeds Wasmtime,
-//! instantiates the resulting WasmGC module once, and keeps that instance alive
-//! with the owning V8 module handle. The first Deno-shaped host seam is
-//! `Deno.cwd()`: the compiled TypeScript wrapper reconstructs its string from
-//! two primitive UTF-16 imports, avoiding a JavaScript-host `externref` ABI.
+//! js2wasm remains a build-time compiler. At runtime v8x embeds compiler-free
+//! Wasmtime, shares one engine plus each precompiled module across isolates,
+//! and keeps a private store/instance alive with each owning V8 module handle.
+//! The first Deno-shaped host seam is `Deno.cwd()`: the compiled TypeScript
+//! wrapper reconstructs its string from two direct UTF-16 imports, avoiding a
+//! JavaScript-host `externref` ABI or a WASI/component boundary.
 
+use std::collections::HashMap;
+#[cfg(feature = "js2wasm_runtime_compile")]
 use std::collections::HashSet;
+#[cfg(feature = "js2wasm_runtime_compile")]
 use std::fs;
+#[cfg(feature = "js2wasm_runtime_compile")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "js2wasm_runtime_compile")]
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "js2wasm_runtime_compile")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "js2wasm_runtime_compile")]
 use std::time::{SystemTime, UNIX_EPOCH};
-use wasmtime::{Caller, Config, Engine, Instance, Linker, Module, Store};
+use wasmtime::{
+  Caller, Config, Engine, Instance, InstancePre, Linker, Module, Store,
+};
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 const CWD_LENGTH_IMPORT: &str = "__v8x_op_cwd_utf16_length";
@@ -23,6 +36,7 @@ const DENO_IMPORT_MODULE: &str = "v8x:deno";
 const CWD_LENGTH_PROBE: &str = "__v8x_probe_cwd_utf16_length";
 const CWD_CHECKSUM_PROBE: &str = "__v8x_probe_cwd_utf16_checksum";
 
+#[cfg_attr(not(feature = "js2wasm_runtime_compile"), allow(dead_code))]
 pub(crate) struct SourceModule {
   pub(crate) specifier: String,
   pub(crate) source: String,
@@ -33,14 +47,34 @@ struct DenoHostState {
   cwd_op_calls: u64,
 }
 
-/// One persistent Wasmtime store and instance owned by a v8x module handle.
-pub(crate) struct DenoRuntime {
-  store: Store<DenoHostState>,
-  instance: Instance,
+#[derive(Hash, PartialEq, Eq)]
+enum ModuleCacheKey {
+  TrustedFile(PathBuf),
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  DevelopmentBytes(Vec<u8>),
 }
 
-impl DenoRuntime {
-  fn instantiate(binary: &[u8], cwd: PathBuf) -> Result<Self, String> {
+struct SharedDenoRuntime {
+  engine: Engine,
+  linker: Linker<DenoHostState>,
+  modules: Mutex<HashMap<ModuleCacheKey, InstancePre<DenoHostState>>>,
+  module_loads: AtomicUsize,
+  instantiations: AtomicUsize,
+}
+
+static SHARED_DENO_RUNTIME: OnceLock<Result<SharedDenoRuntime, String>> =
+  OnceLock::new();
+
+/// Diagnostic counters exposed only to verify the experimental backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Js2WasmRuntimeStats {
+  pub cached_modules: usize,
+  pub module_loads: usize,
+  pub instantiations: usize,
+}
+
+impl SharedDenoRuntime {
+  fn new() -> Result<Self, String> {
     let mut config = Config::new();
     config
       .wasm_function_references(true)
@@ -49,14 +83,6 @@ impl DenoRuntime {
       .wasm_exceptions(true);
     let engine = Engine::new(&config)
       .map_err(|error| format!("configure embedded Wasmtime: {error}"))?;
-    let module = Module::new(&engine, binary).map_err(|error| {
-      format!("compile js2wasm artifact in Wasmtime: {error:#}")
-    })?;
-    if std::env::var_os("V8X_JS2WASM_TRACE_IMPORTS").is_some() {
-      for import in module.imports() {
-        eprintln!("v8x/js2wasm import {}::{}", import.module(), import.name());
-      }
-    }
     let mut linker = Linker::new(&engine);
     linker
       .func_wrap(
@@ -83,18 +109,148 @@ impl DenoRuntime {
         },
       )
       .map_err(|error| format!("bind {CWD_CODE_UNIT_IMPORT}: {error}"))?;
+    Ok(Self {
+      engine,
+      linker,
+      modules: Mutex::new(HashMap::new()),
+      module_loads: AtomicUsize::new(0),
+      instantiations: AtomicUsize::new(0),
+    })
+  }
 
+  fn precompiled_file(
+    &self,
+    artifact: &Path,
+  ) -> Result<InstancePre<DenoHostState>, String> {
+    let artifact = artifact.canonicalize().map_err(|error| {
+      format!(
+        "resolve precompiled js2wasm artifact {}: {error}",
+        artifact.display()
+      )
+    })?;
+    let key = ModuleCacheKey::TrustedFile(artifact.clone());
+    let mut modules = self
+      .modules
+      .lock()
+      .map_err(|_| "lock shared js2wasm module cache".to_string())?;
+    if let Some(module) = modules.get(&key) {
+      return Ok(module.clone());
+    }
+
+    // Deployment artifacts are generated by the trusted build pipeline for
+    // this exact Wasmtime version/configuration and remain immutable while
+    // mapped. Never use this path for user-supplied files.
+    let module = unsafe { Module::deserialize_file(&self.engine, &artifact) }
+      .map_err(|error| {
+      format!(
+        "load trusted precompiled js2wasm artifact {}: {error:#}",
+        artifact.display()
+      )
+    })?;
+    self.trace_imports(&module);
+    let instance_pre = self
+      .linker
+      .instantiate_pre(&module)
+      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))?;
+    modules.insert(key, instance_pre.clone());
+    self.module_loads.fetch_add(1, Ordering::Relaxed);
+    Ok(instance_pre)
+  }
+
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  fn precompile(&self, wasm: &[u8]) -> Result<Vec<u8>, String> {
+    self
+      .engine
+      .precompile_module(wasm)
+      .map_err(|error| format!("precompile js2wasm output: {error:#}"))
+  }
+
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  fn development_bytes(
+    &self,
+    artifact: &[u8],
+  ) -> Result<InstancePre<DenoHostState>, String> {
+    let key = ModuleCacheKey::DevelopmentBytes(artifact.to_vec());
+    let mut modules = self
+      .modules
+      .lock()
+      .map_err(|_| "lock shared js2wasm module cache".to_string())?;
+    if let Some(module) = modules.get(&key) {
+      return Ok(module.clone());
+    }
+    // These bytes were created immediately above by this process's trusted
+    // development compiler using the same Engine configuration.
+    let module = unsafe { Module::deserialize(&self.engine, artifact) }
+      .map_err(|error| {
+        format!("load development js2wasm artifact: {error:#}")
+      })?;
+    self.trace_imports(&module);
+    let instance_pre = self
+      .linker
+      .instantiate_pre(&module)
+      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))?;
+    modules.insert(key, instance_pre.clone());
+    self.module_loads.fetch_add(1, Ordering::Relaxed);
+    Ok(instance_pre)
+  }
+
+  fn trace_imports(&self, module: &Module) {
+    if std::env::var_os("V8X_JS2WASM_TRACE_IMPORTS").is_some() {
+      for import in module.imports() {
+        eprintln!("v8x/js2wasm import {}::{}", import.module(), import.name());
+      }
+    }
+  }
+
+  fn stats(&self) -> Result<Js2WasmRuntimeStats, String> {
+    let modules = self.modules.lock().map_err(|_| {
+      "lock shared js2wasm module cache for diagnostics".to_string()
+    })?;
+    Ok(Js2WasmRuntimeStats {
+      cached_modules: modules.len(),
+      module_loads: self.module_loads.load(Ordering::Relaxed),
+      instantiations: self.instantiations.load(Ordering::Relaxed),
+    })
+  }
+}
+
+fn shared_runtime() -> Result<&'static SharedDenoRuntime, String> {
+  SHARED_DENO_RUNTIME
+    .get_or_init(SharedDenoRuntime::new)
+    .as_ref()
+    .map_err(Clone::clone)
+}
+
+/// Returns counters for structural sharing tests of the experimental backend.
+#[doc(hidden)]
+pub fn js2wasm_runtime_stats() -> Result<Js2WasmRuntimeStats, String> {
+  shared_runtime()?.stats()
+}
+
+/// One private Wasmtime store and instance owned by a v8x module handle.
+pub(crate) struct DenoRuntime {
+  store: Store<DenoHostState>,
+  instance: Instance,
+}
+
+impl DenoRuntime {
+  fn instantiate(
+    shared: &SharedDenoRuntime,
+    instance_pre: &InstancePre<DenoHostState>,
+    cwd: PathBuf,
+  ) -> Result<Self, String> {
     let cwd = cwd.to_string_lossy().encode_utf16().collect();
     let mut store = Store::new(
-      &engine,
+      &shared.engine,
       DenoHostState {
         cwd,
         cwd_op_calls: 0,
       },
     );
-    let instance = linker
-      .instantiate(&mut store, &module)
+    let instance = instance_pre
+      .instantiate(&mut store)
       .map_err(|error| format!("instantiate js2wasm artifact: {error}"))?;
+    shared.instantiations.fetch_add(1, Ordering::Relaxed);
     let mut runtime = Self { store, instance };
     runtime.verify_cwd_probe()?;
     Ok(runtime)
@@ -139,10 +295,12 @@ impl DenoRuntime {
         self.store.data().cwd_op_calls,
       ));
     }
-    if self.store.data().cwd_op_calls == 0 {
-      return Err(
-        "Deno.cwd() probe did not execute its typed host imports".to_string(),
-      );
+    let expected_calls = 2 * (self.store.data().cwd.len() as u64 + 1);
+    if self.store.data().cwd_op_calls != expected_calls {
+      return Err(format!(
+        "Deno.cwd() probe made {} typed host calls, expected {expected_calls} for a fresh instance",
+        self.store.data().cwd_op_calls,
+      ));
     }
     Ok(())
   }
@@ -155,22 +313,41 @@ pub(crate) fn compile_and_instantiate(
   if modules.is_empty() {
     return Err("js2wasm module graph is empty".to_string());
   }
-  let binary =
-    if let Some(artifact) = std::env::var_os("V8X_JS2WASM_AOT_MODULE") {
-      fs::read(&artifact).map_err(|error| {
-        format!(
-          "read ahead-of-time js2wasm artifact {}: {error}",
-          Path::new(&artifact).display()
-        )
-      })?
-    } else {
-      compile_graph(entry, modules)?
-    };
+  let shared = shared_runtime()?;
+  let instance_pre = if let Some(artifact) =
+    std::env::var_os("V8X_JS2WASM_AOT_MODULE")
+  {
+    shared.precompiled_file(Path::new(&artifact))?
+  } else {
+    #[cfg(feature = "js2wasm_runtime_compile")]
+    {
+      let wasm = compile_graph(entry, modules)?;
+      let artifact = shared.precompile(&wasm)?;
+      if let Some(output) = std::env::var_os("V8X_JS2WASM_ARTIFACT_OUTPUT") {
+        fs::write(&output, &artifact).map_err(|error| {
+          format!(
+            "write precompiled js2wasm artifact {}: {error}",
+            Path::new(&output).display()
+          )
+        })?;
+      }
+      shared.development_bytes(&artifact)?
+    }
+    #[cfg(not(feature = "js2wasm_runtime_compile"))]
+    {
+      let _ = (entry, modules);
+      return Err(
+          "compiler-free engine_js2wasm builds require V8X_JS2WASM_AOT_MODULE to point to a trusted Wasmtime-precompiled artifact"
+            .to_string(),
+        );
+    }
+  };
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve Deno.cwd() host value: {error}"))?;
-  DenoRuntime::instantiate(&binary, cwd)
+  DenoRuntime::instantiate(shared, &instance_pre, cwd)
 }
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn compile_graph(
   entry: &str,
   modules: &[SourceModule],
@@ -225,19 +402,11 @@ fn compile_graph(
     compile.current_dir(workdir);
   }
   run(compile, "js2wasm compilation")?;
-  let binary = fs::read(&wasm_path)
-    .map_err(|error| format!("read compiled js2wasm artifact: {error}"))?;
-  if let Some(output) = std::env::var_os("V8X_JS2WASM_ARTIFACT_OUTPUT") {
-    fs::write(&output, &binary).map_err(|error| {
-      format!(
-        "write ahead-of-time js2wasm artifact {}: {error}",
-        Path::new(&output).display()
-      )
-    })?;
-  }
-  Ok(binary)
+  fs::read(&wasm_path)
+    .map_err(|error| format!("read compiled js2wasm artifact: {error}"))
 }
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn run(mut command: Command, phase: &str) -> Result<(), String> {
   let output = command
     .output()
@@ -258,10 +427,12 @@ fn run(mut command: Command, phase: &str) -> Result<(), String> {
   Err(format!("{phase} failed: {detail}"))
 }
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 struct TempDir {
   path: PathBuf,
 }
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 impl TempDir {
   fn new() -> Result<Self, String> {
     let timestamp = SystemTime::now()
@@ -279,6 +450,7 @@ impl TempDir {
   }
 }
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 impl Drop for TempDir {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.path);

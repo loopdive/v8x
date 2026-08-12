@@ -114,6 +114,10 @@ mod jsc;
 mod js2wasm_spike;
 
 #[cfg(feature = "engine_js2wasm")]
+#[doc(hidden)]
+pub use js2wasm_spike::{Js2WasmRuntimeStats, js2wasm_runtime_stats};
+
+#[cfg(feature = "engine_js2wasm")]
 mod js2wasm;
 
 #[cfg(feature = "engine_quickjs")]
