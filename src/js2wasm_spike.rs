@@ -35,6 +35,16 @@ const CWD_CODE_UNIT_IMPORT: &str = "__v8x_op_cwd_utf16_code_unit";
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
 const CWD_LENGTH_PROBE: &str = "__v8x_probe_cwd_utf16_length";
 const CWD_CHECKSUM_PROBE: &str = "__v8x_probe_cwd_utf16_checksum";
+const DENO_CORE_BOOTSTRAP_PROBE: &str = "__v8x_probe_deno_core_bootstrap";
+const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
+  ("env", "Promise_new"),
+  ("env", "Promise_all"),
+  ("env", "Promise_allSettled"),
+  ("env", "Promise_any"),
+  ("env", "Promise_race"),
+  ("js2wasm:runtime-eval", "__runtime_apply_interpreted"),
+  ("js2wasm:runtime-eval", "__runtime_indirect_eval"),
+];
 
 #[cfg_attr(not(feature = "js2wasm_runtime_compile"), allow(dead_code))]
 pub(crate) struct SourceModule {
@@ -148,10 +158,7 @@ impl SharedDenoRuntime {
       )
     })?;
     self.trace_imports(&module);
-    let instance_pre = self
-      .linker
-      .instantiate_pre(&module)
-      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))?;
+    let instance_pre = self.instance_pre(&module)?;
     modules.insert(key, instance_pre.clone());
     self.module_loads.fetch_add(1, Ordering::Relaxed);
     Ok(instance_pre)
@@ -185,10 +192,7 @@ impl SharedDenoRuntime {
         format!("load development js2wasm artifact: {error:#}")
       })?;
     self.trace_imports(&module);
-    let instance_pre = self
-      .linker
-      .instantiate_pre(&module)
-      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))?;
+    let instance_pre = self.instance_pre(&module)?;
     modules.insert(key, instance_pre.clone());
     self.module_loads.fetch_add(1, Ordering::Relaxed);
     Ok(instance_pre)
@@ -200,6 +204,41 @@ impl SharedDenoRuntime {
         eprintln!("v8x/js2wasm import {}::{}", import.module(), import.name());
       }
     }
+  }
+
+  fn instance_pre(
+    &self,
+    module: &Module,
+  ) -> Result<InstancePre<DenoHostState>, String> {
+    for import in module.imports() {
+      let known_deno_import = import.module() == DENO_IMPORT_MODULE
+        && matches!(import.name(), CWD_LENGTH_IMPORT | CWD_CODE_UNIT_IMPORT);
+      let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
+        .iter()
+        .any(|candidate| *candidate == (import.module(), import.name()));
+      if !known_deno_import && !deferred_bootstrap_import {
+        return Err(format!(
+          "unimplemented js2wasm host import {}::{}",
+          import.module(),
+          import.name(),
+        ));
+      }
+    }
+
+    // The exact core bootstrap retains Promise/eval imports as function
+    // values, but does not invoke them. Bind only that audited allowlist to
+    // Wasmtime's signature-preserving trap functions: boot can instantiate,
+    // while the first real use remains an explicit failure rather than a
+    // success-shaped default/no-op.
+    let mut linker = self.linker.clone();
+    linker
+      .define_unknown_imports_as_traps(module)
+      .map_err(|error| {
+        format!("bind deferred js2wasm bootstrap imports: {error:#}")
+      })?;
+    linker
+      .instantiate_pre(module)
+      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))
   }
 
   fn stats(&self) -> Result<Js2WasmRuntimeStats, String> {
@@ -227,6 +266,68 @@ pub fn js2wasm_runtime_stats() -> Result<Js2WasmRuntimeStats, String> {
   shared_runtime()?.stats()
 }
 
+/// Diagnostic entry point for the pinned Deno-core bootstrap integration.
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_bootstrap_raw_module_for_test(
+  artifact: &Path,
+) -> Result<(), String> {
+  let wasm = fs::read(artifact).map_err(|error| {
+    format!(
+      "read exact Deno core artifact {}: {error}",
+      artifact.display()
+    )
+  })?;
+  let shared = shared_runtime()?;
+  let precompiled = shared.precompile(&wasm)?;
+  let instance_pre = shared.development_bytes(&precompiled)?;
+  let cwd = std::env::current_dir()
+    .map_err(|error| format!("resolve test working directory: {error}"))?;
+  DenoRuntime::instantiate(shared, &instance_pre, cwd.clone())?;
+  DenoRuntime::instantiate(shared, &instance_pre, cwd)?;
+  Ok(())
+}
+
+/// Instantiate the prelinked core-bootstrap transaction used by the
+/// experimental classic-script bridge. Production uses a trusted artifact;
+/// development builds may precompile the exact raw module in-process.
+pub(crate) fn deno_core_bootstrap_runtime_from_env()
+-> Result<DenoRuntime, String> {
+  let shared = shared_runtime()?;
+  let instance_pre = if let Some(artifact) =
+    std::env::var_os("V8X_JS2WASM_DENO_CORE_AOT_MODULE")
+  {
+    shared.precompiled_file(Path::new(&artifact))?
+  } else {
+    #[cfg(feature = "js2wasm_runtime_compile")]
+    {
+      let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM")
+        .ok_or_else(|| {
+          "set V8X_JS2WASM_DENO_CORE_AOT_MODULE to a trusted precompiled artifact (or V8X_JS2WASM_DENO_CORE_WASM in a development build)".to_string()
+        })?;
+      let wasm = fs::read(&artifact).map_err(|error| {
+        format!(
+          "read exact Deno core artifact {}: {error}",
+          Path::new(&artifact).display()
+        )
+      })?;
+      let precompiled = shared.precompile(&wasm)?;
+      shared.development_bytes(&precompiled)?
+    }
+    #[cfg(not(feature = "js2wasm_runtime_compile"))]
+    {
+      return Err(
+        "compiler-free engine_js2wasm builds require V8X_JS2WASM_DENO_CORE_AOT_MODULE to point to a trusted Wasmtime-precompiled artifact"
+          .to_string(),
+      );
+    }
+  };
+  let cwd = std::env::current_dir().map_err(|error| {
+    format!("resolve Deno bootstrap working directory: {error}")
+  })?;
+  DenoRuntime::instantiate(shared, &instance_pre, cwd)
+}
+
 /// One private Wasmtime store and instance owned by a v8x module handle.
 pub(crate) struct DenoRuntime {
   store: Store<DenoHostState>,
@@ -252,8 +353,22 @@ impl DenoRuntime {
       .map_err(|error| format!("instantiate js2wasm artifact: {error}"))?;
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
     let mut runtime = Self { store, instance };
+    runtime.run_deferred_module_init()?;
     runtime.verify_cwd_probe()?;
+    runtime.verify_deno_core_bootstrap_probe()?;
     Ok(runtime)
+  }
+
+  fn run_deferred_module_init(&mut self) -> Result<(), String> {
+    let Some(init) = self.instance.get_func(&mut self.store, "__module_init")
+    else {
+      return Ok(());
+    };
+    init
+      .typed::<(), ()>(&self.store)
+      .map_err(|error| format!("type __module_init: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("run __module_init: {error:#}"))
   }
 
   fn verify_cwd_probe(&mut self) -> Result<(), String> {
@@ -300,6 +415,28 @@ impl DenoRuntime {
       return Err(format!(
         "Deno.cwd() probe made {} typed host calls, expected {expected_calls} for a fresh instance",
         self.store.data().cwd_op_calls,
+      ));
+    }
+    Ok(())
+  }
+
+  fn verify_deno_core_bootstrap_probe(&mut self) -> Result<(), String> {
+    let Some(probe) = self
+      .instance
+      .get_func(&mut self.store, DENO_CORE_BOOTSTRAP_PROBE)
+    else {
+      return Ok(());
+    };
+    let value = probe
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| format!("type {DENO_CORE_BOOTSTRAP_PROBE}: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| {
+        format!("call {DENO_CORE_BOOTSTRAP_PROBE}: {error:#}")
+      })?;
+    if value != 42.0 {
+      return Err(format!(
+        "Deno core bootstrap probe returned {value}, expected 42"
       ));
     }
     Ok(())

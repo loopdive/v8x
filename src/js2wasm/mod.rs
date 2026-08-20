@@ -24,8 +24,9 @@ use crate::script_compiler::{
 use crate::string::{NewStringType, ValueView};
 use crate::support::{MaybeBool, SharedPtrBase, UniquePtr, int, long};
 use crate::{
-  Allocator, Context, Data, FixedArray, Module, Object, Platform, Primitive,
-  RealIsolate, Script, String as V8String, Value,
+  Allocator, Array, Boolean, Context, Data, External, FixedArray, Int32,
+  Integer, Module, Number, Object, Platform, Primitive, RealIsolate, Script,
+  String as V8String, Uint32, Value,
 };
 use std::collections::HashSet;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -83,22 +84,40 @@ struct ObjectState {
   internal_fields: Vec<*mut c_void>,
 }
 
+struct ArrayState {
+  elements: Vec<*const Value>,
+  properties: Vec<TemplateProperty>,
+}
+
 struct FunctionState {
   callback: crate::FunctionCallback,
   data: *const Value,
   properties: Vec<TemplateProperty>,
 }
 
+struct CallbackInfoState {
+  isolate: *mut RealIsolate,
+  this: *const Value,
+  data: *const Value,
+  new_target: *const Value,
+  is_construct: bool,
+  args: Vec<*const Value>,
+  return_slot: Box<*const Value>,
+}
+
 struct ContextState {
   global: *const Object,
   extras: *const Object,
   embedder_data: Vec<*mut c_void>,
+  deno_core_bootstrap: Option<crate::js2wasm_spike::DenoRuntime>,
+  deno_core_bootstrap_phase: usize,
 }
 
 enum HeapValue {
   String(String),
   Context(ContextState),
   Object(ObjectState),
+  Array(ArrayState),
   Function(FunctionState),
   Module(ModuleState),
   Script(ScriptState),
@@ -107,7 +126,22 @@ enum HeapValue {
   FixedArray,
   Promise,
   Error { name: &'static str, message: String },
+  External(*mut c_void),
+  Boolean(bool),
+  Number(f64),
+  Null,
   Undefined,
+}
+
+#[repr(C)]
+pub(crate) struct RawReturnValue(usize);
+
+#[repr(C)]
+pub(crate) struct RawFunctionCallbackInfoParts {
+  isolate: *mut RealIsolate,
+  return_value: usize,
+  data: *const Value,
+  length: int,
 }
 
 struct IsolateState {
@@ -242,6 +276,7 @@ fn same_property_key(left: *const Data, right: *const Data) -> bool {
 fn properties<T>(value: *const T) -> Option<&'static Vec<TemplateProperty>> {
   match unsafe { heap_value(value) } {
     Some(HeapValue::Object(state)) => Some(&state.properties),
+    Some(HeapValue::Array(state)) => Some(&state.properties),
     Some(HeapValue::Function(state)) => Some(&state.properties),
     _ => None,
   }
@@ -252,8 +287,118 @@ fn properties_mut<T>(
 ) -> Option<&'static mut Vec<TemplateProperty>> {
   match unsafe { heap_value_mut(value) } {
     Some(HeapValue::Object(state)) => Some(&mut state.properties),
+    Some(HeapValue::Array(state)) => Some(&mut state.properties),
     Some(HeapValue::Function(state)) => Some(&mut state.properties),
     _ => None,
+  }
+}
+
+fn allocate_json_value(
+  isolate: *mut RealIsolate,
+  value: serde_json::Value,
+) -> *const Value {
+  match value {
+    serde_json::Value::Null => allocate(isolate, HeapValue::Null),
+    serde_json::Value::Bool(value) => {
+      allocate(isolate, HeapValue::Boolean(value))
+    }
+    serde_json::Value::Number(value) => value
+      .as_f64()
+      .map(|value| allocate(isolate, HeapValue::Number(value)))
+      .unwrap_or(ptr::null()),
+    serde_json::Value::String(value) => {
+      allocate(isolate, HeapValue::String(value))
+    }
+    serde_json::Value::Array(values) => {
+      let elements = values
+        .into_iter()
+        .map(|value| allocate_json_value(isolate, value))
+        .collect();
+      allocate(
+        isolate,
+        HeapValue::Array(ArrayState {
+          elements,
+          properties: Vec::new(),
+        }),
+      )
+    }
+    serde_json::Value::Object(values) => {
+      let properties = values
+        .into_iter()
+        .map(|(key, value)| TemplateProperty {
+          key: new_string(isolate, key).cast(),
+          value: allocate_json_value(isolate, value).cast(),
+          attributes: 0,
+        })
+        .collect();
+      allocate(
+        isolate,
+        HeapValue::Object(ObjectState {
+          properties,
+          internal_fields: Vec::new(),
+        }),
+      )
+    }
+  }
+}
+
+fn heap_to_json_value(
+  value: *const Value,
+  ancestors: &mut HashSet<usize>,
+) -> Option<serde_json::Value> {
+  match unsafe { heap_value(value) }? {
+    HeapValue::Null => Some(serde_json::Value::Null),
+    HeapValue::Boolean(value) => Some(serde_json::Value::Bool(*value)),
+    HeapValue::Number(value) => {
+      serde_json::Number::from_f64(*value).map(serde_json::Value::Number)
+    }
+    HeapValue::String(value) => Some(serde_json::Value::String(value.clone())),
+    HeapValue::Array(state) => {
+      let identity = value.addr();
+      if !ancestors.insert(identity) {
+        return None;
+      }
+      let result = state
+        .elements
+        .iter()
+        .map(|value| {
+          heap_to_json_value(*value, ancestors)
+            .unwrap_or(serde_json::Value::Null)
+        })
+        .collect();
+      ancestors.remove(&identity);
+      Some(serde_json::Value::Array(result))
+    }
+    HeapValue::Object(state) => {
+      let identity = value.addr();
+      if !ancestors.insert(identity) {
+        return None;
+      }
+      let mut result = serde_json::Map::new();
+      for property in &state.properties {
+        let Some(key) = (unsafe { string_value(property.key) }) else {
+          continue;
+        };
+        if let Some(value) =
+          heap_to_json_value(property.value.cast(), ancestors)
+        {
+          result.insert(key.to_owned(), value);
+        }
+      }
+      ancestors.remove(&identity);
+      Some(serde_json::Value::Object(result))
+    }
+    HeapValue::Undefined
+    | HeapValue::Function(_)
+    | HeapValue::External(_)
+    | HeapValue::Error { .. }
+    | HeapValue::Context(_)
+    | HeapValue::Module(_)
+    | HeapValue::Script(_)
+    | HeapValue::ObjectTemplate(_)
+    | HeapValue::FunctionTemplate(_)
+    | HeapValue::FixedArray
+    | HeapValue::Promise => None,
   }
 }
 
@@ -882,6 +1027,8 @@ pub extern "C" fn v8__Context__New(
       global,
       extras,
       embedder_data: vec![ptr::null_mut(); 4],
+      deno_core_bootstrap: None,
+      deno_core_bootstrap_phase: 0,
     }),
   )
 }
@@ -963,6 +1110,54 @@ pub extern "C" fn v8__Object__New(isolate: *mut RealIsolate) -> *const Object {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Array__New(
+  isolate: *mut RealIsolate,
+  length: int,
+) -> *const Array {
+  let undefined = v8__Undefined(isolate).cast();
+  allocate(
+    isolate,
+    HeapValue::Array(ArrayState {
+      elements: vec![undefined; length.max(0) as usize],
+      properties: Vec::new(),
+    }),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Array__New_with_elements(
+  isolate: *mut RealIsolate,
+  elements: *const *const Value,
+  length: usize,
+) -> *const Array {
+  if length > 0 && elements.is_null() {
+    return ptr::null();
+  }
+  let elements = if length == 0 {
+    Vec::new()
+  } else {
+    unsafe { std::slice::from_raw_parts(elements, length) }.to_vec()
+  };
+  allocate(
+    isolate,
+    HeapValue::Array(ArrayState {
+      elements,
+      properties: Vec::new(),
+    }),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Array__Length(array: *const Array) -> u32 {
+  match unsafe { heap_value(array) } {
+    Some(HeapValue::Array(state)) => {
+      state.elements.len().try_into().unwrap_or(u32::MAX)
+    }
+    _ => 0,
+  }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__Get(
   object: *const Object,
   _context: *const Context,
@@ -977,6 +1172,22 @@ pub extern "C" fn v8__Object__Get(
     })
     .map(|property| property.value.cast())
     .unwrap_or_else(|| v8__Undefined(current_isolate()).cast())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__GetIndex(
+  object: *const Object,
+  _context: *const Context,
+  index: u32,
+) -> *const Value {
+  match unsafe { heap_value(object) } {
+    Some(HeapValue::Array(state)) => state
+      .elements
+      .get(index as usize)
+      .copied()
+      .unwrap_or_else(|| v8__Undefined(current_isolate()).cast()),
+    _ => v8__Undefined(current_isolate()).cast(),
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -1002,6 +1213,26 @@ pub extern "C" fn v8__Object__Set(
       attributes: 0,
     });
   }
+  MaybeBool::JustTrue
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__SetIndex(
+  object: *const Object,
+  _context: *const Context,
+  index: u32,
+  value: *const Value,
+) -> MaybeBool {
+  let undefined = v8__Undefined(current_isolate()).cast();
+  let Some(HeapValue::Array(state)) = (unsafe { heap_value_mut(object) })
+  else {
+    return MaybeBool::Nothing;
+  };
+  let index = index as usize;
+  if state.elements.len() <= index {
+    state.elements.resize(index + 1, undefined);
+  }
+  state.elements[index] = if value.is_null() { undefined } else { value };
   MaybeBool::JustTrue
 }
 
@@ -1093,6 +1324,307 @@ pub extern "C" fn v8__FunctionTemplate__GetFunction(
       properties: function_properties,
     }),
   )
+}
+
+unsafe fn callback_info<'a>(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> Option<&'a mut CallbackInfoState> {
+  unsafe { (info as *mut CallbackInfoState).as_mut() }
+}
+
+fn invoke_function(
+  function: *const crate::Function,
+  receiver: *const Value,
+  argc: int,
+  argv: *const *const Value,
+  is_construct: bool,
+) -> *const Value {
+  let Some(HeapValue::Function(state)) = (unsafe { heap_value(function) })
+  else {
+    return ptr::null();
+  };
+  let callback = state.callback;
+  let data = state.data;
+  let isolate = current_isolate();
+  let undefined = v8__Undefined(isolate).cast();
+  let receiver = if receiver.is_null() {
+    undefined
+  } else {
+    receiver
+  };
+  let mut args = Vec::with_capacity(argc.max(0) as usize);
+  for index in 0..argc.max(0) as usize {
+    let argument = if argv.is_null() {
+      undefined
+    } else {
+      unsafe { *argv.add(index) }
+    };
+    args.push(if argument.is_null() {
+      undefined
+    } else {
+      argument
+    });
+  }
+  let mut info = Box::new(CallbackInfoState {
+    isolate,
+    this: receiver,
+    data: if data.is_null() { undefined } else { data },
+    new_target: if is_construct {
+      function.cast()
+    } else {
+      undefined
+    },
+    is_construct,
+    args,
+    return_slot: Box::new(undefined),
+  });
+  let info_ptr = (&mut *info as *mut CallbackInfoState)
+    .cast::<crate::function::FunctionCallbackInfo>();
+  unsafe { callback(info_ptr) };
+  *info.return_slot
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Function__Call(
+  function: *const crate::Function,
+  _context: *const Context,
+  receiver: *const Value,
+  argc: int,
+  argv: *const *const Value,
+) -> *const Value {
+  invoke_function(function, receiver, argc, argv, false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Function__NewInstance(
+  function: *const crate::Function,
+  _context: *const Context,
+  argc: int,
+  argv: *const *const Value,
+) -> *const Object {
+  let receiver = new_object(current_isolate());
+  let result = invoke_function(function, receiver.cast(), argc, argv, true);
+  if matches!(
+    unsafe { heap_value(result) },
+    Some(HeapValue::Object(_) | HeapValue::Function(_))
+  ) {
+    result.cast()
+  } else {
+    receiver
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__GetIsolate(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> *mut RealIsolate {
+  unsafe { callback_info(info) }
+    .map(|info| info.isolate)
+    .unwrap_or_else(current_isolate)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__GetParts(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> RawFunctionCallbackInfoParts {
+  let Some(info) = (unsafe { callback_info(info) }) else {
+    return RawFunctionCallbackInfoParts {
+      isolate: current_isolate(),
+      return_value: 0,
+      data: v8__Undefined(current_isolate()).cast(),
+      length: 0,
+    };
+  };
+  RawFunctionCallbackInfoParts {
+    isolate: info.isolate,
+    return_value: (&mut *info.return_slot as *mut *const Value) as usize,
+    data: info.data,
+    length: info.args.len() as int,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__Data(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> *const Value {
+  unsafe { callback_info(info) }
+    .map(|info| info.data)
+    .unwrap_or_else(|| v8__Undefined(current_isolate()).cast())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__This(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> *const Object {
+  unsafe { callback_info(info) }
+    .map(|info| info.this.cast())
+    .unwrap_or(ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__NewTarget(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> *const Value {
+  unsafe { callback_info(info) }
+    .map(|info| info.new_target)
+    .unwrap_or_else(|| v8__Undefined(current_isolate()).cast())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__IsConstructCall(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> bool {
+  unsafe { callback_info(info) }.is_some_and(|info| info.is_construct)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__Get(
+  info: *const crate::function::FunctionCallbackInfo,
+  index: int,
+) -> *const Value {
+  if index >= 0
+    && let Some(info) = unsafe { callback_info(info) }
+    && let Some(value) = info.args.get(index as usize)
+  {
+    return *value;
+  }
+  v8__Undefined(current_isolate()).cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__Length(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> int {
+  unsafe { callback_info(info) }
+    .map(|info| info.args.len() as int)
+    .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionCallbackInfo__GetReturnValue(
+  info: *const crate::function::FunctionCallbackInfo,
+) -> usize {
+  unsafe { callback_info(info) }
+    .map(|info| (&mut *info.return_slot as *mut *const Value) as usize)
+    .unwrap_or(0)
+}
+
+// --- Opaque host pointers -------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__External__New(
+  isolate: *mut RealIsolate,
+  value: *mut c_void,
+) -> *const External {
+  allocate(isolate, HeapValue::External(value))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__External__Value(
+  external: *const External,
+) -> *mut c_void {
+  match unsafe { heap_value(external) } {
+    Some(HeapValue::External(value)) => *value,
+    _ => ptr::null_mut(),
+  }
+}
+
+// --- Native callback return slots ----------------------------------------
+
+unsafe fn return_value_slot(value: *const RawReturnValue) -> *mut *const Value {
+  if value.is_null() {
+    return ptr::null_mut();
+  }
+  unsafe { (*value).0 as *mut *const Value }
+}
+
+fn set_return_value(value: *mut RawReturnValue, result: *const Value) {
+  let slot = unsafe { return_value_slot(value) };
+  if !slot.is_null() {
+    unsafe { *slot = result };
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__Set(
+  value: *mut RawReturnValue,
+  result: *const Value,
+) {
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__Set__Bool(
+  value: *mut RawReturnValue,
+  result: bool,
+) {
+  let result = allocate(current_isolate(), HeapValue::Boolean(result));
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__Set__Int32(
+  value: *mut RawReturnValue,
+  result: i32,
+) {
+  let result =
+    allocate(current_isolate(), HeapValue::Number(f64::from(result)));
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__Set__Uint32(
+  value: *mut RawReturnValue,
+  result: u32,
+) {
+  let result =
+    allocate(current_isolate(), HeapValue::Number(f64::from(result)));
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__Set__Double(
+  value: *mut RawReturnValue,
+  result: f64,
+) {
+  let result = allocate(current_isolate(), HeapValue::Number(result));
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__SetNull(value: *mut RawReturnValue) {
+  let result = allocate(current_isolate(), HeapValue::Null);
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__SetUndefined(
+  value: *mut RawReturnValue,
+) {
+  let result = allocate(current_isolate(), HeapValue::Undefined);
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__SetEmptyString(
+  value: *mut RawReturnValue,
+) {
+  let result = allocate(current_isolate(), HeapValue::String(String::new()));
+  set_return_value(value, result);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ReturnValue__Value__Get(
+  value: *const RawReturnValue,
+) -> *const Value {
+  let slot = unsafe { return_value_slot(value) };
+  if !slot.is_null() {
+    let result = unsafe { *slot };
+    if !result.is_null() {
+      return result;
+    }
+  }
+  allocate(current_isolate(), HeapValue::Undefined)
 }
 
 #[unsafe(no_mangle)]
@@ -1313,6 +1845,42 @@ pub extern "C" fn v8__String__ValueView__length(view: *const ValueView) -> int {
   unsafe { value_view(view).length as int }
 }
 
+// --- JSON -----------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__JSON__Parse(
+  context: *const Context,
+  json_string: *const V8String,
+) -> *const Value {
+  if context.is_null() || json_string.is_null() {
+    return ptr::null();
+  }
+  let Some(json_string) = (unsafe { string_value(json_string) }) else {
+    return ptr::null();
+  };
+  let Ok(value) = serde_json::from_str(json_string) else {
+    return ptr::null();
+  };
+  allocate_json_value(current_isolate(), value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__JSON__Stringify(
+  context: *const Context,
+  json_object: *const Value,
+) -> *const V8String {
+  if context.is_null() || json_object.is_null() {
+    return ptr::null();
+  }
+  let Some(value) = heap_to_json_value(json_object, &mut HashSet::new()) else {
+    return ptr::null();
+  };
+  let Ok(value) = serde_json::to_string(&value) else {
+    return ptr::null();
+  };
+  new_string(current_isolate(), value)
+}
+
 // --- Error values ---------------------------------------------------------
 
 #[unsafe(no_mangle)]
@@ -1321,8 +1889,122 @@ pub extern "C" fn v8__Undefined(isolate: *mut RealIsolate) -> *const Primitive {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Null(isolate: *mut RealIsolate) -> *const Primitive {
+  allocate(isolate, HeapValue::Null)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Boolean__New(
+  isolate: *mut RealIsolate,
+  value: bool,
+) -> *const Boolean {
+  allocate(isolate, HeapValue::Boolean(value))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Boolean__Value(value: *const Boolean) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Boolean(true)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Number__New(
+  isolate: *mut RealIsolate,
+  value: f64,
+) -> *const Number {
+  allocate(isolate, HeapValue::Number(value))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Number__Value(value: *const Number) -> f64 {
+  match unsafe { heap_value(value) } {
+    Some(HeapValue::Number(value)) => *value,
+    _ => f64::NAN,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Integer__New(
+  isolate: *mut RealIsolate,
+  value: i32,
+) -> *const Integer {
+  allocate(isolate, HeapValue::Number(f64::from(value)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Integer__NewFromUnsigned(
+  isolate: *mut RealIsolate,
+  value: u32,
+) -> *const Integer {
+  allocate(isolate, HeapValue::Number(f64::from(value)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Integer__Value(value: *const Integer) -> i64 {
+  v8__Number__Value(value.cast()) as i64
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Int32__Value(value: *const Int32) -> i32 {
+  v8__Number__Value(value.cast()) as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Uint32__Value(value: *const Uint32) -> u32 {
+  v8__Number__Value(value.cast()) as u32
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Value__IsUndefined(value: *const Value) -> bool {
   matches!(unsafe { heap_value(value) }, Some(HeapValue::Undefined))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsNull(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Null))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsNullOrUndefined(value: *const Value) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(HeapValue::Null | HeapValue::Undefined)
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsBoolean(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Boolean(_)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsNumber(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Number(_)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsInt32(value: *const Value) -> bool {
+  match unsafe { heap_value(value) } {
+    Some(HeapValue::Number(value)) => {
+      value.is_finite()
+        && value.fract() == 0.0
+        && *value >= f64::from(i32::MIN)
+        && *value <= f64::from(i32::MAX)
+    }
+    _ => false,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsUint32(value: *const Value) -> bool {
+  match unsafe { heap_value(value) } {
+    Some(HeapValue::Number(value)) => {
+      value.is_finite()
+        && value.fract() == 0.0
+        && *value >= 0.0
+        && *value <= f64::from(u32::MAX)
+    }
+    _ => false,
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -1340,9 +2022,17 @@ pub extern "C" fn v8__Value__IsObject(value: *const Value) -> bool {
   matches!(
     unsafe { heap_value(value) },
     Some(
-      HeapValue::Object(_) | HeapValue::Function(_) | HeapValue::Error { .. }
+      HeapValue::Object(_)
+        | HeapValue::Array(_)
+        | HeapValue::Function(_)
+        | HeapValue::Error { .. }
     )
   )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsArray(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Array(_)))
 }
 
 #[unsafe(no_mangle)]
@@ -1392,6 +2082,157 @@ pub extern "C" fn v8__Value__IsNativeError(value: *const Value) -> bool {
 
 // --- Classic scripts ------------------------------------------------------
 
+const DENO_CORE_PRELINKED_SCRIPTS: [(&str, u64); 3] = [
+  ("ext:core/00_primordials.js", 0x49d0_171d_7d2c_3f4d),
+  ("ext:core/00_infra.js", 0xe1a2_6738_75ca_364c),
+  ("ext:core/01_core.js", 0xd2f9_d9c6_2c03_7a70),
+];
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+  let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+  for byte in bytes {
+    hash ^= u64::from(*byte);
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+  }
+  hash
+}
+
+fn named_property<T>(object: *const T, name: &str) -> Option<*const Value> {
+  properties(object).and_then(|properties| {
+    properties.iter().rev().find_map(|property| {
+      (unsafe { string_value(property.key) } == Some(name))
+        .then_some(property.value.cast())
+    })
+  })
+}
+
+fn set_named_property<T>(
+  object: *const T,
+  name: &str,
+  value: *const Value,
+) -> Result<(), String> {
+  let key = new_string(current_isolate(), name.to_string());
+  let Some(properties) = properties_mut(object) else {
+    return Err(format!("{name} receiver is not a Rust-owned v8x object"));
+  };
+  if let Some(property) = properties
+    .iter_mut()
+    .rev()
+    .find(|property| same_property_key(property.key.cast(), key.cast()))
+  {
+    property.value = value.cast();
+  } else {
+    properties.push(TemplateProperty {
+      key: key.cast(),
+      value: value.cast(),
+      attributes: 0,
+    });
+  }
+  Ok(())
+}
+
+unsafe extern "C" fn prelinked_set_up_async_stub(
+  info: *const crate::function::FunctionCallbackInfo,
+) {
+  let Some(info) = (unsafe { callback_info(info) }) else {
+    return;
+  };
+  let undefined = v8__Undefined(info.isolate).cast();
+  let op = info.args.get(1).copied().unwrap_or(undefined);
+
+  // The three-argument form installs an async method on a class prototype.
+  // Mirror that Rust-visible side effect; callers intentionally ignore its
+  // return value. The two-argument form returns the wrapped top-level op.
+  if let (Some(name), Some(constructor)) = (
+    info
+      .args
+      .first()
+      .and_then(|value| unsafe { string_value(*value) }),
+    info.args.get(2).copied(),
+  ) && let Some(prototype) = named_property(constructor, "prototype")
+  {
+    let _ = set_named_property(prototype, name, op);
+    *info.return_slot = undefined;
+  } else {
+    *info.return_slot = op;
+  }
+}
+
+fn install_prelinked_deno_core_bridge(
+  context: *const Context,
+) -> Result<(), String> {
+  let global = match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state.global,
+    _ => return Err("classic script has no live v8x context".to_string()),
+  };
+  let deno = named_property(global, "Deno")
+    .ok_or_else(|| "Rust-owned global has no Deno object".to_string())?;
+  let core = named_property(deno, "core")
+    .ok_or_else(|| "Rust-owned Deno object has no core object".to_string())?;
+  let stub = allocate(
+    current_isolate(),
+    HeapValue::Function(FunctionState {
+      callback: prelinked_set_up_async_stub,
+      data: ptr::null(),
+      properties: Vec::new(),
+    }),
+  );
+  set_named_property(core, "setUpAsyncStub", stub)
+}
+
+fn run_prelinked_deno_core_script(
+  context: *const Context,
+  state: &ScriptState,
+) -> Result<bool, String> {
+  let Some((phase, (_, expected_hash))) = DENO_CORE_PRELINKED_SCRIPTS
+    .iter()
+    .enumerate()
+    .find(|(_, (specifier, _))| *specifier == state.specifier)
+  else {
+    return Ok(false);
+  };
+  let actual_hash = fnv1a64(state.source.as_bytes());
+  if actual_hash != *expected_hash {
+    return Err(format!(
+      "prelinked script {:?} has FNV-1a hash {actual_hash:#018x}, expected {expected_hash:#018x}",
+      state.specifier,
+    ));
+  }
+  let current_phase = match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
+    _ => return Err("classic script has no live v8x context".to_string()),
+  };
+  if phase != current_phase {
+    return Err(format!(
+      "prelinked Deno core script order mismatch: received {:?} at phase {current_phase}, expected {:?}",
+      state.specifier,
+      DENO_CORE_PRELINKED_SCRIPTS
+        .get(current_phase)
+        .map(|(specifier, _)| *specifier)
+        .unwrap_or("<complete>"),
+    ));
+  }
+
+  let runtime = if phase == 0 {
+    Some(crate::js2wasm_spike::deno_core_bootstrap_runtime_from_env()?)
+  } else {
+    None
+  };
+  if phase == 0 {
+    install_prelinked_deno_core_bridge(context)?;
+  }
+  let Some(HeapValue::Context(context_state)) =
+    (unsafe { heap_value_mut(context) })
+  else {
+    return Err("classic script context disappeared".to_string());
+  };
+  if let Some(runtime) = runtime {
+    context_state.deno_core_bootstrap = Some(runtime);
+  }
+  context_state.deno_core_bootstrap_phase += 1;
+  Ok(true)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Script__Compile(
   _context: *const Context,
@@ -1421,16 +2262,21 @@ pub extern "C" fn v8__Script__Compile(
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Script__Run(
   script: *const Script,
-  _context: *const Context,
+  context: *const Context,
 ) -> *const Value {
   let Some(HeapValue::Script(state)) = (unsafe { heap_value(script) }) else {
     return ptr::null();
   };
-  // Running this in a fresh Wasmtime subprocess would discard writes to the
-  // Rust-owned `Deno.core` graph. Refuse at the exact semantic boundary until
-  // the Deno target provides a shared-instance host bridge.
+  match run_prelinked_deno_core_script(context, state) {
+    Ok(true) => return v8__Undefined(current_isolate()).cast(),
+    Ok(false) => {}
+    Err(error) => {
+      eprintln!("v8x/js2wasm: {error}");
+      return ptr::null();
+    }
+  }
   eprintln!(
-    "v8x/js2wasm: cannot run classic script {:?} ({} bytes): the Deno host bridge must preserve Rust-owned object side effects in the Wasm instance",
+    "v8x/js2wasm: cannot run classic script {:?} ({} bytes): it is not part of the audited prelinked bootstrap manifest",
     state.specifier,
     state.source.len(),
   );

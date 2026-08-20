@@ -1,6 +1,10 @@
 // Copyright 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
+#[cfg(feature = "js2wasm_runtime_compile")]
+use std::path::Path;
 use std::sync::Once;
+#[cfg(feature = "js2wasm_runtime_compile")]
+use std::{fs, path::PathBuf};
 
 const MAIN: &str = "file:///tmp/v8x-js2wasm-main.ts";
 const DEPENDENCY: &str = "file:///tmp/v8x-js2wasm-math.ts";
@@ -21,6 +25,8 @@ function cwd(): string {
 export const Deno = { cwd };
 "#;
 
+unsafe extern "C" fn noop_callback(_info: *const v8::FunctionCallbackInfo) {}
+
 fn initialize() {
   static ONCE: Once = Once::new();
   ONCE.call_once(|| {
@@ -37,6 +43,15 @@ fn origin<'s>(
 ) -> v8::ScriptOrigin<'s> {
   v8::ScriptOrigin::new(
     scope, name, 0, 0, false, -1, None, false, false, true, None,
+  )
+}
+
+fn classic_origin<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  name: v8::Local<'s, v8::Value>,
+) -> v8::ScriptOrigin<'s> {
+  v8::ScriptOrigin::new(
+    scope, name, 0, 0, false, -1, None, false, false, false, None,
   )
 }
 
@@ -162,4 +177,67 @@ fn evaluates_raw_typescript_graph_through_wasmtime() {
     assert_eq!(after.cached_modules - before.cached_modules, 1);
     assert_eq!(after.instantiations - before.instantiations, 2);
   }
+}
+
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[ignore = "requires V8X_JS2WASM_DENO_CORE_WASM from js2wasm's pinned bootstrap probe"]
+fn boots_exact_deno_core_artifact_in_two_wasmtime_stores() {
+  let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM").expect(
+    "set V8X_JS2WASM_DENO_CORE_WASM to the raw pinned bootstrap module",
+  );
+  v8::js2wasm_bootstrap_raw_module_for_test(Path::new(&artifact))
+    .expect("boot exact Deno core artifact through embedded Wasmtime");
+}
+
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[ignore = "requires V8X_JS2WASM_DENO_CORE_WASM and V8X_JS2WASM_DENO_CORE_FIXTURES"]
+fn routes_exact_deno_core_scripts_through_public_script_run() {
+  initialize();
+  let fixture_dir =
+    PathBuf::from(std::env::var_os("V8X_JS2WASM_DENO_CORE_FIXTURES").expect(
+      "set V8X_JS2WASM_DENO_CORE_FIXTURES to the pinned deno_core sources",
+    ));
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  // Reproduce the Rust-owned graph deno_core installs before its first
+  // classic script. Script::Run must leave an observable bootstrap function
+  // on this same object graph, not only succeed inside an isolated store.
+  let global = context.global(scope);
+  let deno = v8::Object::new(scope);
+  let core = v8::Object::new(scope);
+  let ops = v8::Object::new(scope);
+  let deno_key = v8::String::new(scope, "Deno").unwrap();
+  let core_key = v8::String::new(scope, "core").unwrap();
+  let ops_key = v8::String::new(scope, "ops").unwrap();
+  assert_eq!(core.set(scope, ops_key.into(), ops.into()), Some(true));
+  assert_eq!(deno.set(scope, core_key.into(), core.into()), Some(true));
+  assert_eq!(global.set(scope, deno_key.into(), deno.into()), Some(true));
+
+  for name in ["00_primordials.js", "00_infra.js", "01_core.js"] {
+    let source = fs::read_to_string(fixture_dir.join(name)).unwrap();
+    let source = v8::String::new(scope, &source).unwrap();
+    let specifier = format!("ext:core/{name}");
+    let resource = v8::String::new(scope, &specifier).unwrap().into();
+    let script_origin = classic_origin(scope, resource);
+    let script = v8::Script::compile(scope, source, Some(&script_origin))
+      .unwrap_or_else(|| panic!("compile {specifier}"));
+    assert!(script.run(scope).is_some(), "run {specifier}");
+  }
+
+  let stub_key = v8::String::new(scope, "setUpAsyncStub").unwrap();
+  let stub = core.get(scope, stub_key.into()).unwrap();
+  let stub = v8::Local::<v8::Function>::try_from(stub).unwrap();
+  let op = v8::Function::new_raw(scope, noop_callback).unwrap();
+  let op_value: v8::Local<v8::Value> = op.into();
+  let name = v8::String::new(scope, "op_async_probe").unwrap();
+  let undefined = v8::undefined(scope);
+  let returned = stub
+    .call(scope, undefined.into(), &[name.into(), op_value])
+    .unwrap();
+  assert!(std::ptr::eq(&*returned, &*op_value));
 }
