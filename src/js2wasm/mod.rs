@@ -13,20 +13,25 @@
 mod simdutf;
 
 use crate::isolate::ModuleImportPhase;
+#[cfg(not(target_os = "windows"))]
+use crate::module::SyntheticModuleEvaluationStepsRet;
 use crate::module::{
   ModuleStatus, ResolveModuleCallback, ResolveModuleCallbackRet,
-  ResolveSourceCallback,
+  ResolveSourceCallback, SyntheticModuleEvaluationSteps,
 };
 use crate::script::ScriptOrigin;
 use crate::script_compiler::{
   CachedData, CompileOptions, NoCacheReason, Source,
 };
 use crate::string::{NewStringType, ValueView};
-use crate::support::{MaybeBool, SharedPtrBase, UniquePtr, int, long};
+use crate::support::{Maybe, MaybeBool, SharedPtrBase, UniquePtr, int, long};
 use crate::{
-  Allocator, Array, Boolean, Context, Data, External, FixedArray, Int32,
-  Integer, Module, Number, Object, Platform, Primitive, RealIsolate, Script,
-  String as V8String, Uint32, Value,
+  Allocator, Array, ArrayBuffer, ArrayBufferView, BackingStore,
+  BackingStoreDeleterCallback, Boolean, Context, Data, External, FixedArray,
+  Int32, Int32Array, Integer, Module, Number, Object, Platform, Primitive,
+  Promise, PromiseResolver, PromiseState, RealIsolate, Script,
+  String as V8String, TypedArray, Uint8Array, Uint32, Uint32Array,
+  UnboundModuleScript, Value,
 };
 use std::collections::HashSet;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -52,6 +57,40 @@ struct ModuleState {
   imports: Vec<String>,
   dependencies: Vec<*const Module>,
   runtime: Option<crate::js2wasm_spike::DenoRuntime>,
+  synthetic: Option<SyntheticModuleState>,
+  evaluation_result: *const Value,
+  exception: *const Value,
+  unbound_script: *const UnboundModuleScript,
+  module_requests: *const FixedArray,
+  namespace: *const Object,
+  prelinked_deno_module: bool,
+}
+
+struct SyntheticModuleState {
+  export_names: Vec<String>,
+  evaluation_steps: SyntheticModuleEvaluationSteps<'static>,
+  namespace: *const Object,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromiseSettlement {
+  Pending,
+  Fulfilled,
+  Rejected,
+}
+
+struct PromiseStateData {
+  settlement: PromiseSettlement,
+  result: *const Value,
+  handled: bool,
+}
+
+struct PromiseResolverState {
+  promise: *const Promise,
+}
+
+struct UnboundModuleScriptState {
+  source_mapping_url: *const Value,
 }
 
 struct ScriptState {
@@ -74,12 +113,17 @@ struct ObjectTemplateState {
 struct FunctionTemplateState {
   callback: crate::FunctionCallback,
   data: *const Value,
+  class_name: *const V8String,
   properties: Vec<TemplateProperty>,
   prototype_template: *const crate::ObjectTemplate,
   instance_template: *const crate::ObjectTemplate,
 }
 
 struct ObjectState {
+  // None means the ordinary realm prototype is not materialized yet. Some
+  // embedding APIs (notably Deno's import-meta root) provide an explicit
+  // prototype, including an exact V8 null handle, which must be retained.
+  prototype: Option<*const Value>,
   properties: Vec<TemplateProperty>,
   internal_fields: Vec<*mut c_void>,
 }
@@ -89,9 +133,60 @@ struct ArrayState {
   properties: Vec<TemplateProperty>,
 }
 
+struct BackingStoreState {
+  data: *mut c_void,
+  byte_length: usize,
+  deleter: BackingStoreDeleterCallback,
+  deleter_data: *mut c_void,
+}
+
+impl Drop for BackingStoreState {
+  fn drop(&mut self) {
+    if !self.data.is_null() {
+      unsafe { (self.deleter)(self.data, self.byte_length, self.deleter_data) };
+    }
+  }
+}
+
+struct ArrayBufferState {
+  backing_store: SharedRepr,
+}
+
+impl Drop for ArrayBufferState {
+  fn drop(&mut self) {
+    release_backing_store(self.backing_store);
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypedArrayKind {
+  Uint8,
+  Uint32,
+  Int32,
+}
+
+impl TypedArrayKind {
+  fn element_size(self) -> usize {
+    match self {
+      Self::Uint8 => size_of::<u8>(),
+      Self::Uint32 => size_of::<u32>(),
+      Self::Int32 => size_of::<i32>(),
+    }
+  }
+}
+
+struct TypedArrayState {
+  buffer: *const ArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+  kind: TypedArrayKind,
+  properties: Vec<TemplateProperty>,
+}
+
 struct FunctionState {
   callback: crate::FunctionCallback,
   data: *const Value,
+  name: *const V8String,
   properties: Vec<TemplateProperty>,
 }
 
@@ -118,13 +213,17 @@ enum HeapValue {
   Context(ContextState),
   Object(ObjectState),
   Array(ArrayState),
+  ArrayBuffer(ArrayBufferState),
+  TypedArray(TypedArrayState),
   Function(FunctionState),
   Module(ModuleState),
   Script(ScriptState),
   ObjectTemplate(ObjectTemplateState),
   FunctionTemplate(FunctionTemplateState),
-  FixedArray,
-  Promise,
+  FixedArray(Vec<*const Data>),
+  UnboundModuleScript(UnboundModuleScriptState),
+  Promise(PromiseStateData),
+  PromiseResolver(PromiseResolverState),
   Error { name: &'static str, message: String },
   External(*mut c_void),
   Boolean(bool),
@@ -135,6 +234,26 @@ enum HeapValue {
 
 #[repr(C)]
 pub(crate) struct RawReturnValue(usize);
+
+#[repr(C)]
+struct MaybeMirror<T> {
+  has_value: bool,
+  value: T,
+}
+
+unsafe fn write_maybe<T: Copy + Default>(out: *mut Maybe<T>, value: Option<T>) {
+  if out.is_null() {
+    return;
+  }
+  let (has_value, value) = value
+    .map(|value| (true, value))
+    .unwrap_or_else(|| (false, T::default()));
+  unsafe {
+    out
+      .cast::<MaybeMirror<T>>()
+      .write(MaybeMirror { has_value, value });
+  }
+}
 
 #[repr(C)]
 pub(crate) struct RawFunctionCallbackInfoParts {
@@ -149,7 +268,32 @@ struct IsolateState {
   contexts: Vec<*const Context>,
   data_slots: [*mut c_void; 4],
   microtasks_policy: crate::MicrotasksPolicy,
+  microtasks: Vec<*const crate::Function>,
+  running_microtasks: bool,
+  active_try_catch: *mut TryCatchAbiState,
+  pending_exception: *const Value,
 }
+
+// rusty_v8's raw TryCatch is an inline `[MaybeUninit<usize>; 6]`. Keep all
+// lifecycle state in those exact six words so the public Rust API retains its
+// stack discipline without allocating an engine-side shadow object.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TryCatchAbiState {
+  isolate: *mut RealIsolate,
+  previous: *mut TryCatchAbiState,
+  exception: *const Value,
+  flags: usize,
+  reserved: [usize; 2],
+}
+
+const _: [(); 6 * size_of::<usize>()] = [(); size_of::<TryCatchAbiState>()];
+const _: [(); std::mem::align_of::<usize>()] =
+  [(); std::mem::align_of::<TryCatchAbiState>()];
+
+const TRY_CATCH_RETHROWN: usize = 1 << 0;
+const TRY_CATCH_VERBOSE: usize = 1 << 1;
+const TRY_CATCH_CAPTURE_MESSAGE: usize = 1 << 2;
 
 struct PlatformState {
   custom_context: *mut c_void,
@@ -193,6 +337,46 @@ unsafe fn module_state<'a>(
     Some(HeapValue::Module(state)) => Some(state),
     _ => None,
   }
+}
+
+unsafe fn promise_state<'a>(
+  promise: *const Promise,
+) -> Option<&'a mut PromiseStateData> {
+  match unsafe { (promise as *mut HeapValue).as_mut() } {
+    Some(HeapValue::Promise(state)) => Some(state),
+    _ => None,
+  }
+}
+
+unsafe fn promise_resolver_state<'a>(
+  resolver: *const PromiseResolver,
+) -> Option<&'a PromiseResolverState> {
+  match unsafe { (resolver as *const HeapValue).as_ref() } {
+    Some(HeapValue::PromiseResolver(state)) => Some(state),
+    _ => None,
+  }
+}
+
+fn allocate_promise(
+  isolate: *mut RealIsolate,
+  settlement: PromiseSettlement,
+  result: *const Value,
+) -> *const Promise {
+  allocate(
+    isolate,
+    HeapValue::Promise(PromiseStateData {
+      settlement,
+      result,
+      handled: false,
+    }),
+  )
+}
+
+fn allocate_fulfilled_promise(
+  isolate: *mut RealIsolate,
+  result: *const Value,
+) -> *const Promise {
+  allocate_promise(isolate, PromiseSettlement::Fulfilled, result)
 }
 
 unsafe fn string_value<'a, T>(value: *const T) -> Option<&'a str> {
@@ -247,6 +431,7 @@ fn object_from_template(
   allocate(
     isolate,
     HeapValue::Object(ObjectState {
+      prototype: None,
       properties,
       internal_fields: vec![ptr::null_mut(); internal_field_count],
     }),
@@ -257,6 +442,7 @@ fn new_object(isolate: *mut RealIsolate) -> *const Object {
   allocate(
     isolate,
     HeapValue::Object(ObjectState {
+      prototype: None,
       properties: Vec::new(),
       internal_fields: Vec::new(),
     }),
@@ -277,6 +463,7 @@ fn properties<T>(value: *const T) -> Option<&'static Vec<TemplateProperty>> {
   match unsafe { heap_value(value) } {
     Some(HeapValue::Object(state)) => Some(&state.properties),
     Some(HeapValue::Array(state)) => Some(&state.properties),
+    Some(HeapValue::TypedArray(state)) => Some(&state.properties),
     Some(HeapValue::Function(state)) => Some(&state.properties),
     _ => None,
   }
@@ -288,9 +475,91 @@ fn properties_mut<T>(
   match unsafe { heap_value_mut(value) } {
     Some(HeapValue::Object(state)) => Some(&mut state.properties),
     Some(HeapValue::Array(state)) => Some(&mut state.properties),
+    Some(HeapValue::TypedArray(state)) => Some(&mut state.properties),
     Some(HeapValue::Function(state)) => Some(&mut state.properties),
     _ => None,
   }
+}
+
+fn own_property<T>(
+  value: *const T,
+  key: *const Data,
+) -> Option<TemplateProperty> {
+  properties(value).and_then(|properties| {
+    properties
+      .iter()
+      .rev()
+      .find(|property| same_property_key(property.key.cast(), key))
+      .copied()
+  })
+}
+
+fn property_on_chain<T>(
+  value: *const T,
+  key: *const Data,
+) -> Option<TemplateProperty> {
+  let mut current = value.cast::<Value>();
+  let mut seen = HashSet::new();
+  while !current.is_null() && seen.insert(current.addr()) {
+    if let Some(property) = own_property(current, key) {
+      return Some(property);
+    }
+    current = match unsafe { heap_value(current) } {
+      Some(HeapValue::Object(state)) => match state.prototype {
+        Some(prototype)
+          if !matches!(
+            unsafe { heap_value(prototype) },
+            Some(HeapValue::Null)
+          ) =>
+        {
+          prototype
+        }
+        _ => ptr::null(),
+      },
+      _ => ptr::null(),
+    };
+  }
+  None
+}
+
+fn is_valid_prototype(value: *const Value) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(
+      HeapValue::Null
+        | HeapValue::Object(_)
+        | HeapValue::Array(_)
+        | HeapValue::Function(_)
+    )
+  )
+}
+
+fn prototype_would_cycle(
+  object: *const Object,
+  prototype: *const Value,
+) -> bool {
+  let mut current = prototype;
+  let mut seen = HashSet::new();
+  while !current.is_null() && seen.insert(current.addr()) {
+    if std::ptr::addr_eq(current, object.cast::<Value>()) {
+      return true;
+    }
+    current = match unsafe { heap_value(current) } {
+      Some(HeapValue::Object(state)) => match state.prototype {
+        Some(prototype)
+          if !matches!(
+            unsafe { heap_value(prototype) },
+            Some(HeapValue::Null)
+          ) =>
+        {
+          prototype
+        }
+        _ => ptr::null(),
+      },
+      _ => ptr::null(),
+    };
+  }
+  false
 }
 
 fn allocate_json_value(
@@ -334,6 +603,7 @@ fn allocate_json_value(
       allocate(
         isolate,
         HeapValue::Object(ObjectState {
+          prototype: None,
           properties,
           internal_fields: Vec::new(),
         }),
@@ -390,6 +660,8 @@ fn heap_to_json_value(
     }
     HeapValue::Undefined
     | HeapValue::Function(_)
+    | HeapValue::ArrayBuffer(_)
+    | HeapValue::TypedArray(_)
     | HeapValue::External(_)
     | HeapValue::Error { .. }
     | HeapValue::Context(_)
@@ -397,8 +669,10 @@ fn heap_to_json_value(
     | HeapValue::Script(_)
     | HeapValue::ObjectTemplate(_)
     | HeapValue::FunctionTemplate(_)
-    | HeapValue::FixedArray
-    | HeapValue::Promise => None,
+    | HeapValue::FixedArray(_)
+    | HeapValue::UnboundModuleScript(_)
+    | HeapValue::Promise(_)
+    | HeapValue::PromiseResolver(_) => None,
   }
 }
 
@@ -501,6 +775,7 @@ pub extern "C" fn v8__Platform__NotifyIsolateShutdown(
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SharedRepr {
   object: *mut c_void,
   references: *mut AtomicUsize,
@@ -535,6 +810,41 @@ unsafe fn shared_repr<T: crate::support::Shared>(
     };
   }
   unsafe { ptr::read_unaligned(shared.cast()) }
+}
+
+unsafe fn backing_store_state<'a>(
+  backing_store: *const BackingStore,
+) -> Option<&'a BackingStoreState> {
+  unsafe { (backing_store as *const BackingStoreState).as_ref() }
+}
+
+fn retain_backing_store(repr: SharedRepr) -> SharedRepr {
+  if !repr.references.is_null() {
+    unsafe { (*repr.references).fetch_add(1, Ordering::Relaxed) };
+  }
+  repr
+}
+
+fn release_backing_store(repr: SharedRepr) {
+  if repr.object.is_null() {
+    return;
+  }
+  if repr.references.is_null() {
+    unsafe { drop(Box::from_raw(repr.object.cast::<BackingStoreState>())) };
+    return;
+  }
+  if unsafe { (*repr.references).fetch_sub(1, Ordering::AcqRel) } == 1 {
+    unsafe {
+      drop(Box::from_raw(repr.object.cast::<BackingStoreState>()));
+      drop(Box::from_raw(repr.references));
+    }
+  }
+}
+
+unsafe fn backing_store_shared_ref(
+  repr: SharedRepr,
+) -> crate::support::SharedRef<BackingStore> {
+  unsafe { std::mem::transmute(repr) }
 }
 
 #[unsafe(no_mangle)]
@@ -680,12 +990,125 @@ pub extern "C" fn std__shared_ptr__v8__ArrayBuffer__Allocator__use_count(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__NewBackingStore__with_data(
+  data: *mut c_void,
+  byte_length: usize,
+  deleter: BackingStoreDeleterCallback,
+  deleter_data: *mut c_void,
+) -> *mut BackingStore {
+  if data.is_null() && byte_length != 0 {
+    return ptr::null_mut();
+  }
+  Box::into_raw(Box::new(BackingStoreState {
+    data,
+    byte_length,
+    deleter,
+    deleter_data,
+  }))
+  .cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__Data(
+  backing_store: *const BackingStore,
+) -> *mut c_void {
+  unsafe { backing_store_state(backing_store) }
+    .map(|state| state.data)
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__ByteLength(
+  backing_store: *const BackingStore,
+) -> usize {
+  unsafe { backing_store_state(backing_store) }
+    .map(|state| state.byte_length)
+    .unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__IsShared(
+  _backing_store: *const BackingStore,
+) -> bool {
+  false
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__IsResizableByUserJavaScript(
+  _backing_store: *const BackingStore,
+) -> bool {
+  false
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__DELETE(backing_store: *mut BackingStore) {
+  if !backing_store.is_null() {
+    unsafe { drop(Box::from_raw(backing_store.cast::<BackingStoreState>())) };
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn std__shared_ptr__v8__BackingStore__CONVERT__std__unique_ptr(
+  unique: UniquePtr<BackingStore>,
+) -> SharedPtrBase<BackingStore> {
+  let object: *mut c_void = unique.into_raw().cast();
+  let references = if object.is_null() {
+    ptr::null_mut()
+  } else {
+    Box::into_raw(Box::new(AtomicUsize::new(1)))
+  };
+  unsafe { shared_from_repr(SharedRepr { object, references }) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn std__shared_ptr__v8__BackingStore__get(
+  shared: *const SharedPtrBase<BackingStore>,
+) -> *mut BackingStore {
+  unsafe { shared_repr(shared).object.cast() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn std__shared_ptr__v8__BackingStore__COPY(
+  shared: *const SharedPtrBase<BackingStore>,
+) -> SharedPtrBase<BackingStore> {
+  let repr = retain_backing_store(unsafe { shared_repr(shared) });
+  unsafe { shared_from_repr(repr) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn std__shared_ptr__v8__BackingStore__reset(
+  shared: *mut SharedPtrBase<BackingStore>,
+) {
+  let repr = unsafe { shared_repr(shared) };
+  release_backing_store(repr);
+  if !shared.is_null() {
+    unsafe { ptr::write_bytes(shared, 0, 1) };
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn std__shared_ptr__v8__BackingStore__use_count(
+  shared: *const SharedPtrBase<BackingStore>,
+) -> long {
+  let references = unsafe { shared_repr(shared).references };
+  if references.is_null() {
+    0
+  } else {
+    unsafe { (*references).load(Ordering::Acquire) as long }
+  }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__New(_params: *const c_void) -> *mut RealIsolate {
   Box::into_raw(Box::new(IsolateState {
     values: Vec::new(),
     contexts: Vec::new(),
     data_slots: [ptr::null_mut(); 4],
     microtasks_policy: crate::MicrotasksPolicy::Auto,
+    microtasks: Vec::new(),
+    running_microtasks: false,
+    active_try_catch: ptr::null_mut(),
+    pending_exception: ptr::null(),
   }))
   .cast()
 }
@@ -724,6 +1147,29 @@ pub extern "C" fn v8__Isolate__Exit(isolate: *mut RealIsolate) {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__GetCurrent() -> *mut RealIsolate {
   current_isolate()
+}
+
+fn record_exception(isolate: *mut RealIsolate, exception: *const Value) {
+  if isolate.is_null() || exception.is_null() {
+    return;
+  }
+  let isolate = unsafe { isolate_state(isolate) };
+  if let Some(try_catch) = unsafe { isolate.active_try_catch.as_mut() } {
+    try_catch.exception = exception;
+    isolate.pending_exception = ptr::null();
+  } else {
+    isolate.pending_exception = exception;
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__ThrowException(
+  isolate: *mut RealIsolate,
+  exception: *const Value,
+) -> *const Value {
+  record_exception(isolate, exception);
+  // V8 schedules the supplied exception but deliberately returns undefined.
+  v8__Undefined(isolate).cast()
 }
 
 #[unsafe(no_mangle)]
@@ -780,6 +1226,56 @@ pub extern "C" fn v8__Isolate__GetMicrotasksPolicy(
     crate::MicrotasksPolicy::Auto
   } else {
     unsafe { isolate_state(isolate.cast_mut()).microtasks_policy }
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__EnqueueMicrotask(
+  isolate: *mut RealIsolate,
+  function: *const crate::Function,
+) {
+  if isolate.is_null()
+    || !matches!(
+      unsafe { heap_value(function) },
+      Some(HeapValue::Function(_))
+    )
+  {
+    return;
+  }
+  unsafe { isolate_state(isolate).microtasks.push(function) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
+  isolate: *mut RealIsolate,
+) {
+  if isolate.is_null() {
+    return;
+  }
+  let state = unsafe { isolate_state(isolate) };
+  if state.running_microtasks {
+    return;
+  }
+  state.running_microtasks = true;
+
+  loop {
+    let function = {
+      let state = unsafe { isolate_state(isolate) };
+      if state.microtasks.is_empty() {
+        state.running_microtasks = false;
+        break;
+      }
+      state.microtasks.remove(0)
+    };
+    let receiver = v8__Undefined(isolate).cast();
+    let _ = invoke_function(function, receiver, 0, ptr::null(), false);
+    // V8 reports and clears exceptions thrown by microtasks rather than
+    // leaking them into the caller of PerformMicrotaskCheckpoint.
+    let state = unsafe { isolate_state(isolate) };
+    state.pending_exception = ptr::null();
+    if let Some(try_catch) = unsafe { state.active_try_catch.as_mut() } {
+      try_catch.exception = ptr::null();
+    }
   }
 }
 
@@ -860,6 +1356,155 @@ pub extern "C" fn v8__HandleScope__CONSTRUCT(
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__HandleScope__DESTRUCT(_scope: *mut usize) {}
 
+unsafe fn try_catch_state<'a>(
+  this: *const usize,
+) -> Option<&'a TryCatchAbiState> {
+  unsafe { this.cast::<TryCatchAbiState>().as_ref() }
+}
+
+unsafe fn try_catch_state_mut<'a>(
+  this: *mut usize,
+) -> Option<&'a mut TryCatchAbiState> {
+  unsafe { this.cast::<TryCatchAbiState>().as_mut() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__CONSTRUCT(
+  buffer: *mut usize,
+  isolate: *mut RealIsolate,
+) {
+  if buffer.is_null() {
+    return;
+  }
+  let previous = if isolate.is_null() {
+    ptr::null_mut()
+  } else {
+    unsafe { isolate_state(isolate).active_try_catch }
+  };
+  let try_catch = buffer.cast::<TryCatchAbiState>();
+  unsafe {
+    try_catch.write(TryCatchAbiState {
+      isolate,
+      previous,
+      exception: ptr::null(),
+      flags: TRY_CATCH_CAPTURE_MESSAGE,
+      reserved: [0; 2],
+    });
+  }
+  if !isolate.is_null() {
+    unsafe { isolate_state(isolate).active_try_catch = try_catch };
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__DESTRUCT(this: *mut usize) {
+  let Some(try_catch) = (unsafe { try_catch_state(this) }).copied() else {
+    return;
+  };
+  if try_catch.isolate.is_null() {
+    return;
+  }
+
+  let isolate = unsafe { isolate_state(try_catch.isolate) };
+  if isolate.active_try_catch != this.cast::<TryCatchAbiState>() {
+    eprintln!("v8x/js2wasm: TryCatch scopes were destroyed out of order");
+    std::process::abort();
+  }
+  isolate.active_try_catch = try_catch.previous;
+
+  if try_catch.flags & TRY_CATCH_RETHROWN != 0 && !try_catch.exception.is_null()
+  {
+    if let Some(previous) = unsafe { try_catch.previous.as_mut() } {
+      previous.exception = try_catch.exception;
+    } else {
+      isolate.pending_exception = try_catch.exception;
+    }
+  }
+  unsafe { ptr::write_bytes(this, 0, 6) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__HasCaught(this: *const usize) -> bool {
+  unsafe { try_catch_state(this) }
+    .is_some_and(|try_catch| !try_catch.exception.is_null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__CanContinue(_this: *const usize) -> bool {
+  // This backend does not yet implement execution termination, so all caught
+  // JavaScript exceptions remain continuable.
+  true
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__HasTerminated(_this: *const usize) -> bool {
+  false
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__IsVerbose(this: *const usize) -> bool {
+  unsafe { try_catch_state(this) }
+    .is_some_and(|try_catch| try_catch.flags & TRY_CATCH_VERBOSE != 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__SetVerbose(this: *mut usize, value: bool) {
+  let Some(try_catch) = (unsafe { try_catch_state_mut(this) }) else {
+    return;
+  };
+  if value {
+    try_catch.flags |= TRY_CATCH_VERBOSE;
+  } else {
+    try_catch.flags &= !TRY_CATCH_VERBOSE;
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__SetCaptureMessage(
+  this: *mut usize,
+  value: bool,
+) {
+  let Some(try_catch) = (unsafe { try_catch_state_mut(this) }) else {
+    return;
+  };
+  if value {
+    try_catch.flags |= TRY_CATCH_CAPTURE_MESSAGE;
+  } else {
+    try_catch.flags &= !TRY_CATCH_CAPTURE_MESSAGE;
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__Reset(this: *mut usize) {
+  let Some(try_catch) = (unsafe { try_catch_state_mut(this) }) else {
+    return;
+  };
+  // V8 deliberately keeps a rethrown exception live even if Reset is called
+  // before the inner scope unwinds.
+  if try_catch.flags & TRY_CATCH_RETHROWN == 0 {
+    try_catch.exception = ptr::null();
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__Exception(this: *const usize) -> *const Value {
+  unsafe { try_catch_state(this) }
+    .map(|try_catch| try_catch.exception)
+    .unwrap_or(ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TryCatch__ReThrow(this: *mut usize) -> *const Value {
+  let Some(try_catch) = (unsafe { try_catch_state_mut(this) }) else {
+    return ptr::null();
+  };
+  if try_catch.exception.is_null() {
+    return ptr::null();
+  }
+  try_catch.flags |= TRY_CATCH_RETHROWN;
+  try_catch.exception
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Local__New(
   _isolate: *mut RealIsolate,
@@ -879,9 +1524,62 @@ pub extern "C" fn v8__Global__New(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Global__NewWeak(
+  isolate: *mut RealIsolate,
+  value: *const Data,
+  _parameter: *const c_void,
+  _callback: unsafe extern "C" fn(*const c_void),
+) -> *const Data {
+  if isolate.is_null() || value.is_null() {
+    return ptr::null();
+  }
+  // HeapValue allocations never move and remain owned until Isolate::Dispose,
+  // so a weak handle observes the exact same address for that lifetime. Do not
+  // retain the callback parameter or invoke the callback early: rusty_v8 owns
+  // WeakData and drains guaranteed finalizers from its isolate annex before
+  // disposal. Retaining that borrowed parameter here would outlive WeakData.
+  value
+}
+
+#[cold]
+fn unexpected_weak_callback_info_access() -> ! {
+  eprintln!("v8x/js2wasm: weak callback info is unreachable without engine GC");
+  std::process::abort()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__WeakCallbackInfo__GetIsolate(
+  _info: *const c_void,
+) -> *mut RealIsolate {
+  unexpected_weak_callback_info_access()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__WeakCallbackInfo__GetParameter(
+  _info: *const c_void,
+) -> *mut c_void {
+  unexpected_weak_callback_info_access()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__WeakCallbackInfo__SetSecondPassCallback(
+  _info: *const c_void,
+  _callback: unsafe extern "C" fn(*const c_void),
+) {
+  unexpected_weak_callback_info_access()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Global__Reset(_value: *const Data) {
   // The isolate owns the allocation. Reset only releases the logical handle;
   // there is no moving collector or separate persistent cell to destroy.
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__EQ(left: *const Data, right: *const Data) -> bool {
+  // Handles are direct pointers into the stable, isolate-owned HeapValue
+  // arena. Therefore V8 identity equality is exact pointer equality.
+  ptr::eq(left, right)
 }
 
 #[unsafe(no_mangle)]
@@ -923,11 +1621,30 @@ pub extern "C" fn v8__FunctionTemplate__New(
     HeapValue::FunctionTemplate(FunctionTemplateState {
       callback,
       data,
+      class_name: ptr::null(),
       properties: Vec::new(),
       prototype_template,
       instance_template,
     }),
   )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionTemplate__SetClassName(
+  template: *const crate::FunctionTemplate,
+  name: *const V8String,
+) {
+  if name.is_null() {
+    return;
+  }
+  if let Some(HeapValue::FunctionTemplate(state)) =
+    (unsafe { heap_value_mut(template) })
+  {
+    // Strings are stable isolate-owned allocations, so preserving this exact
+    // pointer also preserves V8 handle identity when GetFunction materializes
+    // the constructor.
+    state.class_name = name;
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -1110,6 +1827,46 @@ pub extern "C" fn v8__Object__New(isolate: *mut RealIsolate) -> *const Object {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__New__with_prototype_and_properties(
+  isolate: *mut RealIsolate,
+  prototype_or_null: *const Value,
+  names: *const *const crate::Name,
+  values: *const *const Value,
+  length: usize,
+) -> *const Object {
+  if isolate.is_null()
+    || prototype_or_null.is_null()
+    || !is_valid_prototype(prototype_or_null)
+    || (length != 0 && (names.is_null() || values.is_null()))
+  {
+    return ptr::null();
+  }
+
+  let mut properties = Vec::with_capacity(length);
+  for index in 0..length {
+    let name = unsafe { *names.add(index) };
+    let value = unsafe { *values.add(index) };
+    if name.is_null() || value.is_null() {
+      return ptr::null();
+    }
+    properties.push(TemplateProperty {
+      key: name,
+      value: value.cast(),
+      attributes: 0,
+    });
+  }
+
+  allocate(
+    isolate,
+    HeapValue::Object(ObjectState {
+      prototype: Some(prototype_or_null),
+      properties,
+      internal_fields: Vec::new(),
+    }),
+  )
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Array__New(
   isolate: *mut RealIsolate,
   length: int,
@@ -1157,21 +1914,366 @@ pub extern "C" fn v8__Array__Length(array: *const Array) -> u32 {
   }
 }
 
+unsafe fn array_buffer_state<'a>(
+  array_buffer: *const ArrayBuffer,
+) -> Option<&'a ArrayBufferState> {
+  match unsafe { heap_value(array_buffer) } {
+    Some(HeapValue::ArrayBuffer(state)) => Some(state),
+    _ => None,
+  }
+}
+
+unsafe fn typed_array_state<'a, T>(
+  typed_array: *const T,
+) -> Option<&'a TypedArrayState> {
+  match unsafe { heap_value(typed_array) } {
+    Some(HeapValue::TypedArray(state)) => Some(state),
+    _ => None,
+  }
+}
+
+fn typed_array_backing_store(
+  typed_array: &TypedArrayState,
+) -> Option<&'static BackingStoreState> {
+  let buffer = unsafe { array_buffer_state(typed_array.buffer) }?;
+  unsafe { backing_store_state(buffer.backing_store.object.cast()) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__New__with_backing_store(
+  isolate: *mut RealIsolate,
+  backing_store: *const crate::support::SharedRef<BackingStore>,
+) -> *const ArrayBuffer {
+  if isolate.is_null() || backing_store.is_null() {
+    return ptr::null();
+  }
+  let repr =
+    unsafe { shared_repr(backing_store.cast::<SharedPtrBase<BackingStore>>()) };
+  if repr.object.is_null() || repr.references.is_null() {
+    return ptr::null();
+  }
+  allocate(
+    isolate,
+    HeapValue::ArrayBuffer(ArrayBufferState {
+      backing_store: retain_backing_store(repr),
+    }),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__Data(
+  array_buffer: *const ArrayBuffer,
+) -> *mut c_void {
+  unsafe { array_buffer_state(array_buffer) }
+    .and_then(|state| unsafe {
+      backing_store_state(state.backing_store.object.cast())
+    })
+    .map(|state| state.data)
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__ByteLength(
+  array_buffer: *const ArrayBuffer,
+) -> usize {
+  unsafe { array_buffer_state(array_buffer) }
+    .and_then(|state| unsafe {
+      backing_store_state(state.backing_store.object.cast())
+    })
+    .map(|state| state.byte_length)
+    .unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__GetBackingStore(
+  array_buffer: *const ArrayBuffer,
+) -> crate::support::SharedRef<BackingStore> {
+  let Some(state) = (unsafe { array_buffer_state(array_buffer) }) else {
+    eprintln!("v8x/js2wasm: get backing store of a non-ArrayBuffer value");
+    std::process::abort();
+  };
+  unsafe { backing_store_shared_ref(retain_backing_store(state.backing_store)) }
+}
+
+fn new_typed_array<T>(
+  buffer: *const ArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+  kind: TypedArrayKind,
+) -> *const T {
+  let Some(buffer_state) = (unsafe { array_buffer_state(buffer) }) else {
+    return ptr::null();
+  };
+  let Some(backing_store) =
+    (unsafe { backing_store_state(buffer_state.backing_store.object.cast()) })
+  else {
+    return ptr::null();
+  };
+  let element_size = kind.element_size();
+  let Some(byte_length) = length.checked_mul(element_size) else {
+    return ptr::null();
+  };
+  let Some(end) = byte_offset.checked_add(byte_length) else {
+    return ptr::null();
+  };
+  if byte_offset % element_size != 0 || end > backing_store.byte_length {
+    return ptr::null();
+  }
+  allocate(
+    current_isolate(),
+    HeapValue::TypedArray(TypedArrayState {
+      buffer,
+      byte_offset,
+      length,
+      kind,
+      properties: Vec::new(),
+    }),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Uint8Array__New(
+  buffer: *const ArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+) -> *const Uint8Array {
+  new_typed_array(buffer, byte_offset, length, TypedArrayKind::Uint8)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Uint32Array__New(
+  buffer: *const ArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+) -> *const Uint32Array {
+  new_typed_array(buffer, byte_offset, length, TypedArrayKind::Uint32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Int32Array__New(
+  buffer: *const ArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+) -> *const Int32Array {
+  new_typed_array(buffer, byte_offset, length, TypedArrayKind::Int32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBufferView__Buffer(
+  view: *const ArrayBufferView,
+) -> *const ArrayBuffer {
+  unsafe { typed_array_state(view) }
+    .map(|state| state.buffer)
+    .unwrap_or(ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBufferView__Buffer__Data(
+  view: *const ArrayBufferView,
+) -> *mut c_void {
+  unsafe { typed_array_state(view) }
+    .and_then(typed_array_backing_store)
+    .map(|state| state.data)
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBufferView__ByteLength(
+  view: *const ArrayBufferView,
+) -> usize {
+  unsafe { typed_array_state(view) }
+    .map(|state| state.length * state.kind.element_size())
+    .unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBufferView__ByteOffset(
+  view: *const ArrayBufferView,
+) -> usize {
+  unsafe { typed_array_state(view) }
+    .map(|state| state.byte_offset)
+    .unwrap_or_default()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBufferView__HasBuffer(
+  view: *const ArrayBufferView,
+) -> bool {
+  unsafe { typed_array_state(view) }.is_some()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__TypedArray__Length(
+  typed_array: *const TypedArray,
+) -> usize {
+  unsafe { typed_array_state(typed_array) }
+    .map(|state| state.length)
+    .unwrap_or_default()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__Get(
   object: *const Object,
   _context: *const Context,
   key: *const Value,
 ) -> *const Value {
-  properties(object)
-    .and_then(|properties| {
-      properties
-        .iter()
-        .rev()
-        .find(|property| same_property_key(property.key.cast(), key.cast()))
-    })
+  property_on_chain(object, key.cast())
     .map(|property| property.value.cast())
     .unwrap_or_else(|| v8__Undefined(current_isolate()).cast())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__GetPrototype(
+  object: *const Object,
+) -> *const Value {
+  match unsafe { heap_value(object) } {
+    Some(HeapValue::Object(state)) => state
+      .prototype
+      .unwrap_or_else(|| v8__Null(current_isolate()).cast()),
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__SetPrototype(
+  object: *const Object,
+  _context: *const Context,
+  prototype: *const Value,
+) -> MaybeBool {
+  if prototype.is_null() || !is_valid_prototype(prototype) {
+    return MaybeBool::Nothing;
+  }
+  if prototype_would_cycle(object, prototype) {
+    return MaybeBool::JustFalse;
+  }
+  let Some(HeapValue::Object(state)) = (unsafe { heap_value_mut(object) })
+  else {
+    return MaybeBool::Nothing;
+  };
+  state.prototype = Some(prototype);
+  MaybeBool::JustTrue
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__Has(
+  object: *const Object,
+  _context: *const Context,
+  key: *const Value,
+) -> MaybeBool {
+  if object.is_null() || key.is_null() {
+    return MaybeBool::Nothing;
+  }
+  if property_on_chain(object, key.cast()).is_some() {
+    MaybeBool::JustTrue
+  } else {
+    MaybeBool::JustFalse
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__HasOwnProperty(
+  object: *const Object,
+  _context: *const Context,
+  key: *const crate::Name,
+) -> MaybeBool {
+  if object.is_null() || key.is_null() {
+    return MaybeBool::Nothing;
+  }
+  if own_property(object, key.cast()).is_some() {
+    MaybeBool::JustTrue
+  } else {
+    MaybeBool::JustFalse
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__Delete(
+  object: *const Object,
+  _context: *const Context,
+  key: *const Value,
+) -> MaybeBool {
+  if object.is_null() || key.is_null() {
+    return MaybeBool::Nothing;
+  }
+  let Some(properties) = properties_mut(object) else {
+    return MaybeBool::Nothing;
+  };
+  let Some(index) = properties
+    .iter()
+    .rposition(|property| same_property_key(property.key.cast(), key.cast()))
+  else {
+    return MaybeBool::JustTrue;
+  };
+  if properties[index].attributes & (1 << 2) != 0 {
+    return MaybeBool::JustFalse;
+  }
+  properties
+    .retain(|property| !same_property_key(property.key.cast(), key.cast()));
+  MaybeBool::JustTrue
+}
+
+fn typed_array_element(state: &TypedArrayState, index: usize) -> Option<f64> {
+  if index >= state.length {
+    return None;
+  }
+  let backing_store = typed_array_backing_store(state)?;
+  let byte_offset = state
+    .byte_offset
+    .checked_add(index.checked_mul(state.kind.element_size())?)?;
+  let data = unsafe { backing_store.data.cast::<u8>().add(byte_offset) };
+  Some(unsafe {
+    match state.kind {
+      TypedArrayKind::Uint8 => f64::from(data.read()),
+      TypedArrayKind::Uint32 => f64::from(data.cast::<u32>().read_unaligned()),
+      TypedArrayKind::Int32 => f64::from(data.cast::<i32>().read_unaligned()),
+    }
+  })
+}
+
+fn integer_modulo(number: f64, modulus: f64) -> f64 {
+  if !number.is_finite() || number == 0.0 {
+    0.0
+  } else {
+    number.trunc().rem_euclid(modulus)
+  }
+}
+
+fn set_typed_array_element(
+  state: &TypedArrayState,
+  index: usize,
+  number: f64,
+) -> bool {
+  if index >= state.length {
+    return true;
+  }
+  let Some(backing_store) = typed_array_backing_store(state) else {
+    return false;
+  };
+  let Some(byte_offset) = index
+    .checked_mul(state.kind.element_size())
+    .and_then(|offset| state.byte_offset.checked_add(offset))
+  else {
+    return false;
+  };
+  let data = unsafe { backing_store.data.cast::<u8>().add(byte_offset) };
+  unsafe {
+    match state.kind {
+      TypedArrayKind::Uint8 => {
+        data.write(integer_modulo(number, 256.0) as u8);
+      }
+      TypedArrayKind::Uint32 => {
+        data
+          .cast::<u32>()
+          .write_unaligned(integer_modulo(number, 4_294_967_296.0) as u32);
+      }
+      TypedArrayKind::Int32 => {
+        data.cast::<i32>().write_unaligned(
+          (integer_modulo(number, 4_294_967_296.0) as u32) as i32,
+        );
+      }
+    }
+  }
+  true
 }
 
 #[unsafe(no_mangle)]
@@ -1186,6 +2288,11 @@ pub extern "C" fn v8__Object__GetIndex(
       .get(index as usize)
       .copied()
       .unwrap_or_else(|| v8__Undefined(current_isolate()).cast()),
+    Some(HeapValue::TypedArray(state)) => {
+      typed_array_element(state, index as usize)
+        .map(|value| allocate(current_isolate(), HeapValue::Number(value)))
+        .unwrap_or_else(|| v8__Undefined(current_isolate()).cast())
+    }
     _ => v8__Undefined(current_isolate()).cast(),
   }
 }
@@ -1223,6 +2330,16 @@ pub extern "C" fn v8__Object__SetIndex(
   index: u32,
   value: *const Value,
 ) -> MaybeBool {
+  if let Some(HeapValue::TypedArray(state)) = unsafe { heap_value(object) } {
+    let Some(HeapValue::Number(number)) = (unsafe { heap_value(value) }) else {
+      return MaybeBool::Nothing;
+    };
+    return if set_typed_array_element(state, index as usize, *number) {
+      MaybeBool::JustTrue
+    } else {
+      MaybeBool::Nothing
+    };
+  }
   let undefined = v8__Undefined(current_isolate()).cast();
   let Some(HeapValue::Array(state)) = (unsafe { heap_value_mut(object) })
   else {
@@ -1287,12 +2404,42 @@ pub extern "C" fn v8__Function__New(
   _constructor_behavior: crate::ConstructorBehavior,
   _side_effect_type: crate::SideEffectType,
 ) -> *const crate::Function {
+  allocate_function(current_isolate(), callback, data, Vec::new(), ptr::null())
+}
+
+fn allocate_function(
+  isolate: *mut RealIsolate,
+  callback: crate::FunctionCallback,
+  data: *const Value,
+  mut properties: Vec<TemplateProperty>,
+  name: *const V8String,
+) -> *const crate::Function {
+  let name = if name.is_null() {
+    new_string(isolate, String::new())
+  } else {
+    name
+  };
+  let name_key = new_string(isolate, "name".to_string());
+  if let Some(property) = properties
+    .iter_mut()
+    .rev()
+    .find(|property| same_property_key(property.key.cast(), name_key.cast()))
+  {
+    property.value = name.cast();
+  } else {
+    properties.push(TemplateProperty {
+      key: name_key.cast(),
+      value: name.cast(),
+      attributes: 0,
+    });
+  }
   allocate(
-    current_isolate(),
+    isolate,
     HeapValue::Function(FunctionState {
       callback,
       data,
-      properties: Vec::new(),
+      name,
+      properties,
     }),
   )
 }
@@ -1316,14 +2463,53 @@ pub extern "C" fn v8__FunctionTemplate__GetFunction(
     value: prototype.cast(),
     attributes: 0,
   });
-  allocate(
+  allocate_function(
     current_isolate(),
-    HeapValue::Function(FunctionState {
-      callback: state.callback,
-      data: state.data,
-      properties: function_properties,
-    }),
+    state.callback,
+    state.data,
+    function_properties,
+    state.class_name,
   )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Function__GetName(
+  function: *const crate::Function,
+) -> *const V8String {
+  match unsafe { heap_value(function) } {
+    Some(HeapValue::Function(state)) => state.name,
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Function__SetName(
+  function: *const crate::Function,
+  name: *const V8String,
+) {
+  if name.is_null() {
+    return;
+  }
+  let name_key = new_string(current_isolate(), "name".to_string());
+  let Some(HeapValue::Function(state)) = (unsafe { heap_value_mut(function) })
+  else {
+    return;
+  };
+  state.name = name;
+  if let Some(property) = state
+    .properties
+    .iter_mut()
+    .rev()
+    .find(|property| same_property_key(property.key.cast(), name_key.cast()))
+  {
+    property.value = name.cast();
+  } else {
+    state.properties.push(TemplateProperty {
+      key: name_key.cast(),
+      value: name.cast(),
+      attributes: 0,
+    });
+  }
 }
 
 unsafe fn callback_info<'a>(
@@ -1382,6 +2568,120 @@ fn invoke_function(
     .cast::<crate::function::FunctionCallbackInfo>();
   unsafe { callback(info_ptr) };
   *info.return_slot
+}
+
+fn prelinked_deno_exception(value: *const Value) -> (u32, String) {
+  match unsafe { heap_value(value) } {
+    Some(HeapValue::Error { name, message }) => {
+      let kind = if *name == "TypeError" { 1 } else { 2 };
+      (kind, message.clone())
+    }
+    Some(HeapValue::String(message)) => (2, message.clone()),
+    _ => (
+      2,
+      "Rust Deno op threw an unsupported exception value".to_string(),
+    ),
+  }
+}
+
+fn invoke_prelinked_deno_function(
+  function: usize,
+  arguments: &[*const Value],
+) -> Result<*const Value, (u32, String)> {
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return Err((2, "Rust Deno op has no current isolate".to_string()));
+  }
+  let function = function as *const crate::Function;
+  if !matches!(
+    unsafe { heap_value(function) },
+    Some(HeapValue::Function(_))
+  ) {
+    return Err((2, "Rust Deno op handle is not a Function".to_string()));
+  }
+
+  let mut try_catch = [0_usize; 6];
+  v8__TryCatch__CONSTRUCT(try_catch.as_mut_ptr(), isolate);
+  let receiver = v8__Undefined(isolate).cast();
+  let result = invoke_function(
+    function,
+    receiver,
+    arguments.len().try_into().unwrap_or(int::MAX),
+    arguments.as_ptr(),
+    false,
+  );
+  let exception = v8__TryCatch__Exception(try_catch.as_ptr());
+  let outcome = if exception.is_null() {
+    if result.is_null() {
+      Err((
+        2,
+        "Rust Deno op returned an empty value without throwing".to_string(),
+      ))
+    } else {
+      Ok(result)
+    }
+  } else {
+    Err(prelinked_deno_exception(exception))
+  };
+  v8__TryCatch__Reset(try_catch.as_mut_ptr());
+  v8__TryCatch__DESTRUCT(try_catch.as_mut_ptr());
+  outcome
+}
+
+pub(crate) fn invoke_prelinked_deno_sum(
+  function: usize,
+  is_array: bool,
+  values: &[f64],
+) -> Result<f64, (u32, String)> {
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return Err((2, "Rust Deno op_sum has no current isolate".to_string()));
+  }
+  let argument: *const Value = if is_array {
+    let elements = values
+      .iter()
+      .map(|value| v8__Number__New(isolate, *value).cast())
+      .collect();
+    allocate(
+      isolate,
+      HeapValue::Array(ArrayState {
+        elements,
+        properties: Vec::new(),
+      }),
+    )
+  } else {
+    let Some(value) = values.first().copied().filter(|_| values.len() == 1)
+    else {
+      return Err((
+        2,
+        "Rust Deno op_sum scalar bridge expected exactly one value".to_string(),
+      ));
+    };
+    v8__Number__New(isolate, value).cast()
+  };
+  let result = invoke_prelinked_deno_function(function, &[argument])?;
+  match unsafe { heap_value(result) } {
+    Some(HeapValue::Number(value)) => Ok(*value),
+    _ => Err((
+      2,
+      "Rust Deno op_sum returned a non-number value".to_string(),
+    )),
+  }
+}
+
+pub(crate) fn invoke_prelinked_deno_print(
+  function: usize,
+  units: &[u16],
+  is_error: bool,
+) -> Result<(), (u32, String)> {
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return Err((2, "Rust Deno op_print has no current isolate".to_string()));
+  }
+  let message = new_string(isolate, String::from_utf16_lossy(units));
+  let is_error = v8__Boolean__New(isolate, is_error).cast();
+  invoke_prelinked_deno_function(function, &[message.cast(), is_error])?;
+  Ok(())
 }
 
 #[unsafe(no_mangle)]
@@ -1907,6 +3207,11 @@ pub extern "C" fn v8__Boolean__Value(value: *const Boolean) -> bool {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsTrue(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Boolean(true)))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Number__New(
   isolate: *mut RealIsolate,
   value: f64,
@@ -1920,6 +3225,24 @@ pub extern "C" fn v8__Number__Value(value: *const Number) -> f64 {
     Some(HeapValue::Number(value)) => *value,
     _ => f64::NAN,
   }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__NumberValue(
+  value: *const Value,
+  context: *const Context,
+  out: *mut Maybe<f64>,
+) {
+  let value =
+    if matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_))) {
+      match unsafe { heap_value(value) } {
+        Some(HeapValue::Number(value)) => Some(*value),
+        _ => None,
+      }
+    } else {
+      None
+    };
+  unsafe { write_maybe(out, value) };
 }
 
 #[unsafe(no_mangle)]
@@ -2024,11 +3347,85 @@ pub extern "C" fn v8__Value__IsObject(value: *const Value) -> bool {
     Some(
       HeapValue::Object(_)
         | HeapValue::Array(_)
+        | HeapValue::ArrayBuffer(_)
+        | HeapValue::TypedArray(_)
         | HeapValue::Function(_)
+        | HeapValue::Promise(_)
+        | HeapValue::PromiseResolver(_)
         | HeapValue::Error { .. }
     )
   )
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsModuleNamespaceObject(
+  value: *const Value,
+) -> bool {
+  if value.is_null() {
+    return false;
+  }
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return false;
+  }
+
+  // Source-text and synthetic namespaces are stable Rust-owned objects. Keep
+  // their module-exotic brand at the owning ModuleState boundary rather than
+  // teaching every ordinary Object operation about a new storage variant.
+  // A Local<Value> is only valid in its isolate, so the isolate-owned module
+  // table is also the exact identity set this predicate may observe.
+  unsafe { isolate_state(isolate) }
+    .values
+    .iter()
+    .any(|candidate| {
+      matches!(
+        unsafe { candidate.as_ref() },
+        Some(HeapValue::Module(state))
+          if std::ptr::addr_eq(state.namespace, value)
+      )
+    })
+}
+
+macro_rules! unsupported_value_predicates {
+  ($($name:ident),* $(,)?) => {
+    $(
+      #[unsafe(no_mangle)]
+      pub extern "C" fn $name(_value: *const Value) -> bool {
+        false
+      }
+    )*
+  };
+}
+
+// These brands are queried, in this order, by rusty_v8's Value::type_repr()
+// before it reaches Number. None has a corresponding HeapValue variant in
+// this backend, so a strong false answer is exact and avoids falling through
+// to the diagnostic abort stubs while formatting serde_v8 type errors.
+unsupported_value_predicates!(
+  v8__Value__IsWasmModuleObject,
+  v8__Value__IsWasmMemoryObject,
+  v8__Value__IsProxy,
+  v8__Value__IsSharedArrayBuffer,
+  v8__Value__IsDataView,
+  v8__Value__IsBigUint64Array,
+  v8__Value__IsBigInt64Array,
+  v8__Value__IsFloat64Array,
+  v8__Value__IsFloat32Array,
+  v8__Value__IsInt16Array,
+  v8__Value__IsUint16Array,
+  v8__Value__IsInt8Array,
+  v8__Value__IsUint8ClampedArray,
+  v8__Value__IsWeakSet,
+  v8__Value__IsWeakMap,
+  v8__Value__IsSetIterator,
+  v8__Value__IsMapIterator,
+  v8__Value__IsSet,
+  v8__Value__IsMap,
+  v8__Value__IsGeneratorFunction,
+  v8__Value__IsAsyncFunction,
+  v8__Value__IsRegExp,
+  v8__Value__IsDate,
+);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Value__IsArray(value: *const Value) -> bool {
@@ -2036,8 +3433,53 @@ pub extern "C" fn v8__Value__IsArray(value: *const Value) -> bool {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsArrayBuffer(value: *const Value) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(HeapValue::ArrayBuffer(_))
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsArrayBufferView(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::TypedArray(_)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsTypedArray(value: *const Value) -> bool {
+  v8__Value__IsArrayBufferView(value)
+}
+
+fn is_typed_array_kind(value: *const Value, kind: TypedArrayKind) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(HeapValue::TypedArray(state)) if state.kind == kind
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsUint8Array(value: *const Value) -> bool {
+  is_typed_array_kind(value, TypedArrayKind::Uint8)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsUint32Array(value: *const Value) -> bool {
+  is_typed_array_kind(value, TypedArrayKind::Uint32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsInt32Array(value: *const Value) -> bool {
+  is_typed_array_kind(value, TypedArrayKind::Int32)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Value__IsFunction(value: *const Value) -> bool {
   matches!(unsafe { heap_value(value) }, Some(HeapValue::Function(_)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsPromise(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Promise(_)))
 }
 
 #[unsafe(no_mangle)]
@@ -2080,13 +3522,131 @@ pub extern "C" fn v8__Value__IsNativeError(value: *const Value) -> bool {
   matches!(unsafe { heap_value(value) }, Some(HeapValue::Error { .. }))
 }
 
+// --- Promises -------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Resolver__New(
+  context: *const Context,
+) -> *const PromiseResolver {
+  if context.is_null()
+    || !matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_)))
+  {
+    return ptr::null();
+  }
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let promise =
+    allocate_promise(isolate, PromiseSettlement::Pending, ptr::null());
+  allocate(
+    isolate,
+    HeapValue::PromiseResolver(PromiseResolverState { promise }),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Resolver__GetPromise(
+  resolver: *const PromiseResolver,
+) -> *const Promise {
+  unsafe { promise_resolver_state(resolver) }
+    .map(|state| state.promise)
+    .unwrap_or(ptr::null())
+}
+
+fn settle_promise(
+  resolver: *const PromiseResolver,
+  context: *const Context,
+  value: *const Value,
+  settlement: PromiseSettlement,
+) -> MaybeBool {
+  if context.is_null()
+    || value.is_null()
+    || !matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_)))
+  {
+    return MaybeBool::Nothing;
+  }
+  let Some(promise) =
+    (unsafe { promise_resolver_state(resolver) }).map(|state| state.promise)
+  else {
+    return MaybeBool::Nothing;
+  };
+  let Some(state) = (unsafe { promise_state(promise) }) else {
+    return MaybeBool::Nothing;
+  };
+  if state.settlement == PromiseSettlement::Pending {
+    state.settlement = settlement;
+    state.result = value;
+  }
+  MaybeBool::JustTrue
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Resolver__Resolve(
+  resolver: *const PromiseResolver,
+  context: *const Context,
+  value: *const Value,
+) -> MaybeBool {
+  settle_promise(resolver, context, value, PromiseSettlement::Fulfilled)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Resolver__Reject(
+  resolver: *const PromiseResolver,
+  context: *const Context,
+  value: *const Value,
+) -> MaybeBool {
+  settle_promise(resolver, context, value, PromiseSettlement::Rejected)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__State(promise: *const Promise) -> PromiseState {
+  match unsafe { promise_state(promise) }
+    .map(|state| state.settlement)
+    .unwrap_or(PromiseSettlement::Pending)
+  {
+    PromiseSettlement::Pending => PromiseState::Pending,
+    PromiseSettlement::Fulfilled => PromiseState::Fulfilled,
+    PromiseSettlement::Rejected => PromiseState::Rejected,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__HasHandler(promise: *const Promise) -> bool {
+  unsafe { promise_state(promise) }.is_some_and(|state| state.handled)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__MarkAsHandled(promise: *const Promise) {
+  if let Some(state) = unsafe { promise_state(promise) } {
+    state.handled = true;
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Result(promise: *const Promise) -> *const Value {
+  let Some(state) = (unsafe { promise_state(promise) }) else {
+    return ptr::null();
+  };
+  if state.settlement == PromiseSettlement::Pending {
+    ptr::null()
+  } else {
+    state.result
+  }
+}
+
 // --- Classic scripts ------------------------------------------------------
 
-const DENO_CORE_PRELINKED_SCRIPTS: [(&str, u64); 3] = [
+const DENO_CORE_PRELINKED_SCRIPTS: [(&str, u64); 4] = [
   ("ext:core/00_primordials.js", 0x49d0_171d_7d2c_3f4d),
   ("ext:core/00_infra.js", 0xe1a2_6738_75ca_364c),
+  ("ext:core/02_timers.js", 0xcbd2_6ee0_c68d_cb66),
   ("ext:core/01_core.js", 0xd2f9_d9c6_2c03_7a70),
 ];
+const DENO_CORE_MODULE_SPECIFIER: &str = "ext:core/mod.js";
+const DENO_CORE_MODULE_HASH: u64 = 0xcb8e_ac50_51e4_21a4;
+const DENO_CORE_USAGE_SPECIFIER: &str = "<usage>";
+const DENO_CORE_USAGE_HASH: u64 = 0xd9c8_b2cb_5b20_c3bc;
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
   let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -2158,6 +3718,191 @@ unsafe extern "C" fn prelinked_set_up_async_stub(
   }
 }
 
+const PRELINKED_DENO_CORE_CALLBACKS: &[&str] = &[
+  "__eventLoopTick",
+  "__processTimers",
+  "__drainNextTickAndMacrotasks",
+  "__handleRejections",
+  "buildCustomError",
+  "runImmediateCallbacks",
+  "__setTickInfo",
+  "__setImmediateInfo",
+  "__setTimerInfo",
+];
+
+fn exact_typed_array_values(
+  value: *const Value,
+  expected_kind: TypedArrayKind,
+  expected_length: usize,
+  name: &str,
+) -> Result<Vec<f64>, String> {
+  let Some(state) = (unsafe { typed_array_state(value) }) else {
+    return Err(format!(
+      "prelinked Deno callback {name} expected a typed-array argument"
+    ));
+  };
+  if state.kind != expected_kind || state.length != expected_length {
+    return Err(format!(
+      "prelinked Deno callback {name} received the wrong typed-array kind or length"
+    ));
+  }
+  (0..state.length)
+    .map(|index| {
+      typed_array_element(state, index).ok_or_else(|| {
+        format!("prelinked Deno callback {name} could not read element {index}")
+      })
+    })
+    .collect()
+}
+
+fn invoke_prelinked_deno_setter(
+  name: &str,
+  argument: *const Value,
+) -> Result<(), String> {
+  let context = current_context();
+  let Some(HeapValue::Context(context_state)) =
+    (unsafe { heap_value_mut(context) })
+  else {
+    return Err(format!(
+      "prelinked Deno callback {name} has no live context"
+    ));
+  };
+  let runtime = context_state
+    .deno_core_bootstrap
+    .as_mut()
+    .ok_or_else(|| format!("prelinked Deno callback {name} has no runtime"))?;
+  match name {
+    "__setTickInfo" => {
+      let values =
+        exact_typed_array_values(argument, TypedArrayKind::Uint8, 2, name)?;
+      runtime.set_deno_tick_info([values[0] as u8, values[1] as u8])
+    }
+    "__setImmediateInfo" => {
+      let values =
+        exact_typed_array_values(argument, TypedArrayKind::Uint32, 3, name)?;
+      runtime.set_deno_immediate_info([
+        values[0] as u32,
+        values[1] as u32,
+        values[2] as u32,
+      ])
+    }
+    "__setTimerInfo" => {
+      let values =
+        exact_typed_array_values(argument, TypedArrayKind::Int32, 1, name)?;
+      runtime.set_deno_timer_info(values[0] as i32)
+    }
+    _ => Err(format!("prelinked Deno callback {name} is not a setter")),
+  }
+}
+
+fn throw_prelinked_callback_error(
+  info: &mut CallbackInfoState,
+  message: String,
+) {
+  let message = new_string(info.isolate, message);
+  let exception = allocate_error(message, "Error");
+  v8__Isolate__ThrowException(info.isolate, exception);
+  *info.return_slot = ptr::null();
+}
+
+fn prelinked_error_name(class: &str) -> &'static str {
+  match class {
+    "RangeError" => "RangeError",
+    "ReferenceError" => "ReferenceError",
+    "SyntaxError" => "SyntaxError",
+    "TypeError" => "TypeError",
+    "URIError" => "URIError",
+    _ => "Error",
+  }
+}
+
+fn build_prelinked_custom_error(
+  info: &mut CallbackInfoState,
+) -> Result<(), String> {
+  let class = info
+    .args
+    .first()
+    .and_then(|value| unsafe { string_value(*value) })
+    .ok_or_else(|| {
+      "prelinked Deno buildCustomError expected a string class".to_string()
+    })?;
+  let message = info
+    .args
+    .get(1)
+    .copied()
+    .and_then(|value| unsafe { string_value(value) })
+    .ok_or_else(|| {
+      "prelinked Deno buildCustomError expected a string message".to_string()
+    })?;
+  let message = new_string(info.isolate, message.to_owned());
+  *info.return_slot = allocate_error(message, prelinked_error_name(class));
+  Ok(())
+}
+
+unsafe extern "C" fn prelinked_deno_core_callback(
+  info: *const crate::function::FunctionCallbackInfo,
+) {
+  let Some(info) = (unsafe { callback_info(info) }) else {
+    return;
+  };
+  let name = unsafe { string_value(info.data) }
+    .unwrap_or("<unknown>")
+    .to_owned();
+  if name == "buildCustomError" {
+    if let Err(error) = build_prelinked_custom_error(info) {
+      throw_prelinked_callback_error(info, error);
+    }
+    return;
+  }
+  if matches!(
+    name.as_str(),
+    "__setTickInfo" | "__setImmediateInfo" | "__setTimerInfo"
+  ) {
+    let argument = info
+      .args
+      .first()
+      .copied()
+      .unwrap_or_else(|| v8__Undefined(info.isolate).cast());
+    match invoke_prelinked_deno_setter(&name, argument) {
+      Ok(()) => {
+        *info.return_slot = v8__Undefined(info.isolate).cast();
+      }
+      Err(error) => throw_prelinked_callback_error(info, error),
+    }
+    return;
+  }
+  throw_prelinked_callback_error(
+    info,
+    format!("prelinked Deno callback {name} is not bridged yet"),
+  );
+}
+
+fn install_prelinked_deno_core_callbacks(
+  context: *const Context,
+) -> Result<(), String> {
+  let global = match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state.global,
+    _ => return Err("classic script has no live v8x context".to_string()),
+  };
+  let deno = named_property(global, "Deno")
+    .ok_or_else(|| "Rust-owned global has no Deno object".to_string())?;
+  let core = named_property(deno, "core")
+    .ok_or_else(|| "Rust-owned Deno object has no core object".to_string())?;
+  for name in PRELINKED_DENO_CORE_CALLBACKS {
+    let name_value = new_string(current_isolate(), (*name).to_string());
+    let function = allocate_function(
+      current_isolate(),
+      prelinked_deno_core_callback,
+      name_value.cast(),
+      Vec::new(),
+      name_value,
+    );
+    set_named_property(core, name, function.cast())?;
+  }
+  let error_constructors = new_object(current_isolate());
+  set_named_property(core, "errorConstructors", error_constructors.cast())
+}
+
 fn install_prelinked_deno_core_bridge(
   context: *const Context,
 ) -> Result<(), String> {
@@ -2169,15 +3914,41 @@ fn install_prelinked_deno_core_bridge(
     .ok_or_else(|| "Rust-owned global has no Deno object".to_string())?;
   let core = named_property(deno, "core")
     .ok_or_else(|| "Rust-owned Deno object has no core object".to_string())?;
-  let stub = allocate(
+  let stub = allocate_function(
     current_isolate(),
-    HeapValue::Function(FunctionState {
-      callback: prelinked_set_up_async_stub,
-      data: ptr::null(),
-      properties: Vec::new(),
-    }),
+    prelinked_set_up_async_stub,
+    ptr::null(),
+    Vec::new(),
+    ptr::null(),
   );
-  set_named_property(core, "setUpAsyncStub", stub)
+  set_named_property(core, "setUpAsyncStub", stub.cast())
+}
+
+fn resolve_prelinked_deno_ops(
+  context: *const Context,
+) -> Result<(usize, usize), String> {
+  let global = match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state.global,
+    _ => return Err("classic script has no live v8x context".to_string()),
+  };
+  let deno = named_property(global, "Deno")
+    .ok_or_else(|| "Rust-owned global has no Deno object".to_string())?;
+  let core = named_property(deno, "core")
+    .ok_or_else(|| "Rust-owned Deno object has no core object".to_string())?;
+  let ops = named_property(core, "ops")
+    .ok_or_else(|| "Rust-owned Deno.core has no ops object".to_string())?;
+  let resolve = |name| {
+    let function = named_property(ops, name)
+      .ok_or_else(|| format!("Rust-owned Deno.core.ops has no {name}"))?;
+    if !matches!(
+      unsafe { heap_value(function) },
+      Some(HeapValue::Function(_))
+    ) {
+      return Err(format!("Rust-owned Deno.core.ops.{name} is not a Function"));
+    }
+    Ok(function as usize)
+  };
+  Ok((resolve("op_print")?, resolve("op_sum")?))
 }
 
 fn run_prelinked_deno_core_script(
@@ -2221,6 +3992,12 @@ fn run_prelinked_deno_core_script(
   if phase == 0 {
     install_prelinked_deno_core_bridge(context)?;
   }
+  let final_wrapper = phase + 1 == DENO_CORE_PRELINKED_SCRIPTS.len();
+  let deno_ops = if final_wrapper {
+    Some(resolve_prelinked_deno_ops(context)?)
+  } else {
+    None
+  };
   let Some(HeapValue::Context(context_state)) =
     (unsafe { heap_value_mut(context) })
   else {
@@ -2229,7 +4006,59 @@ fn run_prelinked_deno_core_script(
   if let Some(runtime) = runtime {
     context_state.deno_core_bootstrap = Some(runtime);
   }
+  if final_wrapper {
+    let runtime = context_state
+      .deno_core_bootstrap
+      .as_mut()
+      .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string())?;
+    let (print, sum) = deno_ops
+      .ok_or_else(|| "prelinked Deno op handles disappeared".to_string())?;
+    runtime.bind_deno_ops(print, sum)?;
+    // Older three/four-wrapper artifacts expose only the legacy bootstrap
+    // probe. The staged artifact advances an explicit state machine here so
+    // the later module evaluation re-enters this exact Wasmtime instance.
+    let _ = runtime.advance_deno_core_wrappers()?;
+  }
   context_state.deno_core_bootstrap_phase += 1;
+  if final_wrapper {
+    install_prelinked_deno_core_callbacks(context)?;
+  }
+  Ok(true)
+}
+
+fn run_prelinked_deno_usage_script(
+  context: *const Context,
+  state: &ScriptState,
+) -> Result<bool, String> {
+  if state.specifier != DENO_CORE_USAGE_SPECIFIER {
+    return Ok(false);
+  }
+  let actual_hash = fnv1a64(state.source.as_bytes());
+  if actual_hash != DENO_CORE_USAGE_HASH {
+    return Err(format!(
+      "prelinked script {:?} has FNV-1a hash {actual_hash:#018x}, expected {DENO_CORE_USAGE_HASH:#018x}",
+      state.specifier,
+    ));
+  }
+  let Some(HeapValue::Context(context_state)) =
+    (unsafe { heap_value_mut(context) })
+  else {
+    return Err("usage script has no live v8x context".to_string());
+  };
+  if context_state.deno_core_bootstrap_phase
+    != DENO_CORE_PRELINKED_SCRIPTS.len()
+  {
+    return Err(format!(
+      "prelinked Deno usage ran at bootstrap phase {}, expected {}",
+      context_state.deno_core_bootstrap_phase,
+      DENO_CORE_PRELINKED_SCRIPTS.len(),
+    ));
+  }
+  context_state
+    .deno_core_bootstrap
+    .as_mut()
+    .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string())?
+    .advance_deno_core_usage()?;
   Ok(true)
 }
 
@@ -2268,6 +4097,14 @@ pub extern "C" fn v8__Script__Run(
     return ptr::null();
   };
   match run_prelinked_deno_core_script(context, state) {
+    Ok(true) => return v8__Undefined(current_isolate()).cast(),
+    Ok(false) => {}
+    Err(error) => {
+      eprintln!("v8x/js2wasm: {error}");
+      return ptr::null();
+    }
+  }
+  match run_prelinked_deno_usage_script(context, state) {
     Ok(true) => return v8__Undefined(current_isolate()).cast(),
     Ok(false) => {}
     Err(error) => {
@@ -2375,7 +4212,7 @@ pub extern "C" fn v8__ScriptCompiler__CompileModule(
   _options: CompileOptions,
   _no_cache_reason: NoCacheReason,
 ) -> *const Module {
-  if source.is_null() {
+  if isolate.is_null() || source.is_null() {
     return ptr::null();
   }
   let words = source.cast::<usize>();
@@ -2387,15 +4224,111 @@ pub extern "C" fn v8__ScriptCompiler__CompileModule(
   let specifier = unsafe { string_value(resource_name) }
     .unwrap_or_default()
     .to_string();
+  let imports = parse_static_imports(source);
+  let source_mapping_url = allocate::<Value>(isolate, HeapValue::Undefined);
+  let unbound_script = allocate::<UnboundModuleScript>(
+    isolate,
+    HeapValue::UnboundModuleScript(UnboundModuleScriptState {
+      source_mapping_url,
+    }),
+  );
+  // This first metadata slice intentionally handles the exact zero-import
+  // Deno bootstrap module. A non-empty request list needs real ModuleRequest
+  // objects rather than a silently empty array, so leave that later boundary
+  // fail-loud by returning a null requests handle.
+  let module_requests = if imports.is_empty() {
+    allocate::<FixedArray>(isolate, HeapValue::FixedArray(Vec::new()))
+  } else {
+    ptr::null()
+  };
+  let namespace = new_object(isolate);
+  let prelinked_deno_module = specifier == DENO_CORE_MODULE_SPECIFIER
+    && fnv1a64(source.as_bytes()) == DENO_CORE_MODULE_HASH;
   allocate(
     isolate,
     HeapValue::Module(ModuleState {
       status: STATUS_UNINSTANTIATED,
       source: source.to_string(),
       specifier,
-      imports: parse_static_imports(source),
+      imports,
       dependencies: Vec::new(),
       runtime: None,
+      synthetic: None,
+      evaluation_result: ptr::null(),
+      exception: ptr::null(),
+      unbound_script,
+      module_requests,
+      namespace,
+      prelinked_deno_module,
+    }),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__CreateSyntheticModule(
+  isolate: *const RealIsolate,
+  module_name: *const V8String,
+  export_names_len: usize,
+  export_names_raw: *const *const V8String,
+  evaluation_steps: SyntheticModuleEvaluationSteps,
+) -> *const Module {
+  let isolate = isolate.cast_mut();
+  if isolate.is_null()
+    || module_name.is_null()
+    || (export_names_len != 0 && export_names_raw.is_null())
+  {
+    return ptr::null();
+  }
+  let Some(specifier) = (unsafe { string_value(module_name) }) else {
+    return ptr::null();
+  };
+
+  let namespace = new_object(isolate);
+  let undefined = allocate::<Value>(isolate, HeapValue::Undefined);
+  let mut export_names = Vec::with_capacity(export_names_len);
+  let mut unique_names = HashSet::with_capacity(export_names_len);
+
+  for index in 0..export_names_len {
+    let export_name = unsafe { *export_names_raw.add(index) };
+    let Some(name) = (unsafe { string_value(export_name) }) else {
+      return ptr::null();
+    };
+    if !unique_names.insert(name.to_owned()) {
+      return ptr::null();
+    }
+    export_names.push(name.to_owned());
+    let Some(properties) = properties_mut(namespace) else {
+      return ptr::null();
+    };
+    properties.push(TemplateProperty {
+      key: export_name.cast(),
+      value: undefined.cast(),
+      attributes: 0,
+    });
+  }
+
+  let evaluation_steps: SyntheticModuleEvaluationSteps<'static> =
+    unsafe { std::mem::transmute(evaluation_steps) };
+  allocate(
+    isolate,
+    HeapValue::Module(ModuleState {
+      status: STATUS_UNINSTANTIATED,
+      source: String::new(),
+      specifier: specifier.to_owned(),
+      imports: Vec::new(),
+      dependencies: Vec::new(),
+      runtime: None,
+      synthetic: Some(SyntheticModuleState {
+        export_names,
+        evaluation_steps,
+        namespace,
+      }),
+      evaluation_result: ptr::null(),
+      exception: ptr::null(),
+      unbound_script: ptr::null(),
+      module_requests: ptr::null(),
+      namespace,
+      prelinked_deno_module: false,
     }),
   )
 }
@@ -2410,6 +4343,144 @@ pub extern "C" fn v8__Module__GetStatus(module: *const Module) -> ModuleStatus {
     Some(STATUS_EVALUATED) => ModuleStatus::Evaluated,
     _ => ModuleStatus::Errored,
   }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__GetUnboundModuleScript(
+  module: *const Module,
+) -> *const UnboundModuleScript {
+  unsafe { module_state(module) }
+    .map(|state| state.unbound_script)
+    .unwrap_or(ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__UnboundModuleScript__GetSourceMappingURL(
+  script: *const UnboundModuleScript,
+) -> *const Value {
+  match unsafe { heap_value(script) } {
+    Some(HeapValue::UnboundModuleScript(state)) => state.source_mapping_url,
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__GetModuleRequests(
+  module: *const Module,
+) -> *const FixedArray {
+  unsafe { module_state(module) }
+    .map(|state| state.module_requests)
+    .unwrap_or(ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FixedArray__Length(array: *const FixedArray) -> int {
+  match unsafe { heap_value(array) } {
+    Some(HeapValue::FixedArray(elements)) => {
+      int::try_from(elements.len()).unwrap_or(int::MAX)
+    }
+    _ => 0,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FixedArray__Get(
+  array: *const FixedArray,
+  index: int,
+) -> *const Data {
+  let Ok(index) = usize::try_from(index) else {
+    return ptr::null();
+  };
+  match unsafe { heap_value(array) } {
+    Some(HeapValue::FixedArray(elements)) => {
+      elements.get(index).copied().unwrap_or(ptr::null())
+    }
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__GetIdentityHash(module: *const Module) -> int {
+  if module.is_null() || unsafe { module_state(module) }.is_none() {
+    return 1;
+  }
+
+  // Module allocations never move in the Rust-owned heap, so folding their
+  // address provides a stable identity hash. V8 only promises a non-zero hash,
+  // not uniqueness; Data::EQ disambiguates the rare collision.
+  let address = module as usize as u64;
+  let folded = address ^ (address >> 32);
+  let hash = (folded as u32 & i32::MAX as u32) as int;
+  if hash == 0 { 1 } else { hash }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__GetException(
+  module: *const Module,
+) -> *const Value {
+  unsafe { module_state(module) }
+    .map(|state| state.exception)
+    .unwrap_or(ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__GetModuleNamespace(
+  module: *const Module,
+) -> *const Value {
+  let Some(state) = (unsafe { module_state(module) }) else {
+    return ptr::null();
+  };
+  if state.status < STATUS_INSTANTIATED {
+    return ptr::null();
+  }
+  state.namespace.cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__SetSyntheticModuleExport(
+  module: *const Module,
+  isolate: *const RealIsolate,
+  export_name: *const V8String,
+  export_value: *const Value,
+) -> MaybeBool {
+  if isolate.is_null() || export_name.is_null() || export_value.is_null() {
+    return MaybeBool::Nothing;
+  }
+  let Some(name) = (unsafe { string_value(export_name) }) else {
+    return MaybeBool::Nothing;
+  };
+  let Some((namespace, declared)) =
+    (unsafe { module_state(module) }).map(|state| {
+      state
+        .synthetic
+        .as_ref()
+        .map(|synthetic| {
+          (
+            synthetic.namespace,
+            synthetic
+              .export_names
+              .iter()
+              .any(|candidate| candidate == name),
+          )
+        })
+        .unwrap_or((ptr::null(), false))
+    })
+  else {
+    return MaybeBool::Nothing;
+  };
+  if namespace.is_null() || !declared {
+    return MaybeBool::Nothing;
+  }
+  let Some(properties) = properties_mut(namespace) else {
+    return MaybeBool::Nothing;
+  };
+  let Some(property) = properties.iter_mut().find(|property| {
+    same_property_key(property.key.cast(), export_name.cast())
+  }) else {
+    return MaybeBool::Nothing;
+  };
+  property.value = export_value.cast();
+  MaybeBool::JustTrue
 }
 
 #[unsafe(no_mangle)]
@@ -2432,7 +4503,8 @@ pub extern "C" fn v8__Module__InstantiateModule(
 
   for specifier in imports {
     let specifier = new_string(isolate, specifier);
-    let attributes = allocate::<FixedArray>(isolate, HeapValue::FixedArray);
+    let attributes =
+      allocate::<FixedArray>(isolate, HeapValue::FixedArray(Vec::new()));
     let Some(context_local) = (unsafe { crate::Local::from_raw(context) })
     else {
       return MaybeBool::Nothing;
@@ -2492,13 +4564,19 @@ fn collect_graph(
   }
   let (specifier, source, dependencies) = unsafe { module_state(module) }
     .map(|state| {
-      (
+      if state.synthetic.is_some() {
+        return None;
+      }
+      Some((
         state.specifier.clone(),
         state.source.clone(),
         state.dependencies.clone(),
-      )
+      ))
     })
-    .ok_or_else(|| "v8x/js2wasm: invalid module handle".to_string())?;
+    .flatten()
+    .ok_or_else(|| {
+      "v8x/js2wasm: source graph contains a synthetic module".to_string()
+    })?;
   sources.push(crate::js2wasm_spike::SourceModule { specifier, source });
   for dependency in dependencies {
     collect_graph(dependency, seen, sources)?;
@@ -2522,23 +4600,123 @@ fn mark_evaluated(module: *const Module, seen: &mut HashSet<usize>) {
   }
 }
 
+fn fail_module_evaluation(module: *const Module, message: &str) {
+  let message = new_string(current_isolate(), message.to_owned());
+  let exception = allocate_error(message, "Error");
+  if let Some(state) = unsafe { module_state(module) } {
+    state.status = STATUS_ERRORED;
+    state.exception = exception;
+  }
+}
+
+fn evaluate_synthetic_module(
+  module: *const Module,
+  context: *const Context,
+  evaluation_steps: SyntheticModuleEvaluationSteps<'static>,
+) -> *const Value {
+  let Some(context_local) = (unsafe { crate::Local::from_raw(context) }) else {
+    fail_module_evaluation(module, "synthetic module has no current context");
+    return ptr::null();
+  };
+  let Some(module_local) = (unsafe { crate::Local::from_raw(module) }) else {
+    fail_module_evaluation(module, "synthetic module handle is invalid");
+    return ptr::null();
+  };
+
+  #[cfg(not(target_os = "windows"))]
+  let result = {
+    let returned = unsafe { evaluation_steps(context_local, module_local) };
+    unsafe {
+      *(&returned as *const SyntheticModuleEvaluationStepsRet
+        as *const *const Value)
+    }
+  };
+  #[cfg(target_os = "windows")]
+  let result = {
+    let mut result = ptr::null();
+    unsafe {
+      evaluation_steps(&mut result, context_local, module_local);
+    }
+    result
+  };
+
+  if result.is_null() {
+    fail_module_evaluation(
+      module,
+      "synthetic module evaluation callback returned an empty value",
+    );
+    return ptr::null();
+  }
+  if let Some(state) = unsafe { module_state(module) } {
+    state.status = STATUS_EVALUATED;
+    state.evaluation_result = result;
+  }
+  result
+}
+
+fn evaluate_prelinked_deno_module(
+  module: *const Module,
+  context: *const Context,
+) -> *const Value {
+  let result = match unsafe { heap_value_mut(context) } {
+    Some(HeapValue::Context(state)) => state
+      .deno_core_bootstrap
+      .as_mut()
+      .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string())
+      .and_then(|runtime| runtime.advance_deno_core_module()),
+    _ => Err("prelinked Deno module has no live v8x context".to_string()),
+  };
+  if let Err(error) = result {
+    eprintln!("v8x/js2wasm: {error}");
+    fail_module_evaluation(module, &error);
+    return ptr::null();
+  }
+
+  let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
+  let promise = allocate_fulfilled_promise(current_isolate(), undefined).cast();
+  if let Some(state) = unsafe { module_state(module) } {
+    state.status = STATUS_EVALUATED;
+    state.evaluation_result = promise;
+  }
+  promise
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Module__Evaluate(
   module: *const Module,
-  _context: *const Context,
+  context: *const Context,
 ) -> *const Value {
   let Some(state) = (unsafe { module_state(module) }) else {
     return ptr::null();
   };
   if state.status == STATUS_EVALUATED {
-    return allocate(current_isolate(), HeapValue::Promise);
+    if !state.evaluation_result.is_null() {
+      return state.evaluation_result;
+    }
+    let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
+    let promise =
+      allocate_fulfilled_promise(current_isolate(), undefined).cast();
+    state.evaluation_result = promise;
+    return promise;
   }
   if state.status != STATUS_INSTANTIATED {
     state.status = STATUS_ERRORED;
     return ptr::null();
   }
   state.status = STATUS_EVALUATING;
+  let synthetic_evaluation_steps = state
+    .synthetic
+    .as_ref()
+    .map(|synthetic| synthetic.evaluation_steps);
+  let prelinked_deno_module = state.prelinked_deno_module;
   let entry = state.specifier.clone();
+  if let Some(evaluation_steps) = synthetic_evaluation_steps {
+    return evaluate_synthetic_module(module, context, evaluation_steps);
+  }
+  if prelinked_deno_module {
+    return evaluate_prelinked_deno_module(module, context);
+  }
+
   let mut seen = HashSet::new();
   let mut sources = Vec::new();
   let runtime =
@@ -2557,22 +4735,25 @@ pub extern "C" fn v8__Module__Evaluate(
   if let Some(state) = unsafe { module_state(module) } {
     state.runtime = Some(runtime);
   }
+  let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
+  let promise = allocate_fulfilled_promise(current_isolate(), undefined).cast();
+  if let Some(state) = unsafe { module_state(module) } {
+    state.evaluation_result = promise;
+  }
   mark_evaluated(module, &mut HashSet::new());
-  allocate(current_isolate(), HeapValue::Promise)
+  promise
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Module__IsSourceTextModule(
-  _module: *const Module,
+  module: *const Module,
 ) -> bool {
-  true
+  unsafe { module_state(module) }.is_some_and(|state| state.synthetic.is_none())
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn v8__Module__IsSyntheticModule(
-  _module: *const Module,
-) -> bool {
-  false
+pub extern "C" fn v8__Module__IsSyntheticModule(module: *const Module) -> bool {
+  unsafe { module_state(module) }.is_some_and(|state| state.synthetic.is_some())
 }
 
 #[unsafe(no_mangle)]

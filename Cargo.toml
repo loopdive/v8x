@@ -75,6 +75,10 @@ engine_js2wasm = ["dep:wasmtime"]
 # the v8x process. Production builds use `engine_js2wasm` alone and therefore
 # do not link Cranelift or any other Wasm compiler.
 js2wasm_runtime_compile = ["engine_js2wasm", "wasmtime/cranelift"]
+# Diagnostic-only link completion for unchanged deno_core probes. Every
+# otherwise-unresolved v8/inspector/shared-pointer entry is a weak, fail-loud
+# abort stub; this must never be enabled in a production runtime.
+js2wasm_diagnostic_abi = ["engine_js2wasm"]
 # Short aliases (README-facing).
 jsc = ["engine_jsc", "vendor_jsc"]
 # System JavaScriptCore.framework (tiny binary, no vendored WebKit). Apple's

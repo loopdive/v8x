@@ -32,10 +32,28 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 const CWD_LENGTH_IMPORT: &str = "__v8x_op_cwd_utf16_length";
 const CWD_CODE_UNIT_IMPORT: &str = "__v8x_op_cwd_utf16_code_unit";
+const DENO_SUM_BEGIN_IMPORT: &str = "__v8x_deno_sum_begin";
+const DENO_SUM_VALUE_IMPORT: &str = "__v8x_deno_sum_value";
+const DENO_SUM_END_IMPORT: &str = "__v8x_deno_sum_end";
+const DENO_ERROR_KIND_IMPORT: &str = "__v8x_deno_error_kind";
+const DENO_ERROR_LENGTH_IMPORT: &str = "__v8x_deno_error_utf16_length";
+const DENO_ERROR_CODE_UNIT_IMPORT: &str = "__v8x_deno_error_utf16_code_unit";
+const DENO_PRINT_BEGIN_IMPORT: &str = "__v8x_deno_print_begin";
+const DENO_PRINT_CODE_UNIT_IMPORT: &str = "__v8x_deno_print_code_unit";
+const DENO_PRINT_END_IMPORT: &str = "__v8x_deno_print_end";
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
 const CWD_LENGTH_PROBE: &str = "__v8x_probe_cwd_utf16_length";
 const CWD_CHECKSUM_PROBE: &str = "__v8x_probe_cwd_utf16_checksum";
 const DENO_CORE_BOOTSTRAP_PROBE: &str = "__v8x_probe_deno_core_bootstrap";
+const DENO_CORE_WRAPPERS_STAGE: &str = "__v8x_stage_deno_core_wrappers";
+const DENO_CORE_MODULE_STAGE: &str = "__v8x_stage_deno_core_module";
+const DENO_CORE_USAGE_STAGE: &str = "__v8x_stage_deno_hello_world_usage";
+const DENO_CORE_STAGE_STATE_PROBE: &str = "__v8x_probe_deno_stage_state";
+const DENO_CORE_SET_TICK_INFO: &str = "__v8x_set_deno_tick_info";
+const DENO_CORE_SET_IMMEDIATE_INFO: &str = "__v8x_set_deno_immediate_info";
+const DENO_CORE_SET_TIMER_INFO: &str = "__v8x_set_deno_timer_info";
+#[cfg(feature = "js2wasm_runtime_compile")]
+const DENO_CORE_AOT_OUTPUT_ENV: &str = "V8X_JS2WASM_DENO_CORE_AOT_OUTPUT";
 const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
   ("env", "Promise_new"),
   ("env", "Promise_all"),
@@ -46,6 +64,25 @@ const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
   ("js2wasm:runtime-eval", "__runtime_indirect_eval"),
 ];
 
+const DENO_HOST_IMPORTS: &[&str] = &[
+  CWD_LENGTH_IMPORT,
+  CWD_CODE_UNIT_IMPORT,
+  DENO_SUM_BEGIN_IMPORT,
+  DENO_SUM_VALUE_IMPORT,
+  DENO_SUM_END_IMPORT,
+  DENO_ERROR_KIND_IMPORT,
+  DENO_ERROR_LENGTH_IMPORT,
+  DENO_ERROR_CODE_UNIT_IMPORT,
+  DENO_PRINT_BEGIN_IMPORT,
+  DENO_PRINT_CODE_UNIT_IMPORT,
+  DENO_PRINT_END_IMPORT,
+];
+
+// The exact bootstrap fixture is tiny. Keep malformed or adversarial callers
+// from asking the embedding process for an unbounded transaction allocation;
+// exceeding this explicit protocol limit traps instead of aborting on OOM.
+const MAX_DENO_SCALAR_ITEMS: usize = 1 << 20;
+
 #[cfg_attr(not(feature = "js2wasm_runtime_compile"), allow(dead_code))]
 pub(crate) struct SourceModule {
   pub(crate) specifier: String,
@@ -55,6 +92,297 @@ pub(crate) struct SourceModule {
 struct DenoHostState {
   cwd: Vec<u16>,
   cwd_op_calls: u64,
+  deno_op_print: Option<usize>,
+  deno_op_sum: Option<usize>,
+  pending_sum: Option<PendingSum>,
+  pending_print: Option<PendingPrint>,
+  last_error: Option<DenoBridgeError>,
+}
+
+struct PendingSum {
+  is_array: bool,
+  values: Vec<Option<f64>>,
+}
+
+struct PendingPrint {
+  is_error: bool,
+  code_units: Vec<Option<u16>>,
+}
+
+struct DenoBridgeError {
+  kind: u32,
+  message: Vec<u16>,
+}
+
+fn protocol_error(message: impl std::fmt::Display) -> wasmtime::Error {
+  wasmtime::format_err!("v8x/js2wasm Deno scalar bridge: {message}")
+}
+
+fn scalar_bool(value: i32, label: &str) -> wasmtime::Result<bool> {
+  match value {
+    0 => Ok(false),
+    1 => Ok(true),
+    _ => Err(protocol_error(format!(
+      "{label} must be the i32 boolean 0 or 1, received {value}"
+    ))),
+  }
+}
+
+fn scalar_length(value: f64, label: &str) -> wasmtime::Result<usize> {
+  if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+    return Err(protocol_error(format!(
+      "{label} must be a finite non-negative integer, received {value}"
+    )));
+  }
+  if value > MAX_DENO_SCALAR_ITEMS as f64 {
+    return Err(protocol_error(format!(
+      "{label} {value} exceeds the {MAX_DENO_SCALAR_ITEMS}-item protocol limit"
+    )));
+  }
+  Ok(value as usize)
+}
+
+fn scalar_index(
+  value: f64,
+  length: usize,
+  label: &str,
+) -> wasmtime::Result<usize> {
+  let index = scalar_length(value, label)?;
+  if index >= length {
+    return Err(protocol_error(format!(
+      "{label} {index} is outside transaction length {length}"
+    )));
+  }
+  Ok(index)
+}
+
+fn complete_transaction<T>(
+  values: Vec<Option<T>>,
+  label: &str,
+) -> wasmtime::Result<Vec<T>> {
+  values
+    .into_iter()
+    .enumerate()
+    .map(|(index, value)| {
+      value.ok_or_else(|| {
+        protocol_error(format!("{label} is missing item {index}"))
+      })
+    })
+    .collect()
+}
+
+fn set_bridge_error(state: &mut DenoHostState, kind: u32, message: String) {
+  // The Wasm wrapper currently distinguishes the exact serde TypeError from
+  // every other callback/bridge failure. Unknown future kinds remain loud as
+  // ordinary Error rather than accidentally acquiring TypeError semantics.
+  let kind = if kind == 1 { 1 } else { 2 };
+  state.last_error = Some(DenoBridgeError {
+    kind,
+    message: message.encode_utf16().collect(),
+  });
+}
+
+fn deno_sum_begin(
+  mut caller: Caller<'_, DenoHostState>,
+  is_array: i32,
+  length: f64,
+) -> wasmtime::Result<()> {
+  let is_array = scalar_bool(is_array, "sum kind")?;
+  let length = scalar_length(length, "sum length")?;
+  if !is_array && length != 1 {
+    return Err(protocol_error(format!(
+      "scalar sum argument must contain exactly one value, received {length}"
+    )));
+  }
+  let state = caller.data_mut();
+  if state.pending_sum.is_some() || state.pending_print.is_some() {
+    return Err(protocol_error(
+      "sum_begin cannot nest inside another scalar transaction",
+    ));
+  }
+  state.last_error = None;
+  state.pending_sum = Some(PendingSum {
+    is_array,
+    values: (0..length).map(|_| None).collect(),
+  });
+  Ok(())
+}
+
+fn deno_sum_value(
+  mut caller: Caller<'_, DenoHostState>,
+  index: f64,
+  value: f64,
+) -> wasmtime::Result<()> {
+  let state = caller.data_mut();
+  let pending = state
+    .pending_sum
+    .as_mut()
+    .ok_or_else(|| protocol_error("sum_value called without sum_begin"))?;
+  let index = scalar_index(index, pending.values.len(), "sum index")?;
+  if pending.values[index].is_some() {
+    return Err(protocol_error(format!(
+      "sum item {index} was supplied more than once"
+    )));
+  }
+  // Every IEEE-754 value is a valid JavaScript Number, including NaN and
+  // infinities. Only the index is constrained by this scalar protocol.
+  pending.values[index] = Some(value);
+  Ok(())
+}
+
+fn deno_sum_end(
+  mut caller: Caller<'_, DenoHostState>,
+) -> wasmtime::Result<f64> {
+  let (function, is_array, values) = {
+    let state = caller.data_mut();
+    let pending = state
+      .pending_sum
+      .take()
+      .ok_or_else(|| protocol_error("sum_end called without sum_begin"))?;
+    let values = complete_transaction(pending.values, "sum transaction")?;
+    (state.deno_op_sum, pending.is_array, values)
+  };
+
+  let Some(function) = function else {
+    set_bridge_error(
+      caller.data_mut(),
+      2,
+      "Deno.core.ops.op_sum is not bound to this Wasmtime store".to_string(),
+    );
+    return Ok(0.0);
+  };
+
+  // Do not retain a Caller/data_mut borrow while entering the Rust callback:
+  // op2 is allowed to call back through the v8x isolate and its outer context.
+  match crate::js2wasm::invoke_prelinked_deno_sum(function, is_array, &values) {
+    Ok(value) => {
+      caller.data_mut().last_error = None;
+      Ok(value)
+    }
+    Err((kind, message)) => {
+      set_bridge_error(caller.data_mut(), kind, message);
+      Ok(0.0)
+    }
+  }
+}
+
+fn deno_error_kind(caller: Caller<'_, DenoHostState>) -> f64 {
+  caller
+    .data()
+    .last_error
+    .as_ref()
+    .map(|error| error.kind as f64)
+    .unwrap_or(0.0)
+}
+
+fn deno_error_utf16_length(caller: Caller<'_, DenoHostState>) -> f64 {
+  caller
+    .data()
+    .last_error
+    .as_ref()
+    .map(|error| error.message.len() as f64)
+    .unwrap_or(0.0)
+}
+
+fn deno_error_utf16_code_unit(
+  caller: Caller<'_, DenoHostState>,
+  index: f64,
+) -> wasmtime::Result<f64> {
+  let error = caller
+    .data()
+    .last_error
+    .as_ref()
+    .ok_or_else(|| protocol_error("error code-unit read without an error"))?;
+  let index = scalar_index(index, error.message.len(), "error index")?;
+  Ok(f64::from(error.message[index]))
+}
+
+fn deno_print_begin(
+  mut caller: Caller<'_, DenoHostState>,
+  is_error: i32,
+  length: f64,
+) -> wasmtime::Result<()> {
+  let is_error = scalar_bool(is_error, "print error flag")?;
+  let length = scalar_length(length, "print length")?;
+  let state = caller.data_mut();
+  if state.pending_sum.is_some() || state.pending_print.is_some() {
+    return Err(protocol_error(
+      "print_begin cannot nest inside another scalar transaction",
+    ));
+  }
+  state.last_error = None;
+  state.pending_print = Some(PendingPrint {
+    is_error,
+    code_units: (0..length).map(|_| None).collect(),
+  });
+  Ok(())
+}
+
+fn deno_print_code_unit(
+  mut caller: Caller<'_, DenoHostState>,
+  index: f64,
+  code_unit: f64,
+) -> wasmtime::Result<()> {
+  if !code_unit.is_finite()
+    || code_unit < 0.0
+    || code_unit > f64::from(u16::MAX)
+    || code_unit.fract() != 0.0
+  {
+    return Err(protocol_error(format!(
+      "print code unit must be an integer in 0..=65535, received {code_unit}"
+    )));
+  }
+  let state = caller.data_mut();
+  let pending = state.pending_print.as_mut().ok_or_else(|| {
+    protocol_error("print_code_unit called without print_begin")
+  })?;
+  let index = scalar_index(index, pending.code_units.len(), "print index")?;
+  if pending.code_units[index].is_some() {
+    return Err(protocol_error(format!(
+      "print code unit {index} was supplied more than once"
+    )));
+  }
+  pending.code_units[index] = Some(code_unit as u16);
+  Ok(())
+}
+
+fn deno_print_end(
+  mut caller: Caller<'_, DenoHostState>,
+) -> wasmtime::Result<()> {
+  let (function, is_error, code_units) = {
+    let state = caller.data_mut();
+    let pending = state
+      .pending_print
+      .take()
+      .ok_or_else(|| protocol_error("print_end called without print_begin"))?;
+    let code_units =
+      complete_transaction(pending.code_units, "print transaction")?;
+    (state.deno_op_print, pending.is_error, code_units)
+  };
+
+  let Some(function) = function else {
+    set_bridge_error(
+      caller.data_mut(),
+      2,
+      "Deno.core.ops.op_print is not bound to this Wasmtime store".to_string(),
+    );
+    return Ok(());
+  };
+
+  match crate::js2wasm::invoke_prelinked_deno_print(
+    function,
+    &code_units,
+    is_error,
+  ) {
+    Ok(()) => {
+      caller.data_mut().last_error = None;
+      Ok(())
+    }
+    Err((kind, message)) => {
+      set_bridge_error(caller.data_mut(), kind, message);
+      Ok(())
+    }
+  }
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -119,6 +447,53 @@ impl SharedDenoRuntime {
         },
       )
       .map_err(|error| format!("bind {CWD_CODE_UNIT_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(DENO_IMPORT_MODULE, DENO_SUM_BEGIN_IMPORT, deno_sum_begin)
+      .map_err(|error| format!("bind {DENO_SUM_BEGIN_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(DENO_IMPORT_MODULE, DENO_SUM_VALUE_IMPORT, deno_sum_value)
+      .map_err(|error| format!("bind {DENO_SUM_VALUE_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(DENO_IMPORT_MODULE, DENO_SUM_END_IMPORT, deno_sum_end)
+      .map_err(|error| format!("bind {DENO_SUM_END_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(DENO_IMPORT_MODULE, DENO_ERROR_KIND_IMPORT, deno_error_kind)
+      .map_err(|error| format!("bind {DENO_ERROR_KIND_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_ERROR_LENGTH_IMPORT,
+        deno_error_utf16_length,
+      )
+      .map_err(|error| format!("bind {DENO_ERROR_LENGTH_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_ERROR_CODE_UNIT_IMPORT,
+        deno_error_utf16_code_unit,
+      )
+      .map_err(|error| {
+        format!("bind {DENO_ERROR_CODE_UNIT_IMPORT}: {error}")
+      })?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_PRINT_BEGIN_IMPORT,
+        deno_print_begin,
+      )
+      .map_err(|error| format!("bind {DENO_PRINT_BEGIN_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_PRINT_CODE_UNIT_IMPORT,
+        deno_print_code_unit,
+      )
+      .map_err(|error| {
+        format!("bind {DENO_PRINT_CODE_UNIT_IMPORT}: {error}")
+      })?;
+    linker
+      .func_wrap(DENO_IMPORT_MODULE, DENO_PRINT_END_IMPORT, deno_print_end)
+      .map_err(|error| format!("bind {DENO_PRINT_END_IMPORT}: {error}"))?;
     Ok(Self {
       engine,
       linker,
@@ -212,7 +587,7 @@ impl SharedDenoRuntime {
   ) -> Result<InstancePre<DenoHostState>, String> {
     for import in module.imports() {
       let known_deno_import = import.module() == DENO_IMPORT_MODULE
-        && matches!(import.name(), CWD_LENGTH_IMPORT | CWD_CODE_UNIT_IMPORT);
+        && DENO_HOST_IMPORTS.contains(&import.name());
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
         .any(|candidate| *candidate == (import.module(), import.name()));
@@ -280,6 +655,7 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
   })?;
   let shared = shared_runtime()?;
   let precompiled = shared.precompile(&wasm)?;
+  persist_precompiled_deno_core_artifact(&precompiled)?;
   let instance_pre = shared.development_bytes(&precompiled)?;
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve test working directory: {error}"))?;
@@ -312,6 +688,7 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env()
         )
       })?;
       let precompiled = shared.precompile(&wasm)?;
+      persist_precompiled_deno_core_artifact(&precompiled)?;
       shared.development_bytes(&precompiled)?
     }
     #[cfg(not(feature = "js2wasm_runtime_compile"))]
@@ -326,6 +703,21 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env()
     format!("resolve Deno bootstrap working directory: {error}")
   })?;
   DenoRuntime::instantiate(shared, &instance_pre, cwd)
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn persist_precompiled_deno_core_artifact(
+  artifact: &[u8],
+) -> Result<(), String> {
+  let Some(output) = std::env::var_os(DENO_CORE_AOT_OUTPUT_ENV) else {
+    return Ok(());
+  };
+  fs::write(&output, artifact).map_err(|error| {
+    format!(
+      "write precompiled Deno core artifact {}: {error}",
+      Path::new(&output).display()
+    )
+  })
 }
 
 /// One private Wasmtime store and instance owned by a v8x module handle.
@@ -346,6 +738,11 @@ impl DenoRuntime {
       DenoHostState {
         cwd,
         cwd_op_calls: 0,
+        deno_op_print: None,
+        deno_op_sum: None,
+        pending_sum: None,
+        pending_print: None,
+        last_error: None,
       },
     );
     let instance = instance_pre
@@ -357,6 +754,34 @@ impl DenoRuntime {
     runtime.verify_cwd_probe()?;
     runtime.verify_deno_core_bootstrap_probe()?;
     Ok(runtime)
+  }
+
+  pub(crate) fn bind_deno_ops(
+    &mut self,
+    print: usize,
+    sum: usize,
+  ) -> Result<(), String> {
+    if print == 0 || sum == 0 {
+      return Err(
+        "cannot bind an empty Deno op Function handle to Wasmtime".to_string(),
+      );
+    }
+    let state = self.store.data_mut();
+    match (state.deno_op_print, state.deno_op_sum) {
+      (None, None) => {
+        state.deno_op_print = Some(print);
+        state.deno_op_sum = Some(sum);
+        Ok(())
+      }
+      (Some(previous_print), Some(previous_sum))
+        if previous_print == print && previous_sum == sum =>
+      {
+        Ok(())
+      }
+      _ => Err(
+        "Deno op Function handles were rebound to different values".to_string(),
+      ),
+    }
   }
 
   fn run_deferred_module_init(&mut self) -> Result<(), String> {
@@ -440,6 +865,148 @@ impl DenoRuntime {
       ));
     }
     Ok(())
+  }
+
+  fn call_optional_number_export(
+    &mut self,
+    name: &str,
+  ) -> Result<Option<f64>, String> {
+    let Some(function) = self.instance.get_func(&mut self.store, name) else {
+      return Ok(None);
+    };
+    let value = function
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| format!("type {name}: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("call {name}: {error:#}"))?;
+    Ok(Some(value))
+  }
+
+  fn require_function(&mut self, name: &str) -> Result<wasmtime::Func, String> {
+    self
+      .instance
+      .get_func(&mut self.store, name)
+      .ok_or_else(|| format!("prelinked Deno artifact has no {name} export"))
+  }
+
+  pub(crate) fn set_deno_tick_info(
+    &mut self,
+    values: [u8; 2],
+  ) -> Result<(), String> {
+    let function = self.require_function(DENO_CORE_SET_TICK_INFO)?;
+    let result = function
+      .typed::<(f64, f64), f64>(&self.store)
+      .map_err(|error| format!("type {DENO_CORE_SET_TICK_INFO}: {error}"))?
+      .call(
+        &mut self.store,
+        (f64::from(values[0]), f64::from(values[1])),
+      )
+      .map_err(|error| format!("call {DENO_CORE_SET_TICK_INFO}: {error:#}"))?;
+    if result != 52.0 {
+      return Err(format!(
+        "Deno tick-info setter returned {result}, expected 52"
+      ));
+    }
+    Ok(())
+  }
+
+  pub(crate) fn set_deno_immediate_info(
+    &mut self,
+    values: [u32; 3],
+  ) -> Result<(), String> {
+    let function = self.require_function(DENO_CORE_SET_IMMEDIATE_INFO)?;
+    let result = function
+      .typed::<(f64, f64, f64), f64>(&self.store)
+      .map_err(|error| format!("type {DENO_CORE_SET_IMMEDIATE_INFO}: {error}"))?
+      .call(
+        &mut self.store,
+        (
+          f64::from(values[0]),
+          f64::from(values[1]),
+          f64::from(values[2]),
+        ),
+      )
+      .map_err(|error| {
+        format!("call {DENO_CORE_SET_IMMEDIATE_INFO}: {error:#}")
+      })?;
+    if result != 53.0 {
+      return Err(format!(
+        "Deno immediate-info setter returned {result}, expected 53"
+      ));
+    }
+    Ok(())
+  }
+
+  pub(crate) fn set_deno_timer_info(
+    &mut self,
+    value: i32,
+  ) -> Result<(), String> {
+    let function = self.require_function(DENO_CORE_SET_TIMER_INFO)?;
+    let result = function
+      .typed::<f64, f64>(&self.store)
+      .map_err(|error| format!("type {DENO_CORE_SET_TIMER_INFO}: {error}"))?
+      .call(&mut self.store, f64::from(value))
+      .map_err(|error| format!("call {DENO_CORE_SET_TIMER_INFO}: {error:#}"))?;
+    if result != 51.0 {
+      return Err(format!(
+        "Deno timer-info setter returned {result}, expected 51"
+      ));
+    }
+    Ok(())
+  }
+
+  fn advance_deno_core_stage(
+    &mut self,
+    export: &str,
+    expected_value: f64,
+    expected_state: f64,
+  ) -> Result<bool, String> {
+    let Some(value) = self.call_optional_number_export(export)? else {
+      return Ok(false);
+    };
+    if value != expected_value {
+      return Err(format!(
+        "Deno core stage {export} returned {value}, expected {expected_value}"
+      ));
+    }
+    let state = self
+      .call_optional_number_export(DENO_CORE_STAGE_STATE_PROBE)?
+      .ok_or_else(|| {
+        format!(
+          "artifact exports {export} without {DENO_CORE_STAGE_STATE_PROBE}"
+        )
+      })?;
+    if state != expected_state {
+      return Err(format!(
+        "Deno core stage {export} left state {state}, expected {expected_state}"
+      ));
+    }
+    Ok(true)
+  }
+
+  pub(crate) fn advance_deno_core_wrappers(&mut self) -> Result<bool, String> {
+    self.advance_deno_core_stage(DENO_CORE_WRAPPERS_STAGE, 42.0, 1.0)
+  }
+
+  pub(crate) fn advance_deno_core_module(&mut self) -> Result<(), String> {
+    if self.advance_deno_core_stage(DENO_CORE_MODULE_STAGE, 43.0, 2.0)? {
+      Ok(())
+    } else {
+      Err(format!(
+        "prelinked Deno artifact has no {DENO_CORE_MODULE_STAGE} export"
+      ))
+    }
+  }
+
+  #[allow(dead_code)]
+  pub(crate) fn advance_deno_core_usage(&mut self) -> Result<(), String> {
+    if self.advance_deno_core_stage(DENO_CORE_USAGE_STAGE, 44.0, 3.0)? {
+      Ok(())
+    } else {
+      Err(format!(
+        "prelinked Deno artifact has no {DENO_CORE_USAGE_STAGE} export"
+      ))
+    }
   }
 }
 
