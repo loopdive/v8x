@@ -38,9 +38,16 @@ cargo test --release --no-default-features \
   --features engine_js2wasm,simdutf --test js2wasm_spike
 ```
 
+Generic AOT replay also requires the generated
+`<artifact>.graph-sha256` sidecar. v8x checks both its graph digest (the exact
+entry point, module specifiers, and source bytes) and its artifact digest before
+loading the artifact, so neither side can silently be replaced.
+
 Wasmtime precompiled artifacts contain native executable code. They must come
 from a trusted build pipeline using the same Wasmtime version, target, and
 engine configuration; never load an artifact supplied by an untrusted user.
+The optional `js2wasm_diagnostic_abi` weak-stub layer is Unix-only and is not a
+production runtime feature; MSVC is intentionally unsupported for that layer.
 
 
 Swap the engine under Deno without touching `deno_core`:

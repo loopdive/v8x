@@ -1314,6 +1314,7 @@ dependencies = [
  "icu_locale",
  "paste",
  "serde_json",
+ "sha2",
  "temporal_capi",
  "temporal_rs",
  "timezone_provider",

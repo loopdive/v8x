@@ -13,11 +13,13 @@
 mod simdutf;
 
 use crate::isolate::ModuleImportPhase;
-#[cfg(not(target_os = "windows"))]
-use crate::module::SyntheticModuleEvaluationStepsRet;
 use crate::module::{
-  ModuleStatus, ResolveModuleCallback, ResolveModuleCallbackRet,
-  ResolveSourceCallback, SyntheticModuleEvaluationSteps,
+  ModuleStatus, ResolveModuleCallback, ResolveSourceCallback,
+  SyntheticModuleEvaluationSteps,
+};
+#[cfg(not(target_os = "windows"))]
+use crate::module::{
+  ResolveModuleCallbackRet, SyntheticModuleEvaluationStepsRet,
 };
 use crate::script::ScriptOrigin;
 use crate::script_compiler::{
@@ -33,10 +35,12 @@ use crate::{
   String as V8String, TypedArray, Uint8Array, Uint32, Uint32Array,
   UnboundModuleScript, Value,
 };
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 unsafe extern "C" {
@@ -204,7 +208,7 @@ struct ContextState {
   global: *const Object,
   extras: *const Object,
   embedder_data: Vec<*mut c_void>,
-  deno_core_bootstrap: Option<crate::js2wasm_spike::DenoRuntime>,
+  deno_core_bootstrap: Option<Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>>,
   deno_core_bootstrap_phase: usize,
 }
 
@@ -398,6 +402,33 @@ fn current_context() -> *const Context {
       .copied()
       .unwrap_or(ptr::null())
   }
+}
+
+fn deno_core_runtime(
+  context: *const Context,
+) -> Result<Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>, String> {
+  match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state
+      .deno_core_bootstrap
+      .clone()
+      .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string()),
+    _ => Err("prelinked Deno operation has no live context".to_string()),
+  }
+}
+
+fn with_deno_core_runtime<T>(
+  context: *const Context,
+  operation: &str,
+  callback: impl FnOnce(&mut crate::js2wasm_spike::DenoRuntime) -> Result<T, String>,
+) -> Result<T, String> {
+  // The runtime lives in its own allocation. Clone the slot while borrowing
+  // ContextState, then end that borrow before entering Wasmtime: host imports
+  // may synchronously invoke ordinary rusty_v8 APIs that read the context.
+  let runtime = deno_core_runtime(context)?;
+  let mut runtime = runtime.try_borrow_mut().map_err(|_| {
+    format!("prelinked Deno core runtime re-entered during {operation}")
+  })?;
+  callback(&mut runtime)
 }
 
 fn allocate_error(
@@ -3760,36 +3791,31 @@ fn invoke_prelinked_deno_setter(
   argument: *const Value,
 ) -> Result<(), String> {
   let context = current_context();
-  let Some(HeapValue::Context(context_state)) =
-    (unsafe { heap_value_mut(context) })
-  else {
-    return Err(format!(
-      "prelinked Deno callback {name} has no live context"
-    ));
-  };
-  let runtime = context_state
-    .deno_core_bootstrap
-    .as_mut()
-    .ok_or_else(|| format!("prelinked Deno callback {name} has no runtime"))?;
   match name {
     "__setTickInfo" => {
       let values =
         exact_typed_array_values(argument, TypedArrayKind::Uint8, 2, name)?;
-      runtime.set_deno_tick_info([values[0] as u8, values[1] as u8])
+      with_deno_core_runtime(context, name, |runtime| {
+        runtime.set_deno_tick_info([values[0] as u8, values[1] as u8])
+      })
     }
     "__setImmediateInfo" => {
       let values =
         exact_typed_array_values(argument, TypedArrayKind::Uint32, 3, name)?;
-      runtime.set_deno_immediate_info([
-        values[0] as u32,
-        values[1] as u32,
-        values[2] as u32,
-      ])
+      with_deno_core_runtime(context, name, |runtime| {
+        runtime.set_deno_immediate_info([
+          values[0] as u32,
+          values[1] as u32,
+          values[2] as u32,
+        ])
+      })
     }
     "__setTimerInfo" => {
       let values =
         exact_typed_array_values(argument, TypedArrayKind::Int32, 1, name)?;
-      runtime.set_deno_timer_info(values[0] as i32)
+      with_deno_core_runtime(context, name, |runtime| {
+        runtime.set_deno_timer_info(values[0] as i32)
+      })
     }
     _ => Err(format!("prelinked Deno callback {name} is not a setter")),
   }
@@ -3998,27 +4024,31 @@ fn run_prelinked_deno_core_script(
   } else {
     None
   };
+  if let Some(runtime) = runtime {
+    let Some(HeapValue::Context(context_state)) =
+      (unsafe { heap_value_mut(context) })
+    else {
+      return Err("classic script context disappeared".to_string());
+    };
+    context_state.deno_core_bootstrap = Some(Rc::new(RefCell::new(runtime)));
+  }
+  if final_wrapper {
+    let (print, sum) = deno_ops
+      .ok_or_else(|| "prelinked Deno op handles disappeared".to_string())?;
+    with_deno_core_runtime(context, "wrapper initialization", |runtime| {
+      runtime.bind_deno_ops(print, sum)?;
+      // Older three/four-wrapper artifacts expose only the legacy bootstrap
+      // probe. The staged artifact advances an explicit state machine here so
+      // the later module evaluation re-enters this exact Wasmtime instance.
+      let _ = runtime.advance_deno_core_wrappers()?;
+      Ok(())
+    })?;
+  }
   let Some(HeapValue::Context(context_state)) =
     (unsafe { heap_value_mut(context) })
   else {
     return Err("classic script context disappeared".to_string());
   };
-  if let Some(runtime) = runtime {
-    context_state.deno_core_bootstrap = Some(runtime);
-  }
-  if final_wrapper {
-    let runtime = context_state
-      .deno_core_bootstrap
-      .as_mut()
-      .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string())?;
-    let (print, sum) = deno_ops
-      .ok_or_else(|| "prelinked Deno op handles disappeared".to_string())?;
-    runtime.bind_deno_ops(print, sum)?;
-    // Older three/four-wrapper artifacts expose only the legacy bootstrap
-    // probe. The staged artifact advances an explicit state machine here so
-    // the later module evaluation re-enters this exact Wasmtime instance.
-    let _ = runtime.advance_deno_core_wrappers()?;
-  }
   context_state.deno_core_bootstrap_phase += 1;
   if final_wrapper {
     install_prelinked_deno_core_callbacks(context)?;
@@ -4040,25 +4070,20 @@ fn run_prelinked_deno_usage_script(
       state.specifier,
     ));
   }
-  let Some(HeapValue::Context(context_state)) =
-    (unsafe { heap_value_mut(context) })
-  else {
-    return Err("usage script has no live v8x context".to_string());
+  let phase = match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
+    _ => return Err("usage script has no live v8x context".to_string()),
   };
-  if context_state.deno_core_bootstrap_phase
-    != DENO_CORE_PRELINKED_SCRIPTS.len()
-  {
+  if phase != DENO_CORE_PRELINKED_SCRIPTS.len() {
     return Err(format!(
       "prelinked Deno usage ran at bootstrap phase {}, expected {}",
-      context_state.deno_core_bootstrap_phase,
+      phase,
       DENO_CORE_PRELINKED_SCRIPTS.len(),
     ));
   }
-  context_state
-    .deno_core_bootstrap
-    .as_mut()
-    .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string())?
-    .advance_deno_core_usage()?;
+  with_deno_core_runtime(context, "usage evaluation", |runtime| {
+    runtime.advance_deno_core_usage()
+  })?;
   Ok(true)
 }
 
@@ -4513,16 +4538,33 @@ pub extern "C" fn v8__Module__InstantiateModule(
     let attributes_local =
       unsafe { crate::Local::from_raw(attributes) }.unwrap();
     let module_local = unsafe { crate::Local::from_raw(module) }.unwrap();
-    let returned = unsafe {
-      callback(
-        context_local,
-        specifier_local,
-        attributes_local,
-        module_local,
-      )
+    #[cfg(not(target_os = "windows"))]
+    let dependency = {
+      let returned = unsafe {
+        callback(
+          context_local,
+          specifier_local,
+          attributes_local,
+          module_local,
+        )
+      };
+      unsafe {
+        *(&returned as *const ResolveModuleCallbackRet as *const *const Module)
+      }
     };
-    let dependency = unsafe {
-      *(&returned as *const ResolveModuleCallbackRet as *const *const Module)
+    #[cfg(target_os = "windows")]
+    let dependency = {
+      let mut dependency = ptr::null();
+      unsafe {
+        callback(
+          &mut dependency,
+          context_local,
+          specifier_local,
+          attributes_local,
+          module_local,
+        );
+      }
+      dependency
     };
     if dependency.is_null() {
       if let Some(state) = unsafe { module_state(module) } {
@@ -4658,14 +4700,10 @@ fn evaluate_prelinked_deno_module(
   module: *const Module,
   context: *const Context,
 ) -> *const Value {
-  let result = match unsafe { heap_value_mut(context) } {
-    Some(HeapValue::Context(state)) => state
-      .deno_core_bootstrap
-      .as_mut()
-      .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string())
-      .and_then(|runtime| runtime.advance_deno_core_module()),
-    _ => Err("prelinked Deno module has no live v8x context".to_string()),
-  };
+  let result =
+    with_deno_core_runtime(context, "module evaluation", |runtime| {
+      runtime.advance_deno_core_module()
+    });
   if let Err(error) = result {
     eprintln!("v8x/js2wasm: {error}");
     fail_module_evaluation(module, &error);

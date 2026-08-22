@@ -117,6 +117,12 @@ mod js2wasm_spike;
 #[doc(hidden)]
 pub use js2wasm_spike::{Js2WasmRuntimeStats, js2wasm_runtime_stats};
 
+#[cfg(feature = "engine_js2wasm")]
+#[doc(hidden)]
+pub use js2wasm_spike::{
+  js2wasm_verify_graph_binding_for_test, js2wasm_write_graph_binding_for_test,
+};
+
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
 pub use js2wasm_spike::js2wasm_bootstrap_raw_module_for_test;

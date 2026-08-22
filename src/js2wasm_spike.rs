@@ -7,11 +7,12 @@
 //! wrapper reconstructs its string from two direct UTF-16 imports, avoiding a
 //! JavaScript-host `externref` ABI or a WASI/component boundary.
 
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 #[cfg(feature = "js2wasm_runtime_compile")]
 use std::collections::HashSet;
-#[cfg(feature = "js2wasm_runtime_compile")]
 use std::fs;
+use std::io::Read;
 #[cfg(feature = "js2wasm_runtime_compile")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,8 @@ const DENO_PRINT_BEGIN_IMPORT: &str = "__v8x_deno_print_begin";
 const DENO_PRINT_CODE_UNIT_IMPORT: &str = "__v8x_deno_print_code_unit";
 const DENO_PRINT_END_IMPORT: &str = "__v8x_deno_print_end";
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
+const GRAPH_BINDING_SUFFIX: &str = ".graph-sha256";
+const GRAPH_BINDING_DOMAIN: &[u8] = b"v8x/js2wasm graph binding v1\0";
 const CWD_LENGTH_PROBE: &str = "__v8x_probe_cwd_utf16_length";
 const CWD_CHECKSUM_PROBE: &str = "__v8x_probe_cwd_utf16_checksum";
 const DENO_CORE_BOOTSTRAP_PROBE: &str = "__v8x_probe_deno_core_bootstrap";
@@ -82,6 +85,151 @@ const DENO_HOST_IMPORTS: &[&str] = &[
 // from asking the embedding process for an unbounded transaction allocation;
 // exceeding this explicit protocol limit traps instead of aborting on OOM.
 const MAX_DENO_SCALAR_ITEMS: usize = 1 << 20;
+
+fn graph_binding_path(artifact: &Path) -> PathBuf {
+  let mut path = artifact.as_os_str().to_os_string();
+  path.push(GRAPH_BINDING_SUFFIX);
+  PathBuf::from(path)
+}
+
+fn update_graph_digest(hasher: &mut Sha256, bytes: &[u8]) {
+  let length = u64::try_from(bytes.len())
+    .expect("a supported target cannot address more than u64::MAX bytes");
+  hasher.update(length.to_le_bytes());
+  hasher.update(bytes);
+}
+
+fn graph_digest(entry: &str, modules: &[SourceModule]) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(GRAPH_BINDING_DOMAIN);
+  update_graph_digest(&mut hasher, entry.as_bytes());
+  let module_count = u64::try_from(modules.len())
+    .expect("a supported target cannot address more than u64::MAX modules");
+  update_graph_digest(&mut hasher, &module_count.to_le_bytes());
+  for module in modules {
+    update_graph_digest(&mut hasher, module.specifier.as_bytes());
+    update_graph_digest(&mut hasher, module.source.as_bytes());
+  }
+  format!("{:x}", hasher.finalize())
+}
+
+fn bytes_digest(bytes: &[u8]) -> String {
+  format!("{:x}", Sha256::digest(bytes))
+}
+
+fn artifact_digest(artifact: &Path) -> Result<String, String> {
+  let mut file = fs::File::open(artifact).map_err(|error| {
+    format!(
+      "read precompiled js2wasm artifact {} for graph binding: {error}",
+      artifact.display(),
+    )
+  })?;
+  let mut hasher = Sha256::new();
+  let mut buffer = [0_u8; 64 * 1024];
+  loop {
+    let read = file.read(&mut buffer).map_err(|error| {
+      format!(
+        "read precompiled js2wasm artifact {} for graph binding: {error}",
+        artifact.display(),
+      )
+    })?;
+    if read == 0 {
+      break;
+    }
+    hasher.update(&buffer[..read]);
+  }
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn parse_graph_binding(contents: &str) -> Result<(&str, &str), String> {
+  let mut lines = contents.lines();
+  let graph = lines
+    .next()
+    .and_then(|line| line.strip_prefix("graph-sha256 "))
+    .ok_or_else(|| "missing graph-sha256 field".to_string())?;
+  let artifact = lines
+    .next()
+    .and_then(|line| line.strip_prefix("artifact-sha256 "))
+    .ok_or_else(|| "missing artifact-sha256 field".to_string())?;
+  if lines.next().is_some() {
+    return Err("unexpected additional fields".to_string());
+  }
+  let valid_digest = |digest: &str| {
+    digest.len() == 64
+      && digest
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  };
+  if !valid_digest(graph) || !valid_digest(artifact) {
+    return Err(
+      "SHA-256 fields must be 64 lowercase hexadecimal digits".to_string(),
+    );
+  }
+  Ok((graph, artifact))
+}
+
+fn write_graph_binding(
+  artifact: &Path,
+  artifact_bytes: &[u8],
+  entry: &str,
+  modules: &[SourceModule],
+) -> Result<(), String> {
+  let binding = graph_binding_path(artifact);
+  let graph = graph_digest(entry, modules);
+  let artifact_digest = bytes_digest(artifact_bytes);
+  fs::write(
+    &binding,
+    format!("graph-sha256 {graph}\nartifact-sha256 {artifact_digest}\n"),
+  )
+  .map_err(|error| {
+    format!("write js2wasm graph binding {}: {error}", binding.display())
+  })
+}
+
+fn bound_artifact_digest(
+  artifact: &Path,
+  expected_graph: &str,
+) -> Result<String, String> {
+  let binding = graph_binding_path(artifact);
+  let actual = fs::read_to_string(&binding).map_err(|error| {
+    format!(
+      "read js2wasm graph binding {} for artifact {}: {error}",
+      binding.display(),
+      artifact.display(),
+    )
+  })?;
+  let (bound_graph, bound_artifact) =
+    parse_graph_binding(&actual).map_err(|error| {
+      format!(
+        "invalid js2wasm graph binding {}: {error}",
+        binding.display()
+      )
+    })?;
+  if bound_graph != expected_graph {
+    return Err(format!(
+      "js2wasm graph binding mismatch for artifact {}: expected {expected_graph}, found {bound_graph}",
+      artifact.display(),
+    ));
+  }
+  Ok(bound_artifact.to_string())
+}
+
+fn verify_graph_binding(
+  artifact: &Path,
+  entry: &str,
+  modules: &[SourceModule],
+) -> Result<(), String> {
+  let expected_graph = graph_digest(entry, modules);
+  let bound_artifact = bound_artifact_digest(artifact, &expected_graph)?;
+  let actual_artifact = artifact_digest(artifact)?;
+  if bound_artifact != actual_artifact {
+    return Err(format!(
+      "js2wasm artifact binding mismatch for artifact {}: expected {bound_artifact}, found {actual_artifact}",
+      artifact.display(),
+    ));
+  }
+  Ok(())
+}
 
 #[cfg_attr(not(feature = "js2wasm_runtime_compile"), allow(dead_code))]
 pub(crate) struct SourceModule {
@@ -388,6 +536,11 @@ fn deno_print_end(
 #[derive(Hash, PartialEq, Eq)]
 enum ModuleCacheKey {
   TrustedFile(PathBuf),
+  GraphBoundFile {
+    artifact: PathBuf,
+    graph_sha256: String,
+    artifact_sha256: String,
+  },
   #[cfg(feature = "js2wasm_runtime_compile")]
   DevelopmentBytes(Vec<u8>),
 }
@@ -539,6 +692,63 @@ impl SharedDenoRuntime {
     Ok(instance_pre)
   }
 
+  fn precompiled_graph_file(
+    &self,
+    artifact: &Path,
+    entry: &str,
+    modules: &[SourceModule],
+  ) -> Result<InstancePre<DenoHostState>, String> {
+    let graph_sha256 = graph_digest(entry, modules);
+    let artifact_sha256 = bound_artifact_digest(artifact, &graph_sha256)?;
+    let artifact = artifact.canonicalize().map_err(|error| {
+      format!(
+        "resolve precompiled js2wasm artifact {}: {error}",
+        artifact.display()
+      )
+    })?;
+    let key = ModuleCacheKey::GraphBoundFile {
+      artifact: artifact.clone(),
+      graph_sha256,
+      artifact_sha256: artifact_sha256.clone(),
+    };
+    let mut modules = self
+      .modules
+      .lock()
+      .map_err(|_| "lock shared js2wasm module cache".to_string())?;
+    if let Some(module) = modules.get(&key) {
+      return Ok(module.clone());
+    }
+
+    let artifact_bytes = fs::read(&artifact).map_err(|error| {
+      format!(
+        "read precompiled js2wasm artifact {} for graph binding: {error}",
+        artifact.display(),
+      )
+    })?;
+    let actual_artifact = bytes_digest(&artifact_bytes);
+    if artifact_sha256 != actual_artifact {
+      return Err(format!(
+        "js2wasm artifact binding mismatch for artifact {}: expected {artifact_sha256}, found {actual_artifact}",
+        artifact.display(),
+      ));
+    }
+    // Deserialize the same bytes that were just verified. Unlike the exact
+    // Deno diagnostic path, this copies executable data out of the source file,
+    // so a later path replacement cannot mutate the cached Module's mapping.
+    let module = unsafe { Module::deserialize(&self.engine, &artifact_bytes) }
+      .map_err(|error| {
+        format!(
+          "load trusted precompiled js2wasm artifact {}: {error:#}",
+          artifact.display()
+        )
+      })?;
+    self.trace_imports(&module);
+    let instance_pre = self.instance_pre(&module)?;
+    modules.insert(key, instance_pre.clone());
+    self.module_loads.fetch_add(1, Ordering::Relaxed);
+    Ok(instance_pre)
+  }
+
   #[cfg(feature = "js2wasm_runtime_compile")]
   fn precompile(&self, wasm: &[u8]) -> Result<Vec<u8>, String> {
     self
@@ -639,6 +849,42 @@ fn shared_runtime() -> Result<&'static SharedDenoRuntime, String> {
 #[doc(hidden)]
 pub fn js2wasm_runtime_stats() -> Result<Js2WasmRuntimeStats, String> {
   shared_runtime()?.stats()
+}
+
+fn test_source_modules(modules: &[(&str, &str)]) -> Vec<SourceModule> {
+  modules
+    .iter()
+    .map(|(specifier, source)| SourceModule {
+      specifier: (*specifier).to_string(),
+      source: (*source).to_string(),
+    })
+    .collect()
+}
+
+/// Writes a graph-binding sidecar for the supplied artifact bytes in tests.
+#[doc(hidden)]
+pub fn js2wasm_write_graph_binding_for_test(
+  artifact: &Path,
+  artifact_bytes: &[u8],
+  entry: &str,
+  modules: &[(&str, &str)],
+) -> Result<(), String> {
+  write_graph_binding(
+    artifact,
+    artifact_bytes,
+    entry,
+    &test_source_modules(modules),
+  )
+}
+
+/// Verifies a graph-binding sidecar without deserializing its artifact.
+#[doc(hidden)]
+pub fn js2wasm_verify_graph_binding_for_test(
+  artifact: &Path,
+  entry: &str,
+  modules: &[(&str, &str)],
+) -> Result<(), String> {
+  verify_graph_binding(artifact, entry, &test_source_modules(modules))
 }
 
 /// Diagnostic entry point for the pinned Deno-core bootstrap integration.
@@ -1021,7 +1267,8 @@ pub(crate) fn compile_and_instantiate(
   let instance_pre = if let Some(artifact) =
     std::env::var_os("V8X_JS2WASM_AOT_MODULE")
   {
-    shared.precompiled_file(Path::new(&artifact))?
+    let artifact = Path::new(&artifact);
+    shared.precompiled_graph_file(artifact, entry, modules)?
   } else {
     #[cfg(feature = "js2wasm_runtime_compile")]
     {
@@ -1034,6 +1281,7 @@ pub(crate) fn compile_and_instantiate(
             Path::new(&output).display()
           )
         })?;
+        write_graph_binding(Path::new(&output), &artifact, entry, modules)?;
       }
       shared.development_bytes(&artifact)?
     }

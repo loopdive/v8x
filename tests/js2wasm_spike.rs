@@ -3,13 +3,13 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs;
 #[cfg(feature = "js2wasm_runtime_compile")]
 use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "js2wasm_runtime_compile")]
-use std::{fs, path::PathBuf};
 
 const MAIN: &str = "file:///tmp/v8x-js2wasm-main.ts";
 const DEPENDENCY: &str = "file:///tmp/v8x-js2wasm-math.ts";
@@ -224,6 +224,7 @@ fn origin<'s>(
   )
 }
 
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn classic_origin<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   name: v8::Local<'s, v8::Value>,
@@ -880,6 +881,88 @@ fn try_catch_tracks_nested_scopes_and_exact_exception_identity() {
 }
 
 #[test]
+fn precompiled_artifact_requires_exact_graph_binding() {
+  const ARTIFACT_A: &[u8] = b"precompiled artifact A";
+  const ARTIFACT_B: &[u8] = b"precompiled artifact B";
+  let entry = "file:///main.ts";
+  let modules = [
+    (entry, "import './dep.ts';"),
+    ("file:///dep.ts", "export const value = 42;"),
+  ];
+  let artifact = std::env::temp_dir().join(format!(
+    "v8x-js2wasm-graph-binding-{}.cwasm",
+    std::process::id()
+  ));
+  let mut binding = artifact.as_os_str().to_os_string();
+  binding.push(".graph-sha256");
+  let binding = PathBuf::from(binding);
+  let _ = fs::remove_file(&artifact);
+  let _ = fs::remove_file(&binding);
+  fs::write(&artifact, ARTIFACT_A).unwrap();
+
+  let missing =
+    v8::js2wasm_verify_graph_binding_for_test(&artifact, entry, &modules)
+      .unwrap_err();
+  assert!(missing.contains("read js2wasm graph binding"));
+
+  fs::write(
+    &binding,
+    format!(
+      "graph-sha256 {}\nartifact-sha256 {}\n",
+      "0".repeat(64),
+      "0".repeat(64),
+    ),
+  )
+  .unwrap();
+  let mismatch =
+    v8::js2wasm_verify_graph_binding_for_test(&artifact, entry, &modules)
+      .unwrap_err();
+  assert!(mismatch.contains("graph binding mismatch"));
+
+  // Sidecar emission binds the bytes supplied by the compiler, not whatever
+  // a concurrent writer may have placed at the output path.
+  fs::write(&artifact, ARTIFACT_B).unwrap();
+  v8::js2wasm_write_graph_binding_for_test(
+    &artifact, ARTIFACT_A, entry, &modules,
+  )
+  .unwrap();
+  assert!(
+    v8::js2wasm_verify_graph_binding_for_test(&artifact, entry, &modules)
+      .unwrap_err()
+      .contains("artifact binding mismatch")
+  );
+
+  fs::write(&artifact, ARTIFACT_A).unwrap();
+  v8::js2wasm_verify_graph_binding_for_test(&artifact, entry, &modules)
+    .unwrap();
+
+  fs::write(&artifact, ARTIFACT_B).unwrap();
+  let artifact_mismatch =
+    v8::js2wasm_verify_graph_binding_for_test(&artifact, entry, &modules)
+      .unwrap_err();
+  assert!(artifact_mismatch.contains("artifact binding mismatch"));
+  fs::write(&artifact, ARTIFACT_A).unwrap();
+
+  let changed_modules = [
+    (entry, "import './dep.ts';"),
+    ("file:///dep.ts", "export const value = 43;"),
+  ];
+  assert!(
+    v8::js2wasm_verify_graph_binding_for_test(
+      &artifact,
+      entry,
+      &changed_modules,
+    )
+    .unwrap_err()
+    .contains("graph binding mismatch")
+  );
+
+  fs::remove_file(artifact).unwrap();
+  fs::remove_file(binding).unwrap();
+}
+
+#[test]
+#[ignore = "requires V8X_JS2WASM_COMPILER_SCRIPT or a graph-bound V8X_JS2WASM_AOT_MODULE"]
 fn evaluates_raw_typescript_graph_through_wasmtime() {
   initialize();
   assert_eq!(v8::V8X_ENGINE, "js2wasm");
