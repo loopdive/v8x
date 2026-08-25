@@ -2,13 +2,15 @@
 #
 # Provenance:
 #   deno commit: 1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44
-#   artifact: .tmp/deno/target/debug/examples/hello_world
-#   artifact sha256: bc99c15461c8028a530130f96d65b61a4e251e8396edd24b28524364945ae76f
-#   extraction (Apple nm leading underscore removed):
-#     nm -u hello_world | sed 's/^_//' | awk '/^(v8__|v8_inspector__|std__shared_ptr)/' | LC_ALL=C sort -u
+#   artifacts: hello_world example plus the deno_core lib-test link inventory
+#   extraction: Apple ld undefined-symbol records, leading underscore removed,
+#     unioned with `nm -u hello_world`, then LC_ALL=C sorted and deduplicated
 #
 # Keep this file strictly sorted and unique. Every entry compiles to a weak
 # definition that prints its exact name and aborts; it is never a no-op.
+cppgc__Persistent__CONSTRUCT
+cppgc__Persistent__DESTRUCT
+cppgc__make_garbage_collectable
 std__shared_ptr__v8__BackingStore__CONVERT__std__unique_ptr
 std__shared_ptr__v8__BackingStore__COPY
 std__shared_ptr__v8__BackingStore__get
@@ -32,12 +34,15 @@ v8__BackingStore__DELETE
 v8__BackingStore__Data
 v8__BackingStore__IsResizableByUserJavaScript
 v8__BackingStore__IsShared
+v8__BigInt64Array__New
 v8__BigInt__Int64Value
+v8__BigInt__New
 v8__BigInt__NewFromUnsigned
 v8__BigInt__NewFromWords
 v8__BigInt__ToWordsArray
 v8__BigInt__Uint64Value
 v8__BigInt__WordCount
+v8__BigUint64Array__New
 v8__CompiledWasmModule__DELETE
 v8__Context__FromSnapshot
 v8__Context__GetContinuationPreservedEmbedderData
@@ -50,26 +55,37 @@ v8__Data__IsModule
 v8__Data__IsModuleRequest
 v8__Data__IsPrimitive
 v8__Data__IsValue
+v8__EscapeSlot__escape
+v8__EscapeSlot__reserve
 v8__Exception__CreateMessage
 v8__FixedArray__Get
 v8__FixedArray__Length
+v8__Float32Array__New
+v8__Float64Array__New
 v8__FunctionTemplate__Inherit
 v8__FunctionTemplate__SetClassName
 v8__Function__CreateCodeCache
 v8__Function__SetName
 v8__Global__NewWeak
 v8__IdleTask__DELETE
+v8__Int16Array__New
 v8__Int32Array__New
+v8__Int8Array__New
+v8__Isolate__AddNearHeapLimitCallback
 v8__Isolate__CancelTerminateExecution
+v8__Isolate__GetCppHeap
 v8__Isolate__GetHeapStatistics
 v8__Isolate__HasPendingBackgroundTasks
 v8__Isolate__IsExecutionTerminating
 v8__Isolate__PerformMicrotaskCheckpoint
+v8__Isolate__RemoveNearHeapLimitCallback
 v8__Isolate__RequestInterrupt
+v8__Isolate__SetIdle
 v8__Isolate__TerminateExecution
 v8__Isolate__ThrowException
 v8__Location__GetColumnNumber
 v8__Location__GetLineNumber
+v8__Map__As__Array
 v8__Message__Get
 v8__Message__GetLineNumber
 v8__Message__GetScriptResourceName
@@ -86,10 +102,13 @@ v8__Module__GetIdentityHash
 v8__Module__GetModuleNamespace
 v8__Module__GetModuleNamespace2
 v8__Module__GetModuleRequests
+v8__Module__GetStalledTopLevelAwaitMessage
 v8__Module__GetUnboundModuleScript
 v8__Module__SetSyntheticModuleExport
 v8__Module__SourceOffsetToLocation
+v8__Name__GetIdentityHash
 v8__ObjectTemplate__SetAccessorProperty
+v8__ObjectTemplate__SetNamedPropertyHandler
 v8__Object__CreateDataProperty
 v8__Object__DefineOwnProperty
 v8__Object__DefineProperty
@@ -102,9 +121,12 @@ v8__Object__GetPropertyNames
 v8__Object__GetPrototype
 v8__Object__Has
 v8__Object__HasOwnProperty
+v8__Object__IsApiWrapper
 v8__Object__New__with_prototype_and_properties
 v8__Object__SetPrivate
 v8__Object__SetPrototype
+v8__Object__Unwrap
+v8__Object__Wrap
 v8__PrimitiveArray__Get
 v8__PrimitiveArray__Length
 v8__PrimitiveArray__New
@@ -122,12 +144,15 @@ v8__Promise__Resolver__Resolve
 v8__Promise__Result
 v8__Promise__State
 v8__Promise__Then2
+v8__PropertyCallbackInfo__GetIsolate
+v8__PropertyCallbackInfo__GetReturnValue
 v8__PropertyDescriptor__CONSTRUCT__Get_Set
 v8__PropertyDescriptor__DESTRUCT
 v8__PropertyDescriptor__set_configurable
 v8__PropertyDescriptor__set_enumerable
 v8__Proxy__GetHandler
 v8__Proxy__GetTarget
+v8__ResourceConstraints__ConfigureDefaultsFromHeapSize
 v8__ScriptCompiler__CachedData__DELETE
 v8__ScriptCompiler__CachedData__NEW
 v8__ScriptCompiler__Compile
@@ -135,8 +160,12 @@ v8__ScriptCompiler__CompileFunction
 v8__Script__GetUnboundScript
 v8__SharedArrayBuffer__GetBackingStore
 v8__SharedArrayBuffer__New__with_backing_store
+v8__SnapshotCreator__AddContext
+v8__SnapshotCreator__AddData_to_context
 v8__SnapshotCreator__CONSTRUCT
+v8__SnapshotCreator__CreateBlob
 v8__SnapshotCreator__GetIsolate
+v8__SnapshotCreator__SetDefaultContext
 v8__StackFrame__GetColumn
 v8__StackFrame__GetLineNumber
 v8__StackFrame__GetScriptName
@@ -150,7 +179,10 @@ v8__String__WriteOneByte_v2
 v8__String__WriteUtf8_v2
 v8__String__Write_v2
 v8__Symbol__For
+v8__Symbol__GetIterator
+v8__Symbol__New
 v8__Task__DELETE
+v8__Task__Run
 v8__TryCatch__CONSTRUCT
 v8__TryCatch__DESTRUCT
 v8__TryCatch__Exception
@@ -158,6 +190,7 @@ v8__TryCatch__HasCaught
 v8__TryCatch__HasTerminated
 v8__TryCatch__ReThrow
 v8__TryCatch__Reset
+v8__Uint16Array__New
 v8__Uint32Array__New
 v8__Uint8Array__New
 v8__UnboundModuleScript__CreateCodeCache
@@ -176,6 +209,8 @@ v8__ValueSerializer__Release
 v8__ValueSerializer__TransferArrayBuffer
 v8__ValueSerializer__WriteHeader
 v8__ValueSerializer__WriteValue
+v8__Value__Int32Value
+v8__Value__IntegerValue
 v8__Value__IsArgumentsObject
 v8__Value__IsArrayBuffer
 v8__Value__IsArrayBufferView
@@ -187,6 +222,7 @@ v8__Value__IsBigUint64Array
 v8__Value__IsBooleanObject
 v8__Value__IsDataView
 v8__Value__IsDate
+v8__Value__IsExternal
 v8__Value__IsFloat32Array
 v8__Value__IsFloat64Array
 v8__Value__IsGeneratorFunction
@@ -196,6 +232,7 @@ v8__Value__IsInt8Array
 v8__Value__IsMap
 v8__Value__IsMapIterator
 v8__Value__IsModuleNamespaceObject
+v8__Value__IsName
 v8__Value__IsNumberObject
 v8__Value__IsPromise
 v8__Value__IsProxy
@@ -217,9 +254,11 @@ v8__Value__IsWasmModuleObject
 v8__Value__IsWeakMap
 v8__Value__IsWeakSet
 v8__Value__NumberValue
+v8__Value__SameValue
 v8__Value__StrictEquals
 v8__Value__ToObject
 v8__Value__ToString
+v8__Value__Uint32Value
 v8__WasmModuleObject__Compile
 v8__WasmModuleObject__FromCompiledModule
 v8__WasmModuleObject__GetCompiledModule
@@ -242,6 +281,7 @@ v8_inspector__V8Inspector__Channel__BASE__CONSTRUCT
 v8_inspector__V8Inspector__DELETE
 v8_inspector__V8Inspector__connect
 v8_inspector__V8Inspector__contextCreated
+v8_inspector__V8Inspector__contextDestroyed
 v8_inspector__V8Inspector__create
 v8_inspector__V8Inspector__createStackTrace
 v8_inspector__V8Inspector__exceptionThrown

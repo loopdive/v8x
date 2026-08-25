@@ -22,6 +22,13 @@
       "features": "quickjs",
       "os": "any",
       "comment": "Vendored quickjs-ng, statically linked. Cross-platform."
+    },
+    {
+      "id": "js2wasm",
+      "label": "js2wasm / Wasmtime",
+      "features": "engine_js2wasm,js2wasm_diagnostic_abi",
+      "os": "any",
+      "comment": "Ahead-of-time js2wasm modules hosted by Wasmtime. The diagnostic ABI makes unimplemented v8 calls fail loudly while the compatibility surface is being completed."
     }
   ],
   "suites": [
@@ -64,7 +71,8 @@
       "package": "deno_core",
       "ignore": [],
       "ignore_by_backend": {
-        "quickjs": []
+        "quickjs": [],
+        "js2wasm": []
       },
       "ignore_by_backend_os": {
         "quickjs": {

@@ -41,6 +41,9 @@ jobs:
             os: macos-15
             features: engine_jsc,vendor_jsc
             ninja: true
+          - backend: js2wasm
+            os: ubuntu-latest
+            features: engine_js2wasm,js2wasm_diagnostic_abi
     env:
       MACOSX_DEPLOYMENT_TARGET: "15.0"
     steps:
@@ -265,6 +268,8 @@ jobs:
             features: '"system_jsc"'
           - backend: quickjs
             features: '"quickjs"'
+          - backend: js2wasm
+            features: '"engine_js2wasm", "js2wasm_diagnostic_abi"'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -317,6 +322,20 @@ jobs:
           # Select this job's backend by swapping the v82jsc feature list the
           # patch hardcodes (vendored JSC) for this matrix entry's features.
           perl -0pi -e 's/"engine_jsc", "vendor_jsc"/${{ matrix.features }}/g' ../deno/Cargo.toml
+          # Deno's lockfile predates Wasmtime 47. Unlock only the shared crates
+          # whose locked versions are below Wasmtime's semver-compatible
+          # minimums; Cargo then adds the new backend graph without refreshing
+          # the rest of Deno's dependency tree.
+          if [ "${{ matrix.backend }}" = "js2wasm" ]; then
+            (cd ../deno && cargo update \
+              -p async-trait \
+              -p bitflags@2.9.3 \
+              -p target-lexicon \
+              -p libm \
+              -p indexmap \
+              -p bumpalo \
+              -p anyhow)
+          fi
 
       # Cache the deno_core build (cargo deps + the v82jsc patch crate). Keyed
       # per backend so each engine's feature set gets its own cache.

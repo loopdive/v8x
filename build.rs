@@ -76,7 +76,7 @@ fn emit_quickjs_cache_tag(manifest_dir: &Path) {
 /// one prints the exact unresolved ABI symbol and aborts. A real strong
 /// implementation with the same name always wins over the weak definition.
 fn build_js2wasm_diagnostic_abi(manifest_dir: &Path) {
-  const EXPECTED_SYMBOLS: usize = 237;
+  const EXPECTED_SYMBOLS: usize = 278;
 
   let manifest = manifest_dir.join("src/js2wasm/diagnostic_abi_symbols.txt");
   println!("cargo:rerun-if-changed={}", manifest.display());
@@ -94,7 +94,8 @@ fn build_js2wasm_diagnostic_abi(manifest_dir: &Path) {
       continue;
     }
     assert!(
-      (symbol.starts_with("v8__")
+      (symbol.starts_with("cppgc__")
+        || symbol.starts_with("v8__")
         || symbol.starts_with("v8_inspector__")
         || symbol.starts_with("std__shared_ptr__v8__"))
         && symbol

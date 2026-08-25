@@ -26,6 +26,7 @@ Engine features are mutually exclusive; enable exactly one:
   [`quickjs`], [QuickJS-ng, vendored + static], [works everywhere, \~1 MB, fastest build],
   [`jsc`], [WebKit JSCOnly, built from source], [macOS; shippable, JIT-enabled],
   [`system_jsc`], [Apple's `JavaScriptCore.framework`], [macOS; zero engine bytes in your binary],
+  [`engine_js2wasm,js2wasm_diagnostic_abi`], [js2wasm AOT modules on Wasmtime], [experimental; unsupported V8 ABI calls abort with their symbol name],
 )
 
 Your code keeps using the `v8` crate API: `v8::Isolate`, `v8::Local`,
@@ -47,7 +48,8 @@ cargo build -p deno
 ```
 
 `deno_core` compiles unchanged; the resulting binary runs your JS on the
-engine you selected.
+engine you selected. The experimental js2wasm backend currently passes 132 of
+429 `deno_core` tests and is not yet a complete Deno runtime.
 
 == macOS note: JIT entitlements
 
