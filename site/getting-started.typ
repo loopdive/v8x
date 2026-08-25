@@ -61,10 +61,11 @@ preserving global objects and mutable binding cells across the module boundary.
 Arbitrary Deno classic scripts and REPL submissions still need `Script::Run`
 lifecycle routing into a persistent compiled graph. Build the full interpreter
 provider with a current js2wasm compiler, whose standalone target uses the
-standardized `try_table` encoding accepted by Wasmtime. The current full
-Acorn/interpreter provider still has a Wasmtime execution-parity failure after
-validation, so production packaging must keep its provider canary as a release
-gate.
+standardized `try_table` encoding accepted by Wasmtime and whose O3 provider
+pipeline canonicalizes the large module for portable execution. The resulting
+full Acorn/interpreter provider passes its eval canary in Node and Wasmtime.
+Keep that canary as a production release gate; do not distribute an
+unoptimized provider artifact.
 
 == macOS note: JIT entitlements
 
