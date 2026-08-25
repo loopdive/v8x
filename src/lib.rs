@@ -113,6 +113,9 @@ mod jsc;
 #[cfg(any(feature = "js2wasm_spike", feature = "engine_js2wasm"))]
 mod js2wasm_spike;
 
+#[cfg(feature = "js2wasm_quickjs_compat")]
+mod js2wasm_deno_compat;
+
 #[cfg(feature = "engine_js2wasm")]
 #[doc(hidden)]
 pub use js2wasm_spike::{Js2WasmRuntimeStats, js2wasm_runtime_stats};
@@ -127,10 +130,13 @@ pub use js2wasm_spike::{
 #[doc(hidden)]
 pub use js2wasm_spike::js2wasm_bootstrap_raw_module_for_test;
 
-#[cfg(feature = "engine_js2wasm")]
+#[cfg(all(
+  feature = "engine_js2wasm",
+  not(feature = "js2wasm_quickjs_compat")
+))]
 mod js2wasm;
 
-#[cfg(feature = "engine_quickjs")]
+#[cfg(any(feature = "engine_quickjs", feature = "js2wasm_quickjs_compat"))]
 mod quickjs;
 
 // Pure-Rust implementation of the `crdtp__*` inspector-protocol C-ABI surface
@@ -305,7 +311,9 @@ pub const TYPED_ARRAY_MAX_SIZE_IN_HEAP: usize =
   binding::v8__TYPED_ARRAY_MAX_SIZE_IN_HEAP as _;
 
 /// The engine backend this build of the shim runs on.
-pub const V8X_ENGINE: &str = if cfg!(feature = "engine_quickjs") {
+pub const V8X_ENGINE: &str = if cfg!(feature = "js2wasm_quickjs_compat") {
+  "js2wasm"
+} else if cfg!(feature = "engine_quickjs") {
   "quickjs"
 } else if cfg!(feature = "engine_js2wasm") {
   "js2wasm"

@@ -28,7 +28,7 @@
       "label": "js2wasm / Wasmtime",
       "features": "engine_js2wasm,js2wasm_diagnostic_abi",
       "os": "any",
-      "comment": "Ahead-of-time js2wasm modules hosted by Wasmtime. The diagnostic ABI makes unimplemented v8 calls fail loudly while the compatibility surface is being completed."
+      "comment": "Ahead-of-time js2wasm modules hosted by Wasmtime. The diagnostic ABI makes unimplemented v8 calls fail loudly while the compatibility surface is being completed; deno_core CI selects js2wasm_quickjs_compat explicitly."
     }
   ],
   "suites": [

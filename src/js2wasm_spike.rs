@@ -421,7 +421,7 @@ fn deno_sum_end(
 
   // Do not retain a Caller/data_mut borrow while entering the Rust callback:
   // op2 is allowed to call back through the v8x isolate and its outer context.
-  match crate::js2wasm::invoke_prelinked_deno_sum(function, is_array, &values) {
+  match invoke_prelinked_deno_sum(function, is_array, &values) {
     Ok(value) => {
       caller.data_mut().last_error = None;
       Ok(value)
@@ -536,11 +536,7 @@ fn deno_print_end(
     return Ok(());
   };
 
-  match crate::js2wasm::invoke_prelinked_deno_print(
-    function,
-    &code_units,
-    is_error,
-  ) {
+  match invoke_prelinked_deno_print(function, &code_units, is_error) {
     Ok(()) => {
       caller.data_mut().last_error = None;
       Ok(())
@@ -550,6 +546,48 @@ fn deno_print_end(
       Ok(())
     }
   }
+}
+
+#[cfg(not(feature = "js2wasm_quickjs_compat"))]
+fn invoke_prelinked_deno_sum(
+  function: usize,
+  is_array: bool,
+  values: &[f64],
+) -> Result<f64, (u32, String)> {
+  crate::js2wasm::invoke_prelinked_deno_sum(function, is_array, values)
+}
+
+#[cfg(feature = "js2wasm_quickjs_compat")]
+fn invoke_prelinked_deno_sum(
+  _function: usize,
+  _is_array: bool,
+  _values: &[f64],
+) -> Result<f64, (u32, String)> {
+  Err((
+    2,
+    "the QuickJS compatibility bridge has no bound op_sum".into(),
+  ))
+}
+
+#[cfg(not(feature = "js2wasm_quickjs_compat"))]
+fn invoke_prelinked_deno_print(
+  function: usize,
+  code_units: &[u16],
+  is_error: bool,
+) -> Result<(), (u32, String)> {
+  crate::js2wasm::invoke_prelinked_deno_print(function, code_units, is_error)
+}
+
+#[cfg(feature = "js2wasm_quickjs_compat")]
+fn invoke_prelinked_deno_print(
+  _function: usize,
+  _code_units: &[u16],
+  _is_error: bool,
+) -> Result<(), (u32, String)> {
+  Err((
+    2,
+    "the QuickJS compatibility bridge has no bound op_print".into(),
+  ))
 }
 
 #[derive(Hash, PartialEq, Eq)]

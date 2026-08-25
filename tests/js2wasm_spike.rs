@@ -1109,8 +1109,7 @@ fn links_runtime_eval_provider_with_shared_realm_state() {
 }
 
 #[test]
-#[cfg(feature = "js2wasm_runtime_compile")]
-#[ignore = "requires V8X_JS2WASM_DENO_CORE_WASM from js2wasm's pinned bootstrap probe"]
+#[cfg(feature = "js2wasm_deno_poc")]
 fn boots_exact_deno_core_artifact_in_two_wasmtime_stores() {
   let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM").expect(
     "set V8X_JS2WASM_DENO_CORE_WASM to the raw pinned bootstrap module",
@@ -1120,8 +1119,7 @@ fn boots_exact_deno_core_artifact_in_two_wasmtime_stores() {
 }
 
 #[test]
-#[cfg(feature = "js2wasm_runtime_compile")]
-#[ignore = "requires the staged V8X_JS2WASM_DENO_CORE_WASM/AOT artifact and V8X_JS2WASM_DENO_CORE_FIXTURES"]
+#[cfg(feature = "js2wasm_deno_poc")]
 fn routes_exact_deno_core_scripts_through_public_script_run() {
   initialize();
   DENO_OP_EVENTS.with(|events| events.borrow_mut().clear());

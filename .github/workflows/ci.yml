@@ -269,7 +269,7 @@ jobs:
           - backend: quickjs
             features: '"quickjs"'
           - backend: js2wasm
-            features: '"engine_js2wasm", "js2wasm_diagnostic_abi"'
+            features: '"js2wasm_quickjs_compat"'
     steps:
       - uses: actions/checkout@v4
         with:

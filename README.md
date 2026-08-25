@@ -103,6 +103,47 @@ engine configuration; never load an artifact supplied by an untrusted user.
 The optional `js2wasm_diagnostic_abi` weak-stub layer is Unix-only and is not a
 production runtime feature; MSVC is intentionally unsupported for that layer.
 
+For unchanged `deno_core`, build v8x with `js2wasm_quickjs_compat`. QuickJS
+supplies the complete rusty_v8-facing host surface (ops, snapshots, inspector,
+and conversions), while configured, hash-pinned bootstrap `Script::Run` calls
+are mirrored into one persistent JS2/Wasm/Wasmtime instance per Deno context.
+Without a configured artifact this profile remains useful as the 429-test host
+conformance gate; `js2wasm_deno_poc` below is the non-vacuous artifact gate.
+Packaged runs set `V8X_JS2WASM_DENO_CORE_AOT_MODULE` and, when the application
+imports the eval seam, `V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE` to trusted caches
+created by the same Wasmtime build.
+
+The pinned Deno `Script::Run` transaction has an explicit artifact-backed
+acceptance test. Build its optimized standardized-EH module and exact source
+fixtures from a pristine `tools/deno/DENO_REF` checkout (the builder reads
+tracked sources with `git show`, so an applied integration patch cannot change
+the audited hashes). The builder uses O3 to reduce the one-time Wasmtime AOT
+cost; correctness does not depend on optimization:
+
+```sh
+cd /path/to/js2
+node --max-old-space-size=3072 --experimental-wasm-exnref --import tsx \
+  /path/to/v8x/tools/js2wasm/build-deno-core-artifact.mjs \
+  --js2=/path/to/js2 \
+  --deno=/path/to/deno \
+  --wasm-opt=/path/to/js2/node_modules/.bin/wasm-opt \
+  --out=/tmp/deno-core.wasm \
+  --fixtures=/tmp/deno-core-fixtures \
+  --provider-out=/tmp/runtime-eval-provider.wasm
+```
+
+Then run the non-ignored opt-in gate. The development profile precompiles the
+raw modules with the embedded Wasmtime; a release/`deno compile` pipeline sets
+the corresponding `*_AOT_MODULE` variables to trusted precompiled artifacts.
+
+```sh
+V8X_JS2WASM_DENO_CORE_WASM=/tmp/deno-core.wasm \
+V8X_JS2WASM_DENO_CORE_FIXTURES=/tmp/deno-core-fixtures \
+V8X_JS2WASM_RUNTIME_EVAL_WASM=/tmp/runtime-eval-provider.wasm \
+cargo test --no-default-features --features js2wasm_deno_poc \
+  --test js2wasm_spike routes_exact_deno_core_scripts_through_public_script_run
+```
+
 
 Swap the engine under Deno without touching `deno_core`:
 
