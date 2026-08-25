@@ -1,8 +1,10 @@
 //! Experimental js2wasm module backend.
 //!
-//! js2wasm remains a build-time compiler. At runtime v8x embeds compiler-free
-//! Wasmtime, shares one engine plus each precompiled module across isolates,
-//! and keeps a private store/instance alive with each owning V8 module handle.
+//! `engine_js2wasm` embeds compiler-free Wasmtime and accepts only precompiled
+//! artifacts. `engine_js2wasm_runtime` adds the external compiler and a
+//! content-addressed native-artifact cache for graphs discovered after startup.
+//! Both profiles share one engine plus each precompiled module across isolates,
+//! and keep a private store/instance alive with each owning V8 module handle.
 //! The first Deno-shaped host seam is `Deno.cwd()`: the compiled TypeScript
 //! wrapper reconstructs its string from two direct UTF-16 imports, avoiding a
 //! JavaScript-host `externref` ABI or a WASI/component boundary.
@@ -57,6 +59,12 @@ const DENO_CORE_SET_IMMEDIATE_INFO: &str = "__v8x_set_deno_immediate_info";
 const DENO_CORE_SET_TIMER_INFO: &str = "__v8x_set_deno_timer_info";
 #[cfg(feature = "js2wasm_runtime_compile")]
 const DENO_CORE_AOT_OUTPUT_ENV: &str = "V8X_JS2WASM_DENO_CORE_AOT_OUTPUT";
+#[cfg(feature = "js2wasm_runtime_compile")]
+const RUNTIME_CACHE_DIR_ENV: &str = "V8X_JS2WASM_CACHE_DIR";
+#[cfg(feature = "js2wasm_runtime_compile")]
+const RUNTIME_COMPILER_ID_ENV: &str = "V8X_JS2WASM_COMPILER_ID";
+#[cfg(feature = "js2wasm_runtime_compile")]
+const RUNTIME_CACHE_DOMAIN: &[u8] = b"v8x/js2wasm runtime cache v1\0";
 const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
   ("env", "Promise_new"),
   ("env", "Promise_all"),
@@ -551,6 +559,10 @@ struct SharedDenoRuntime {
   modules: Mutex<HashMap<ModuleCacheKey, InstancePre<DenoHostState>>>,
   module_loads: AtomicUsize,
   instantiations: AtomicUsize,
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  cache_hits: AtomicUsize,
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  compilations: AtomicUsize,
 }
 
 static SHARED_DENO_RUNTIME: OnceLock<Result<SharedDenoRuntime, String>> =
@@ -562,6 +574,8 @@ pub struct Js2WasmRuntimeStats {
   pub cached_modules: usize,
   pub module_loads: usize,
   pub instantiations: usize,
+  pub cache_hits: usize,
+  pub compilations: usize,
 }
 
 impl SharedDenoRuntime {
@@ -653,6 +667,10 @@ impl SharedDenoRuntime {
       modules: Mutex::new(HashMap::new()),
       module_loads: AtomicUsize::new(0),
       instantiations: AtomicUsize::new(0),
+      #[cfg(feature = "js2wasm_runtime_compile")]
+      cache_hits: AtomicUsize::new(0),
+      #[cfg(feature = "js2wasm_runtime_compile")]
+      compilations: AtomicUsize::new(0),
     })
   }
 
@@ -834,6 +852,14 @@ impl SharedDenoRuntime {
       cached_modules: modules.len(),
       module_loads: self.module_loads.load(Ordering::Relaxed),
       instantiations: self.instantiations.load(Ordering::Relaxed),
+      #[cfg(feature = "js2wasm_runtime_compile")]
+      cache_hits: self.cache_hits.load(Ordering::Relaxed),
+      #[cfg(not(feature = "js2wasm_runtime_compile"))]
+      cache_hits: 0,
+      #[cfg(feature = "js2wasm_runtime_compile")]
+      compilations: self.compilations.load(Ordering::Relaxed),
+      #[cfg(not(feature = "js2wasm_runtime_compile"))]
+      compilations: 0,
     })
   }
 }
@@ -1272,18 +1298,7 @@ pub(crate) fn compile_and_instantiate(
   } else {
     #[cfg(feature = "js2wasm_runtime_compile")]
     {
-      let wasm = compile_graph(entry, modules)?;
-      let artifact = shared.precompile(&wasm)?;
-      if let Some(output) = std::env::var_os("V8X_JS2WASM_ARTIFACT_OUTPUT") {
-        fs::write(&output, &artifact).map_err(|error| {
-          format!(
-            "write precompiled js2wasm artifact {}: {error}",
-            Path::new(&output).display()
-          )
-        })?;
-        write_graph_binding(Path::new(&output), &artifact, entry, modules)?;
-      }
-      shared.development_bytes(&artifact)?
+      runtime_compiled_graph(shared, entry, modules)?
     }
     #[cfg(not(feature = "js2wasm_runtime_compile"))]
     {
@@ -1297,6 +1312,201 @@ pub(crate) fn compile_and_instantiate(
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve Deno.cwd() host value: {error}"))?;
   DenoRuntime::instantiate(shared, &instance_pre, cwd)
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn runtime_cache_dir() -> PathBuf {
+  if let Some(path) = std::env::var_os(RUNTIME_CACHE_DIR_ENV) {
+    return PathBuf::from(path);
+  }
+  #[cfg(target_os = "windows")]
+  if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+    return PathBuf::from(path).join("v8x").join("js2wasm");
+  }
+  #[cfg(target_os = "macos")]
+  if let Some(path) = std::env::var_os("HOME") {
+    return PathBuf::from(path)
+      .join("Library")
+      .join("Caches")
+      .join("v8x")
+      .join("js2wasm");
+  }
+  if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+    return PathBuf::from(path).join("v8x").join("js2wasm");
+  }
+  if let Some(path) = std::env::var_os("HOME") {
+    return PathBuf::from(path)
+      .join(".cache")
+      .join("v8x")
+      .join("js2wasm");
+  }
+  std::env::temp_dir().join("v8x-js2wasm-cache")
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn hash_file_if_present(
+  hasher: &mut Sha256,
+  path: &Path,
+) -> Result<(), String> {
+  match fs::read(path) {
+    Ok(bytes) => {
+      update_graph_digest(hasher, path.to_string_lossy().as_bytes());
+      update_graph_digest(hasher, &bytes);
+      Ok(())
+    }
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(format!(
+      "read js2wasm compiler identity input {}: {error}",
+      path.display()
+    )),
+  }
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn runtime_compiler_identity() -> Result<String, String> {
+  if let Some(identity) = std::env::var_os(RUNTIME_COMPILER_ID_ENV) {
+    return Ok(identity.to_string_lossy().into_owned());
+  }
+
+  let configured_compiler = std::env::var_os("V8X_JS2WASM_COMPILER");
+  let compiler = configured_compiler.clone().unwrap_or_else(|| "node".into());
+  let script = std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT");
+  if configured_compiler.is_none() && script.is_none() {
+    return Err(
+      "set V8X_JS2WASM_COMPILER to a standalone graph compiler or V8X_JS2WASM_COMPILER_SCRIPT to compile-graph.ts (or set V8X_JS2WASM_AOT_MODULE)"
+        .to_string(),
+    );
+  }
+  let mut hasher = Sha256::new();
+  update_graph_digest(&mut hasher, compiler.to_string_lossy().as_bytes());
+  if let Some(script) = script {
+    hash_file_if_present(&mut hasher, Path::new(&script))?;
+  }
+
+  let version = Command::new(&compiler).arg("--version").output();
+  if let Ok(version) = version {
+    update_graph_digest(&mut hasher, &version.stdout);
+    update_graph_digest(&mut hasher, &version.stderr);
+  }
+  if let Some(workdir) = std::env::var_os("V8X_JS2WASM_WORKDIR") {
+    let workdir = PathBuf::from(workdir);
+    for name in ["package.json", "pnpm-lock.yaml", "package-lock.json"] {
+      hash_file_if_present(&mut hasher, &workdir.join(name))?;
+    }
+  }
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn runtime_cache_key(
+  entry: &str,
+  modules: &[SourceModule],
+) -> Result<String, String> {
+  let mut hasher = Sha256::new();
+  hasher.update(RUNTIME_CACHE_DOMAIN);
+  update_graph_digest(&mut hasher, graph_digest(entry, modules).as_bytes());
+  update_graph_digest(&mut hasher, runtime_compiler_identity()?.as_bytes());
+  update_graph_digest(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
+  update_graph_digest(&mut hasher, b"wasmtime-47.0.3");
+  update_graph_digest(&mut hasher, std::env::consts::OS.as_bytes());
+  update_graph_digest(&mut hasher, std::env::consts::ARCH.as_bytes());
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+  let parent = path.parent().ok_or_else(|| {
+    format!("js2wasm cache path {} has no parent", path.display())
+  })?;
+  fs::create_dir_all(parent).map_err(|error| {
+    format!(
+      "create js2wasm cache directory {}: {error}",
+      parent.display()
+    )
+  })?;
+  let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+  let temporary = parent.join(format!(
+    ".{}.{}.{id}.tmp",
+    path.file_name().unwrap_or_default().to_string_lossy(),
+    std::process::id(),
+  ));
+  fs::write(&temporary, contents).map_err(|error| {
+    format!(
+      "write temporary js2wasm cache file {}: {error}",
+      temporary.display()
+    )
+  })?;
+  match fs::rename(&temporary, path) {
+    Ok(()) => Ok(()),
+    // Windows does not replace an existing destination. Concurrent writers
+    // for one content address are harmless when they produced identical data.
+    Err(error)
+      if error.kind() == std::io::ErrorKind::AlreadyExists
+        && fs::read(path).is_ok_and(|existing| existing == contents) =>
+    {
+      let _ = fs::remove_file(&temporary);
+      Ok(())
+    }
+    Err(error) => {
+      let _ = fs::remove_file(&temporary);
+      Err(format!(
+        "publish js2wasm cache file {} as {}: {error}",
+        temporary.display(),
+        path.display(),
+      ))
+    }
+  }
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn publish_graph_artifact(
+  artifact: &Path,
+  bytes: &[u8],
+  entry: &str,
+  modules: &[SourceModule],
+) -> Result<(), String> {
+  atomic_write(artifact, bytes)?;
+  let binding = format!(
+    "graph-sha256 {}\nartifact-sha256 {}\n",
+    graph_digest(entry, modules),
+    bytes_digest(bytes),
+  );
+  atomic_write(&graph_binding_path(artifact), binding.as_bytes())
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn runtime_compiled_graph(
+  shared: &SharedDenoRuntime,
+  entry: &str,
+  modules: &[SourceModule],
+) -> Result<InstancePre<DenoHostState>, String> {
+  let cache_key = runtime_cache_key(entry, modules)?;
+  let artifact = runtime_cache_dir().join(format!("{cache_key}.cwasm"));
+
+  if verify_graph_binding(&artifact, entry, modules).is_ok() {
+    match shared.precompiled_graph_file(&artifact, entry, modules) {
+      Ok(instance) => {
+        shared.cache_hits.fetch_add(1, Ordering::Relaxed);
+        return Ok(instance);
+      }
+      Err(error) => {
+        eprintln!(
+          "v8x/js2wasm: ignoring invalid runtime cache entry {}: {error}",
+          artifact.display(),
+        );
+      }
+    }
+  }
+
+  let wasm = compile_graph(entry, modules)?;
+  shared.compilations.fetch_add(1, Ordering::Relaxed);
+  let bytes = shared.precompile(&wasm)?;
+  publish_graph_artifact(&artifact, &bytes, entry, modules)?;
+
+  if let Some(output) = std::env::var_os("V8X_JS2WASM_ARTIFACT_OUTPUT") {
+    publish_graph_artifact(Path::new(&output), &bytes, entry, modules)?;
+  }
+  shared.precompiled_graph_file(&artifact, entry, modules)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -1329,21 +1539,26 @@ fn compile_graph(
   }
   drop(manifest);
 
-  let script =
-    std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT").ok_or_else(|| {
-      "V8X_JS2WASM_COMPILER_SCRIPT must point to compile-graph.ts (or set V8X_JS2WASM_AOT_MODULE)".to_string()
-    })?;
-  let compiler =
-    std::env::var_os("V8X_JS2WASM_COMPILER").unwrap_or_else(|| "node".into());
+  let configured_compiler = std::env::var_os("V8X_JS2WASM_COMPILER");
+  let compiler = configured_compiler.clone().unwrap_or_else(|| "node".into());
+  let script = std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT");
+  if configured_compiler.is_none() && script.is_none() {
+    return Err(
+      "set V8X_JS2WASM_COMPILER to a standalone graph compiler or V8X_JS2WASM_COMPILER_SCRIPT to compile-graph.ts (or set V8X_JS2WASM_AOT_MODULE)"
+        .to_string(),
+    );
+  }
   let mut compile = Command::new(&compiler);
-  if Path::new(&compiler)
-    .file_name()
-    .is_some_and(|name| name == "node")
-  {
-    compile.args(["--import", "tsx"]);
+  if let Some(script) = script {
+    if Path::new(&compiler)
+      .file_name()
+      .is_some_and(|name| name == "node")
+    {
+      compile.args(["--import", "tsx"]);
+    }
+    compile.arg(script);
   }
   compile
-    .arg(script)
     .arg("--manifest")
     .arg(&manifest_path)
     .arg("--entry")

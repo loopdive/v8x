@@ -71,9 +71,12 @@ engine_quickjs = []
 # Engine-free, ahead-of-time module backend. This first vertical slice owns
 # handles in Rust and evaluates linked TypeScript graphs through js2wasm.
 engine_js2wasm = ["dep:serde_json", "dep:sha2", "dep:wasmtime"]
-# Development-only bridge that invokes js2wasm and precompiles its raw Wasm in
-# the v8x process. Production builds use `engine_js2wasm` alone and therefore
-# do not link Cranelift or any other Wasm compiler.
+# General-purpose runtime profile. It invokes a shipped js2wasm compiler on
+# cache misses and uses Cranelift to produce target-native cached artifacts.
+# Packaged applications use `engine_js2wasm` alone and therefore ship neither
+# compiler nor Cranelift.
+engine_js2wasm_runtime = ["js2wasm_runtime_compile"]
+# Compatibility name retained for the original spike and its scripts.
 js2wasm_runtime_compile = ["engine_js2wasm", "wasmtime/cranelift"]
 # Unix-only diagnostic link completion for unchanged deno_core probes. Every
 # otherwise-unresolved v8/inspector/shared-pointer entry is a weak, fail-loud

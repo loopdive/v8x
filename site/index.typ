@@ -30,6 +30,7 @@ unchanged and runs on the engine you picked.
   [JavaScriptCore (Apple's system framework)], [`system_jsc`], [macOS],
   [QuickJS-ng (vendored, static)], [`quickjs`], [any],
   [js2wasm AOT modules on Wasmtime (experimental)], [`engine_js2wasm`], [any],
+  [js2wasm runtime compiler + artifact cache (experimental)], [`engine_js2wasm_runtime`], [any],
 )
 
 The js2wasm backend is under active development. Its CI baseline currently

@@ -962,25 +962,50 @@ fn precompiled_artifact_requires_exact_graph_binding() {
 }
 
 #[test]
-#[ignore = "requires V8X_JS2WASM_COMPILER_SCRIPT or a graph-bound V8X_JS2WASM_AOT_MODULE"]
+#[ignore = "requires a configured js2wasm compiler or a graph-bound V8X_JS2WASM_AOT_MODULE"]
 fn evaluates_raw_typescript_graph_through_wasmtime() {
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  let runtime_cache = (std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_none())
+    .then(|| {
+      let path = std::env::temp_dir().join(format!(
+        "v8x-js2wasm-runtime-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .unwrap()
+          .as_nanos(),
+      ));
+      // This ignored integration test is run by exact name, before the backend
+      // is initialized, so it exclusively owns the process-wide cache setting.
+      unsafe { std::env::set_var("V8X_JS2WASM_CACHE_DIR", &path) };
+      path
+    });
+
   initialize();
   assert_eq!(v8::V8X_ENGINE, "js2wasm");
   assert!(
     std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT").is_some()
+      || std::env::var_os("V8X_JS2WASM_COMPILER").is_some()
       || std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some(),
-    "set V8X_JS2WASM_COMPILER_SCRIPT to compile-graph.ts or V8X_JS2WASM_AOT_MODULE to a trusted Wasmtime-precompiled artifact"
+    "set V8X_JS2WASM_COMPILER to a graph compiler, V8X_JS2WASM_COMPILER_SCRIPT to compile-graph.ts, or V8X_JS2WASM_AOT_MODULE to a trusted Wasmtime-precompiled artifact"
   );
 
   let before = v8::js2wasm_runtime_stats().unwrap();
   evaluate_graph_once();
+  evaluate_graph_once();
+  let after = v8::js2wasm_runtime_stats().unwrap();
 
-  if std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some() {
-    evaluate_graph_once();
-    let after = v8::js2wasm_runtime_stats().unwrap();
-    assert_eq!(after.module_loads - before.module_loads, 1);
-    assert_eq!(after.cached_modules - before.cached_modules, 1);
-    assert_eq!(after.instantiations - before.instantiations, 2);
+  assert_eq!(after.module_loads - before.module_loads, 1);
+  assert_eq!(after.cached_modules - before.cached_modules, 1);
+  assert_eq!(after.instantiations - before.instantiations, 2);
+
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  if let Some(runtime_cache) = runtime_cache {
+    assert_eq!(after.compilations - before.compilations, 1);
+    assert_eq!(after.cache_hits - before.cache_hits, 1);
+    let entries = fs::read_dir(&runtime_cache).unwrap().count();
+    assert_eq!(entries, 2, "cache must contain an artifact and its binding");
+    fs::remove_dir_all(runtime_cache).unwrap();
   }
 }
 
