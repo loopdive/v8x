@@ -91,11 +91,11 @@ Build the provider with a js2wasm revision that emits standardized `try_table`
 exception handling for standalone targets. Current js2wasm does so; older
 compiler bundles emitted the withdrawn legacy `try`/`catch` encoding rejected
 by Wasmtime. The v8x integration test keeps a narrow provider fixture for fast
-ABI and compiler-free replay coverage. Current js2wasm builds the full
-Acorn/interpreter provider with its O3 pipeline, which canonicalizes the large
-raw module for portable engine execution. The resulting provider's eval canary
-passes in Node and Wasmtime. Keep that canary as a release gate; unoptimized
-provider artifacts are not supported for distribution.
+ABI and compiler-free replay coverage. Current js2wasm statically binds Acorn
+without carrying its parser through a generic function value or an additional
+object-returning trampoline. The resulting unoptimized and optimized providers
+pass their eval canaries in Node and Wasmtime. Keep those canaries as a release
+gate.
 
 Wasmtime precompiled artifacts contain native executable code. They must come
 from a trusted build pipeline using the same Wasmtime version, target, and
