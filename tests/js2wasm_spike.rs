@@ -12,6 +12,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAIN: &str = "file:///tmp/v8x-js2wasm-main.ts";
+const RUNTIME_EVAL_MAIN: &str = "file:///tmp/v8x-js2wasm-runtime-eval-main.ts";
 const DEPENDENCY: &str = "file:///tmp/v8x-js2wasm-math.ts";
 const DENO: &str = "file:///tmp/v8x-js2wasm-deno.ts";
 const DENO_SOURCE: &str = r#"
@@ -332,6 +333,36 @@ fn evaluate_graph_once() {
   );
   assert_eq!(module.get_status(), v8::ModuleStatus::Instantiated);
 
+  assert!(module.evaluate(scope).is_some());
+  assert_eq!(module.get_status(), v8::ModuleStatus::Evaluated);
+}
+
+fn evaluate_runtime_eval_graph_once() {
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let source = r#"
+    (globalThis as any).runtimeCounter = 40;
+    let increment = 2;
+    let mutation = "runtimeCounter = runtimeCounter + " + increment;
+    (0, eval)(mutation);
+    let readback = "runtime" + "Counter";
+    export function __v8x_probe_runtime_eval_state(): number {
+      return (globalThis as any).runtimeCounter + (0, eval)(readback);
+    }
+  "#;
+  let source = v8::String::new(scope, source).unwrap();
+  let name = v8::String::new(scope, RUNTIME_EVAL_MAIN).unwrap().into();
+  let script_origin = origin(scope, name);
+  let mut source =
+    v8::script_compiler::Source::new(source, Some(&script_origin));
+  let module = v8::script_compiler::compile_module(scope, &mut source).unwrap();
+  assert!(
+    module
+      .instantiate_module(scope, resolve_dependency)
+      .unwrap()
+  );
   assert!(module.evaluate(scope).is_some());
   assert_eq!(module.get_status(), v8::ModuleStatus::Evaluated);
 }
@@ -1006,6 +1037,74 @@ fn evaluates_raw_typescript_graph_through_wasmtime() {
     let entries = fs::read_dir(&runtime_cache).unwrap().count();
     assert_eq!(entries, 2, "cache must contain an artifact and its binding");
     fs::remove_dir_all(runtime_cache).unwrap();
+  }
+}
+
+#[test]
+#[ignore = "requires graph-bound application and runtime-eval provider artifacts, or their runtime-profile build inputs"]
+fn links_runtime_eval_provider_with_shared_realm_state() {
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  {
+    assert!(
+      std::env::var_os("V8X_JS2WASM_RUNTIME_EVAL_WASM").is_some()
+        || std::env::var_os("V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE").is_some(),
+      "set V8X_JS2WASM_RUNTIME_EVAL_WASM or V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE to the zero-import runtime-eval provider"
+    );
+    assert!(
+      std::env::var_os("V8X_JS2WASM_COMPILER_SCRIPT").is_some()
+        || std::env::var_os("V8X_JS2WASM_COMPILER").is_some()
+        || std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some(),
+      "configure the js2wasm graph compiler or graph-bound application artifact"
+    );
+  }
+  #[cfg(not(feature = "js2wasm_runtime_compile"))]
+  {
+    assert!(
+      std::env::var_os("V8X_JS2WASM_AOT_MODULE").is_some(),
+      "set V8X_JS2WASM_AOT_MODULE to the graph-bound application artifact"
+    );
+    assert!(
+      std::env::var_os("V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE").is_some(),
+      "set V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE to the trusted provider artifact"
+    );
+  }
+
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  let cache = std::env::temp_dir().join(format!(
+    "v8x-js2wasm-runtime-eval-cache-{}-{}",
+    std::process::id(),
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos(),
+  ));
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  unsafe {
+    std::env::set_var("V8X_JS2WASM_CACHE_DIR", &cache)
+  };
+  unsafe { std::env::set_var("V8X_JS2WASM_VERIFY_RUNTIME_EVAL_STATE", "1") };
+
+  initialize();
+  let before = v8::js2wasm_runtime_stats().unwrap();
+  evaluate_runtime_eval_graph_once();
+  evaluate_runtime_eval_graph_once();
+  let after = v8::js2wasm_runtime_stats().unwrap();
+
+  assert_eq!(after.module_loads - before.module_loads, 1);
+  assert_eq!(after.instantiations - before.instantiations, 2);
+  assert_eq!(
+    after.runtime_eval_provider_loads - before.runtime_eval_provider_loads,
+    1
+  );
+  assert_eq!(
+    after.runtime_eval_instantiations - before.runtime_eval_instantiations,
+    2
+  );
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  {
+    assert_eq!(after.compilations - before.compilations, 1);
+    assert!(after.cache_hits > before.cache_hits);
+    fs::remove_dir_all(cache).unwrap();
   }
 }
 

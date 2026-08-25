@@ -10,9 +10,7 @@
 //! JavaScript-host `externref` ABI or a WASI/component boundary.
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-#[cfg(feature = "js2wasm_runtime_compile")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -45,11 +43,26 @@ const DENO_PRINT_BEGIN_IMPORT: &str = "__v8x_deno_print_begin";
 const DENO_PRINT_CODE_UNIT_IMPORT: &str = "__v8x_deno_print_code_unit";
 const DENO_PRINT_END_IMPORT: &str = "__v8x_deno_print_end";
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
+const RUNTIME_EVAL_IMPORT_MODULE: &str = "js2wasm:runtime-eval";
+const RUNTIME_EVAL_IMPORTS: &[&str] = &[
+  "__runtime_apply_interpreted",
+  "__runtime_new_function",
+  "__runtime_indirect_eval",
+  "__runtime_direct_eval",
+];
+const RUNTIME_EVAL_AOT_MODULE_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE";
+#[cfg(feature = "js2wasm_runtime_compile")]
+const RUNTIME_EVAL_WASM_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_WASM";
+#[cfg(feature = "js2wasm_runtime_compile")]
+const RUNTIME_EVAL_AOT_OUTPUT_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_AOT_OUTPUT";
 const GRAPH_BINDING_SUFFIX: &str = ".graph-sha256";
 const GRAPH_BINDING_DOMAIN: &[u8] = b"v8x/js2wasm graph binding v1\0";
 const CWD_LENGTH_PROBE: &str = "__v8x_probe_cwd_utf16_length";
 const CWD_CHECKSUM_PROBE: &str = "__v8x_probe_cwd_utf16_checksum";
 const DENO_CORE_BOOTSTRAP_PROBE: &str = "__v8x_probe_deno_core_bootstrap";
+const RUNTIME_EVAL_STATE_PROBE: &str = "__v8x_probe_runtime_eval_state";
+const RUNTIME_EVAL_STATE_PROBE_ENV: &str =
+  "V8X_JS2WASM_VERIFY_RUNTIME_EVAL_STATE";
 const DENO_CORE_WRAPPERS_STAGE: &str = "__v8x_stage_deno_core_wrappers";
 const DENO_CORE_MODULE_STAGE: &str = "__v8x_stage_deno_core_module";
 const DENO_CORE_USAGE_STAGE: &str = "__v8x_stage_deno_hello_world_usage";
@@ -71,8 +84,6 @@ const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
   ("env", "Promise_allSettled"),
   ("env", "Promise_any"),
   ("env", "Promise_race"),
-  ("js2wasm:runtime-eval", "__runtime_apply_interpreted"),
-  ("js2wasm:runtime-eval", "__runtime_indirect_eval"),
 ];
 
 const DENO_HOST_IMPORTS: &[&str] = &[
@@ -553,12 +564,21 @@ enum ModuleCacheKey {
   DevelopmentBytes(Vec<u8>),
 }
 
+#[derive(Clone)]
+enum PreparedModule {
+  Prelinked(InstancePre<DenoHostState>),
+  RuntimeEval(Module),
+}
+
 struct SharedDenoRuntime {
   engine: Engine,
   linker: Linker<DenoHostState>,
-  modules: Mutex<HashMap<ModuleCacheKey, InstancePre<DenoHostState>>>,
+  modules: Mutex<HashMap<ModuleCacheKey, PreparedModule>>,
+  runtime_eval_provider: Mutex<Option<Module>>,
   module_loads: AtomicUsize,
   instantiations: AtomicUsize,
+  runtime_eval_provider_loads: AtomicUsize,
+  runtime_eval_instantiations: AtomicUsize,
   #[cfg(feature = "js2wasm_runtime_compile")]
   cache_hits: AtomicUsize,
   #[cfg(feature = "js2wasm_runtime_compile")]
@@ -576,6 +596,8 @@ pub struct Js2WasmRuntimeStats {
   pub instantiations: usize,
   pub cache_hits: usize,
   pub compilations: usize,
+  pub runtime_eval_provider_loads: usize,
+  pub runtime_eval_instantiations: usize,
 }
 
 impl SharedDenoRuntime {
@@ -665,8 +687,11 @@ impl SharedDenoRuntime {
       engine,
       linker,
       modules: Mutex::new(HashMap::new()),
+      runtime_eval_provider: Mutex::new(None),
       module_loads: AtomicUsize::new(0),
       instantiations: AtomicUsize::new(0),
+      runtime_eval_provider_loads: AtomicUsize::new(0),
+      runtime_eval_instantiations: AtomicUsize::new(0),
       #[cfg(feature = "js2wasm_runtime_compile")]
       cache_hits: AtomicUsize::new(0),
       #[cfg(feature = "js2wasm_runtime_compile")]
@@ -677,7 +702,7 @@ impl SharedDenoRuntime {
   fn precompiled_file(
     &self,
     artifact: &Path,
-  ) -> Result<InstancePre<DenoHostState>, String> {
+  ) -> Result<PreparedModule, String> {
     let artifact = artifact.canonicalize().map_err(|error| {
       format!(
         "resolve precompiled js2wasm artifact {}: {error}",
@@ -704,10 +729,10 @@ impl SharedDenoRuntime {
       )
     })?;
     self.trace_imports(&module);
-    let instance_pre = self.instance_pre(&module)?;
-    modules.insert(key, instance_pre.clone());
+    let prepared = self.prepare_module(&module)?;
+    modules.insert(key, prepared.clone());
     self.module_loads.fetch_add(1, Ordering::Relaxed);
-    Ok(instance_pre)
+    Ok(prepared)
   }
 
   fn precompiled_graph_file(
@@ -715,7 +740,7 @@ impl SharedDenoRuntime {
     artifact: &Path,
     entry: &str,
     modules: &[SourceModule],
-  ) -> Result<InstancePre<DenoHostState>, String> {
+  ) -> Result<PreparedModule, String> {
     let graph_sha256 = graph_digest(entry, modules);
     let artifact_sha256 = bound_artifact_digest(artifact, &graph_sha256)?;
     let artifact = artifact.canonicalize().map_err(|error| {
@@ -761,10 +786,10 @@ impl SharedDenoRuntime {
         )
       })?;
     self.trace_imports(&module);
-    let instance_pre = self.instance_pre(&module)?;
-    modules.insert(key, instance_pre.clone());
+    let prepared = self.prepare_module(&module)?;
+    modules.insert(key, prepared.clone());
     self.module_loads.fetch_add(1, Ordering::Relaxed);
-    Ok(instance_pre)
+    Ok(prepared)
   }
 
   #[cfg(feature = "js2wasm_runtime_compile")]
@@ -779,7 +804,7 @@ impl SharedDenoRuntime {
   fn development_bytes(
     &self,
     artifact: &[u8],
-  ) -> Result<InstancePre<DenoHostState>, String> {
+  ) -> Result<PreparedModule, String> {
     let key = ModuleCacheKey::DevelopmentBytes(artifact.to_vec());
     let mut modules = self
       .modules
@@ -795,10 +820,10 @@ impl SharedDenoRuntime {
         format!("load development js2wasm artifact: {error:#}")
       })?;
     self.trace_imports(&module);
-    let instance_pre = self.instance_pre(&module)?;
-    modules.insert(key, instance_pre.clone());
+    let prepared = self.prepare_module(&module)?;
+    modules.insert(key, prepared.clone());
     self.module_loads.fetch_add(1, Ordering::Relaxed);
-    Ok(instance_pre)
+    Ok(prepared)
   }
 
   fn trace_imports(&self, module: &Module) {
@@ -809,23 +834,31 @@ impl SharedDenoRuntime {
     }
   }
 
-  fn instance_pre(
-    &self,
-    module: &Module,
-  ) -> Result<InstancePre<DenoHostState>, String> {
+  fn prepare_module(&self, module: &Module) -> Result<PreparedModule, String> {
+    let mut needs_runtime_eval = false;
     for import in module.imports() {
       let known_deno_import = import.module() == DENO_IMPORT_MODULE
         && DENO_HOST_IMPORTS.contains(&import.name());
+      let runtime_eval_import = import.module() == RUNTIME_EVAL_IMPORT_MODULE
+        && RUNTIME_EVAL_IMPORTS.contains(&import.name());
+      needs_runtime_eval |= runtime_eval_import;
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
         .any(|candidate| *candidate == (import.module(), import.name()));
-      if !known_deno_import && !deferred_bootstrap_import {
+      if !known_deno_import
+        && !runtime_eval_import
+        && !deferred_bootstrap_import
+      {
         return Err(format!(
           "unimplemented js2wasm host import {}::{}",
           import.module(),
           import.name(),
         ));
       }
+    }
+
+    if needs_runtime_eval {
+      return Ok(PreparedModule::RuntimeEval(module.clone()));
     }
 
     // The exact core bootstrap retains Promise/eval imports as function
@@ -839,9 +872,134 @@ impl SharedDenoRuntime {
       .map_err(|error| {
         format!("bind deferred js2wasm bootstrap imports: {error:#}")
       })?;
-    linker
+    let instance_pre = linker
       .instantiate_pre(module)
-      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))
+      .map_err(|error| format!("resolve js2wasm host imports: {error:#}"))?;
+    Ok(PreparedModule::Prelinked(instance_pre))
+  }
+
+  fn validate_runtime_eval_provider(
+    &self,
+    module: &Module,
+  ) -> Result<(), String> {
+    let imports: Vec<_> = module
+      .imports()
+      .map(|import| format!("{}::{}", import.module(), import.name()))
+      .collect();
+    if !imports.is_empty() {
+      return Err(format!(
+        "js2wasm runtime-eval provider must have zero imports, found {}",
+        imports.join(", "),
+      ));
+    }
+    let exports: HashSet<_> = module
+      .exports()
+      .map(|export| export.name().to_string())
+      .collect();
+    let missing: Vec<_> = RUNTIME_EVAL_IMPORTS
+      .iter()
+      .copied()
+      .filter(|name| !exports.contains(*name))
+      .collect();
+    if !missing.is_empty() {
+      return Err(format!(
+        "js2wasm runtime-eval provider is missing exports: {}",
+        missing.join(", "),
+      ));
+    }
+    Ok(())
+  }
+
+  #[cfg(feature = "js2wasm_runtime_compile")]
+  fn runtime_eval_provider_from_wasm(
+    &self,
+    wasm_path: &Path,
+  ) -> Result<Module, String> {
+    let wasm = fs::read(wasm_path).map_err(|error| {
+      format!(
+        "read js2wasm runtime-eval provider {}: {error}",
+        wasm_path.display(),
+      )
+    })?;
+    let source_digest = bytes_digest(&wasm);
+    let mut hasher = Sha256::new();
+    hasher.update(b"v8x/js2wasm runtime-eval provider cache v1\0");
+    update_graph_digest(&mut hasher, source_digest.as_bytes());
+    update_graph_digest(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
+    update_graph_digest(&mut hasher, b"wasmtime-47.0.3");
+    update_graph_digest(&mut hasher, std::env::consts::OS.as_bytes());
+    update_graph_digest(&mut hasher, std::env::consts::ARCH.as_bytes());
+    let key = format!("{:x}", hasher.finalize());
+    let artifact =
+      runtime_cache_dir().join(format!("runtime-eval-{key}.cwasm"));
+
+    if let Ok(bound_artifact) = bound_artifact_digest(&artifact, &source_digest)
+      && let Ok(bytes) = fs::read(&artifact)
+      && bytes_digest(&bytes) == bound_artifact
+      && let Ok(module) = unsafe { Module::deserialize(&self.engine, &bytes) }
+    {
+      persist_runtime_eval_provider_artifact(&bytes)?;
+      self.cache_hits.fetch_add(1, Ordering::Relaxed);
+      return Ok(module);
+    }
+
+    let bytes = self.precompile(&wasm)?;
+    publish_bound_artifact(&artifact, &bytes, &source_digest)?;
+    persist_runtime_eval_provider_artifact(&bytes)?;
+    unsafe { Module::deserialize(&self.engine, &bytes) }.map_err(|error| {
+      format!(
+        "load cached js2wasm runtime-eval provider {}: {error:#}",
+        artifact.display(),
+      )
+    })
+  }
+
+  fn runtime_eval_provider(&self) -> Result<Module, String> {
+    let mut cached = self
+      .runtime_eval_provider
+      .lock()
+      .map_err(|_| "lock js2wasm runtime-eval provider cache".to_string())?;
+    if let Some(module) = cached.as_ref() {
+      return Ok(module.clone());
+    }
+
+    let module = if let Some(path) =
+      std::env::var_os(RUNTIME_EVAL_AOT_MODULE_ENV)
+    {
+      let path = PathBuf::from(path);
+      // This is executable native code and must be supplied by the same
+      // trusted packaging pipeline as the application artifact.
+      unsafe { Module::deserialize_file(&self.engine, &path) }.map_err(
+        |error| {
+          format!(
+            "load trusted js2wasm runtime-eval provider {}: {error:#}",
+            path.display(),
+          )
+        },
+      )?
+    } else {
+      #[cfg(feature = "js2wasm_runtime_compile")]
+      {
+        let path = std::env::var_os(RUNTIME_EVAL_WASM_ENV).ok_or_else(|| {
+          format!(
+            "module imports {RUNTIME_EVAL_IMPORT_MODULE}; set {RUNTIME_EVAL_AOT_MODULE_ENV} to a trusted precompiled provider or {RUNTIME_EVAL_WASM_ENV} to the provider Wasm in the runtime profile"
+          )
+        })?;
+        self.runtime_eval_provider_from_wasm(Path::new(&path))?
+      }
+      #[cfg(not(feature = "js2wasm_runtime_compile"))]
+      {
+        return Err(format!(
+          "module imports {RUNTIME_EVAL_IMPORT_MODULE}; compiler-free builds require {RUNTIME_EVAL_AOT_MODULE_ENV} to point to a trusted precompiled provider"
+        ));
+      }
+    };
+    self.validate_runtime_eval_provider(&module)?;
+    self
+      .runtime_eval_provider_loads
+      .fetch_add(1, Ordering::Relaxed);
+    *cached = Some(module.clone());
+    Ok(module)
   }
 
   fn stats(&self) -> Result<Js2WasmRuntimeStats, String> {
@@ -860,6 +1018,12 @@ impl SharedDenoRuntime {
       compilations: self.compilations.load(Ordering::Relaxed),
       #[cfg(not(feature = "js2wasm_runtime_compile"))]
       compilations: 0,
+      runtime_eval_provider_loads: self
+        .runtime_eval_provider_loads
+        .load(Ordering::Relaxed),
+      runtime_eval_instantiations: self
+        .runtime_eval_instantiations
+        .load(Ordering::Relaxed),
     })
   }
 }
@@ -928,11 +1092,11 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
   let shared = shared_runtime()?;
   let precompiled = shared.precompile(&wasm)?;
   persist_precompiled_deno_core_artifact(&precompiled)?;
-  let instance_pre = shared.development_bytes(&precompiled)?;
+  let prepared = shared.development_bytes(&precompiled)?;
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve test working directory: {error}"))?;
-  DenoRuntime::instantiate(shared, &instance_pre, cwd.clone())?;
-  DenoRuntime::instantiate(shared, &instance_pre, cwd)?;
+  DenoRuntime::instantiate(shared, &prepared, cwd.clone())?;
+  DenoRuntime::instantiate(shared, &prepared, cwd)?;
   Ok(())
 }
 
@@ -942,7 +1106,7 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
 pub(crate) fn deno_core_bootstrap_runtime_from_env()
 -> Result<DenoRuntime, String> {
   let shared = shared_runtime()?;
-  let instance_pre = if let Some(artifact) =
+  let prepared = if let Some(artifact) =
     std::env::var_os("V8X_JS2WASM_DENO_CORE_AOT_MODULE")
   {
     shared.precompiled_file(Path::new(&artifact))?
@@ -974,7 +1138,7 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env()
   let cwd = std::env::current_dir().map_err(|error| {
     format!("resolve Deno bootstrap working directory: {error}")
   })?;
-  DenoRuntime::instantiate(shared, &instance_pre, cwd)
+  DenoRuntime::instantiate(shared, &prepared, cwd)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -996,12 +1160,13 @@ fn persist_precompiled_deno_core_artifact(
 pub(crate) struct DenoRuntime {
   store: Store<DenoHostState>,
   instance: Instance,
+  _runtime_eval_provider: Option<Instance>,
 }
 
 impl DenoRuntime {
   fn instantiate(
     shared: &SharedDenoRuntime,
-    instance_pre: &InstancePre<DenoHostState>,
+    prepared: &PreparedModule,
     cwd: PathBuf,
   ) -> Result<Self, String> {
     let cwd = cwd.to_string_lossy().encode_utf16().collect();
@@ -1017,14 +1182,53 @@ impl DenoRuntime {
         last_error: None,
       },
     );
-    let instance = instance_pre
-      .instantiate(&mut store)
-      .map_err(|error| format!("instantiate js2wasm artifact: {error}"))?;
+    let (instance, runtime_eval_provider) = match prepared {
+      PreparedModule::Prelinked(instance_pre) => {
+        let instance = instance_pre
+          .instantiate(&mut store)
+          .map_err(|error| format!("instantiate js2wasm artifact: {error}"))?;
+        (instance, None)
+      }
+      PreparedModule::RuntimeEval(module) => {
+        let provider_module = shared.runtime_eval_provider()?;
+        let provider = shared
+          .linker
+          .instantiate(&mut store, &provider_module)
+          .map_err(|error| {
+            format!("instantiate js2wasm runtime-eval provider: {error:#}")
+          })?;
+        let mut linker = shared.linker.clone();
+        linker.allow_shadowing(true);
+        linker
+          .define_unknown_imports_as_traps(module)
+          .map_err(|error| {
+            format!("bind deferred js2wasm imports: {error:#}")
+          })?;
+        linker
+          .instance(&mut store, RUNTIME_EVAL_IMPORT_MODULE, provider)
+          .map_err(|error| {
+            format!("bind js2wasm runtime-eval provider exports: {error:#}")
+          })?;
+        let instance =
+          linker.instantiate(&mut store, module).map_err(|error| {
+            format!("instantiate js2wasm artifact: {error:#}")
+          })?;
+        shared
+          .runtime_eval_instantiations
+          .fetch_add(1, Ordering::Relaxed);
+        (instance, Some(provider))
+      }
+    };
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
-    let mut runtime = Self { store, instance };
+    let mut runtime = Self {
+      store,
+      instance,
+      _runtime_eval_provider: runtime_eval_provider,
+    };
     runtime.run_deferred_module_init()?;
     runtime.verify_cwd_probe()?;
     runtime.verify_deno_core_bootstrap_probe()?;
+    runtime.verify_runtime_eval_state_probe()?;
     Ok(runtime)
   }
 
@@ -1134,6 +1338,29 @@ impl DenoRuntime {
     if value != 42.0 {
       return Err(format!(
         "Deno core bootstrap probe returned {value}, expected 42"
+      ));
+    }
+    Ok(())
+  }
+
+  fn verify_runtime_eval_state_probe(&mut self) -> Result<(), String> {
+    if std::env::var_os(RUNTIME_EVAL_STATE_PROBE_ENV).is_none() {
+      return Ok(());
+    }
+    let Some(probe) = self
+      .instance
+      .get_func(&mut self.store, RUNTIME_EVAL_STATE_PROBE)
+    else {
+      return Ok(());
+    };
+    let value = probe
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| format!("type {RUNTIME_EVAL_STATE_PROBE}: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("call {RUNTIME_EVAL_STATE_PROBE}: {error:#}"))?;
+    if value != 84.0 {
+      return Err(format!(
+        "runtime-eval shared-state probe returned {value}, expected 84"
       ));
     }
     Ok(())
@@ -1290,7 +1517,7 @@ pub(crate) fn compile_and_instantiate(
     return Err("js2wasm module graph is empty".to_string());
   }
   let shared = shared_runtime()?;
-  let instance_pre = if let Some(artifact) =
+  let prepared = if let Some(artifact) =
     std::env::var_os("V8X_JS2WASM_AOT_MODULE")
   {
     let artifact = Path::new(&artifact);
@@ -1311,7 +1538,7 @@ pub(crate) fn compile_and_instantiate(
   };
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve Deno.cwd() host value: {error}"))?;
-  DenoRuntime::instantiate(shared, &instance_pre, cwd)
+  DenoRuntime::instantiate(shared, &prepared, cwd)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -1465,13 +1692,29 @@ fn publish_graph_artifact(
   entry: &str,
   modules: &[SourceModule],
 ) -> Result<(), String> {
+  publish_bound_artifact(artifact, bytes, &graph_digest(entry, modules))
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn publish_bound_artifact(
+  artifact: &Path,
+  bytes: &[u8],
+  source_digest: &str,
+) -> Result<(), String> {
   atomic_write(artifact, bytes)?;
   let binding = format!(
-    "graph-sha256 {}\nartifact-sha256 {}\n",
-    graph_digest(entry, modules),
+    "graph-sha256 {source_digest}\nartifact-sha256 {}\n",
     bytes_digest(bytes),
   );
   atomic_write(&graph_binding_path(artifact), binding.as_bytes())
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn persist_runtime_eval_provider_artifact(bytes: &[u8]) -> Result<(), String> {
+  let Some(output) = std::env::var_os(RUNTIME_EVAL_AOT_OUTPUT_ENV) else {
+    return Ok(());
+  };
+  atomic_write(Path::new(&output), bytes)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -1479,7 +1722,7 @@ fn runtime_compiled_graph(
   shared: &SharedDenoRuntime,
   entry: &str,
   modules: &[SourceModule],
-) -> Result<InstancePre<DenoHostState>, String> {
+) -> Result<PreparedModule, String> {
   let cache_key = runtime_cache_key(entry, modules)?;
   let artifact = runtime_cache_dir().join(format!("{cache_key}.cwasm"));
 

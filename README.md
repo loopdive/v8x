@@ -68,10 +68,33 @@ cargo test --release --no-default-features \
   --features engine_js2wasm_runtime,simdutf --test js2wasm_spike
 ```
 
-This profile currently compiles module graphs. Deno's stateful classic scripts,
-REPL input, and `eval` additionally require the shared-realm ABI work tracked by
-the js2wasm Deno integration; the cache does not pretend isolated compilations
-share JavaScript state.
+Compiled graphs that import `js2wasm:runtime-eval` can link js2wasm's existing
+zero-import interpreter provider. In the runtime profile, point
+`V8X_JS2WASM_RUNTIME_EVAL_WASM` at its raw Wasm; v8x precompiles and caches it,
+then instantiates a fresh provider in the application's own Wasmtime store.
+Provider exports are registered directly as the graph's four runtime-eval
+imports, so WasmGC global objects, closures, and mutable binding cells cross
+the boundary without a Rust value-copy layer.
+
+Set `V8X_JS2WASM_RUNTIME_EVAL_AOT_OUTPUT` while packaging to save the provider's
+native artifact. A compiler-free application loads that artifact through
+`V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE` alongside `V8X_JS2WASM_AOT_MODULE`.
+Both native artifacts must be produced by the same trusted pipeline and
+Wasmtime configuration.
+
+This completes the v8x side of runtime `eval`/`Function` linking inside a
+compiled module graph. Arbitrary Deno classic-script and REPL submissions need
+to be routed into a persistent compiled graph; that is a v8x `Script::Run`
+lifecycle task, not a missing runtime-eval realm ABI.
+
+Build the provider with a js2wasm revision that emits standardized `try_table`
+exception handling for standalone targets. Current js2wasm does so; older
+compiler bundles emitted the withdrawn legacy `try`/`catch` encoding rejected
+by Wasmtime. The v8x integration test keeps a narrow provider fixture for fast
+ABI and compiler-free replay coverage. The full Acorn/interpreter provider now
+validates and precompiles in Wasmtime, but its own eval canary still throws at
+execution there despite passing in Node; that engine-parity bug is separate
+from v8x's provider linking and must be resolved before shipping that provider.
 
 Wasmtime precompiled artifacts contain native executable code. They must come
 from a trusted build pipeline using the same Wasmtime version, target, and

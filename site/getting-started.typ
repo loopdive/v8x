@@ -55,8 +55,16 @@ engine you selected. The experimental js2wasm backend currently passes 132 of
 Use compiler-free `engine_js2wasm` for closed-world `deno compile`-style
 artifacts. Use `engine_js2wasm_runtime` when source arrives after startup: it
 ships or locates the js2wasm compiler and caches target-native artifacts by
-module graph and compiler identity. Stateful classic scripts, REPL input, and
-`eval` still require the backend's shared-realm ABI work.
+module graph and compiler identity. Graphs using dynamic code can link the
+existing zero-import `js2wasm:runtime-eval` provider in the same Wasmtime store,
+preserving global objects and mutable binding cells across the module boundary.
+Arbitrary Deno classic scripts and REPL submissions still need `Script::Run`
+lifecycle routing into a persistent compiled graph. Build the full interpreter
+provider with a current js2wasm compiler, whose standalone target uses the
+standardized `try_table` encoding accepted by Wasmtime. The current full
+Acorn/interpreter provider still has a Wasmtime execution-parity failure after
+validation, so production packaging must keep its provider canary as a release
+gate.
 
 == macOS note: JIT entitlements
 
