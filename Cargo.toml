@@ -97,17 +97,6 @@ quickjs = [
   "dep:icu_collator",
   "dep:icu_locale",
 ]
-# Deno integration profile: retain QuickJS's complete rusty_v8 compatibility
-# surface for host/runtime glue while Script::Run can route audited application
-# graphs through the embedded js2wasm runtime. This is intentionally distinct
-# from `engine_quickjs`: callers and diagnostics still identify the backend as
-# js2wasm, and compiler-free production builds keep using `engine_js2wasm`.
-js2wasm_quickjs_compat = [
-  "engine_js2wasm",
-  "link_quickjs",
-  "dep:icu_collator",
-  "dep:icu_locale",
-]
 # Compile + statically link the vendored QuickJS-ng sources (engine_quickjs).
 link_quickjs = []
 # Build JavaScriptCore from the vendored WebKit (JSCOnly port) and link that

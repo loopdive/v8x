@@ -103,15 +103,15 @@ engine configuration; never load an artifact supplied by an untrusted user.
 The optional `js2wasm_diagnostic_abi` weak-stub layer is Unix-only and is not a
 production runtime feature; MSVC is intentionally unsupported for that layer.
 
-For unchanged `deno_core`, build v8x with `js2wasm_quickjs_compat`. QuickJS
-supplies the complete rusty_v8-facing host surface (ops, snapshots, inspector,
-and conversions), while configured, hash-pinned bootstrap `Script::Run` calls
-are mirrored into one persistent JS2/Wasm/Wasmtime instance per Deno context.
-Without a configured artifact this profile remains useful as the 429-test host
-conformance gate; `js2wasm_deno_poc` below is the non-vacuous artifact gate.
-Packaged runs set `V8X_JS2WASM_DENO_CORE_AOT_MODULE` and, when the application
-imports the eval seam, `V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE` to trusted caches
-created by the same Wasmtime build.
+For unchanged `deno_core`, build v8x with `engine_js2wasm` and the temporary
+Unix-only `js2wasm_diagnostic_abi` link-completion layer. The Rust-owned ABI
+surface handles contexts, values, callbacks, and conversions directly. Audited
+bootstrap scripts and later classic scripts run in one persistent
+JS2/Wasm/Wasmtime instance per Deno context; no QuickJS engine is linked into
+this backend. Packaged runs set `V8X_JS2WASM_DENO_CORE_AOT_MODULE` and, when the
+application needs runtime-created source strings, set
+`V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE` to trusted caches created by the same
+Wasmtime build.
 
 The pinned Deno `Script::Run` transaction has an explicit artifact-backed
 acceptance test. Build its optimized standardized-EH module and exact source

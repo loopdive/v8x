@@ -42,13 +42,22 @@ const DENO_ERROR_CODE_UNIT_IMPORT: &str = "__v8x_deno_error_utf16_code_unit";
 const DENO_PRINT_BEGIN_IMPORT: &str = "__v8x_deno_print_begin";
 const DENO_PRINT_CODE_UNIT_IMPORT: &str = "__v8x_deno_print_code_unit";
 const DENO_PRINT_END_IMPORT: &str = "__v8x_deno_print_end";
+const DENO_SCRIPT_LENGTH_IMPORT: &str = "__v8x_deno_script_utf16_length";
+const DENO_SCRIPT_CODE_UNIT_IMPORT: &str = "__v8x_deno_script_utf16_code_unit";
+const DENO_TEST_FN_CALL_IMPORT: &str = "__v8x_deno_test_fn_call";
+const DENO_TEST_FN_RESULT_LENGTH_IMPORT: &str =
+  "__v8x_deno_test_fn_result_utf16_length";
+const DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT: &str =
+  "__v8x_deno_test_fn_result_utf16_code_unit";
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
 const RUNTIME_EVAL_IMPORT_MODULE: &str = "js2wasm:runtime-eval";
+const RUNTIME_EVAL_JSON_IMPORT_MODULE: &str = "v8x:runtime-eval-json";
 const RUNTIME_EVAL_IMPORTS: &[&str] = &[
   "__runtime_apply_interpreted",
   "__runtime_new_function",
   "__runtime_indirect_eval",
   "__runtime_direct_eval",
+  "__v8x_runtime_eval_json",
 ];
 const RUNTIME_EVAL_AOT_MODULE_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE";
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -70,6 +79,10 @@ const DENO_CORE_STAGE_STATE_PROBE: &str = "__v8x_probe_deno_stage_state";
 const DENO_CORE_SET_TICK_INFO: &str = "__v8x_set_deno_tick_info";
 const DENO_CORE_SET_IMMEDIATE_INFO: &str = "__v8x_set_deno_immediate_info";
 const DENO_CORE_SET_TIMER_INFO: &str = "__v8x_set_deno_timer_info";
+const DENO_RUN_CLASSIC_SCRIPT: &str = "__v8x_run_classic_script";
+const DENO_SCRIPT_RESULT_LENGTH: &str = "__v8x_script_result_utf16_length";
+const DENO_SCRIPT_RESULT_CODE_UNIT: &str =
+  "__v8x_script_result_utf16_code_unit";
 #[cfg(feature = "js2wasm_runtime_compile")]
 const DENO_CORE_AOT_OUTPUT_ENV: &str = "V8X_JS2WASM_DENO_CORE_AOT_OUTPUT";
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -98,6 +111,11 @@ const DENO_HOST_IMPORTS: &[&str] = &[
   DENO_PRINT_BEGIN_IMPORT,
   DENO_PRINT_CODE_UNIT_IMPORT,
   DENO_PRINT_END_IMPORT,
+  DENO_SCRIPT_LENGTH_IMPORT,
+  DENO_SCRIPT_CODE_UNIT_IMPORT,
+  DENO_TEST_FN_CALL_IMPORT,
+  DENO_TEST_FN_RESULT_LENGTH_IMPORT,
+  DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT,
 ];
 
 // The exact bootstrap fixture is tiny. Keep malformed or adversarial callers
@@ -259,11 +277,20 @@ pub(crate) struct SourceModule {
 struct DenoHostState {
   cwd: Vec<u16>,
   cwd_op_calls: u64,
+  script: Vec<u16>,
   deno_op_print: Option<usize>,
   deno_op_sum: Option<usize>,
+  deno_test_fn: Option<usize>,
+  deno_test_fn_result: Vec<u16>,
   pending_sum: Option<PendingSum>,
   pending_print: Option<PendingPrint>,
   last_error: Option<DenoBridgeError>,
+}
+
+pub(crate) enum DenoScriptResult {
+  Undefined,
+  Json(serde_json::Value),
+  Thrown { name: String, message: String },
 }
 
 struct PendingSum {
@@ -548,7 +575,50 @@ fn deno_print_end(
   }
 }
 
-#[cfg(not(feature = "js2wasm_quickjs_compat"))]
+fn deno_test_fn_call(
+  mut caller: Caller<'_, DenoHostState>,
+) -> wasmtime::Result<f64> {
+  let function = caller.data().deno_test_fn;
+  caller.data_mut().deno_test_fn_result.clear();
+  let Some(function) = function else {
+    set_bridge_error(
+      caller.data_mut(),
+      2,
+      "the Rust-owned global has no test_fn Function".to_string(),
+    );
+    return Ok(-1.0);
+  };
+  match invoke_prelinked_deno_test_fn(function) {
+    Ok(None) => {
+      caller.data_mut().last_error = None;
+      Ok(0.0)
+    }
+    Ok(Some(json)) => {
+      let state = caller.data_mut();
+      state.last_error = None;
+      state.deno_test_fn_result = json.encode_utf16().collect();
+      Ok(1.0)
+    }
+    Err((kind, message)) => {
+      set_bridge_error(caller.data_mut(), kind, message);
+      Ok(-1.0)
+    }
+  }
+}
+
+fn deno_test_fn_result_utf16_length(caller: Caller<'_, DenoHostState>) -> f64 {
+  caller.data().deno_test_fn_result.len() as f64
+}
+
+fn deno_test_fn_result_utf16_code_unit(
+  caller: Caller<'_, DenoHostState>,
+  index: f64,
+) -> wasmtime::Result<f64> {
+  let result = &caller.data().deno_test_fn_result;
+  let index = scalar_index(index, result.len(), "test_fn result index")?;
+  Ok(f64::from(result[index]))
+}
+
 fn invoke_prelinked_deno_sum(
   function: usize,
   is_array: bool,
@@ -557,19 +627,6 @@ fn invoke_prelinked_deno_sum(
   crate::js2wasm::invoke_prelinked_deno_sum(function, is_array, values)
 }
 
-#[cfg(feature = "js2wasm_quickjs_compat")]
-fn invoke_prelinked_deno_sum(
-  _function: usize,
-  _is_array: bool,
-  _values: &[f64],
-) -> Result<f64, (u32, String)> {
-  Err((
-    2,
-    "the QuickJS compatibility bridge has no bound op_sum".into(),
-  ))
-}
-
-#[cfg(not(feature = "js2wasm_quickjs_compat"))]
 fn invoke_prelinked_deno_print(
   function: usize,
   code_units: &[u16],
@@ -578,16 +635,10 @@ fn invoke_prelinked_deno_print(
   crate::js2wasm::invoke_prelinked_deno_print(function, code_units, is_error)
 }
 
-#[cfg(feature = "js2wasm_quickjs_compat")]
-fn invoke_prelinked_deno_print(
-  _function: usize,
-  _code_units: &[u16],
-  _is_error: bool,
-) -> Result<(), (u32, String)> {
-  Err((
-    2,
-    "the QuickJS compatibility bridge has no bound op_print".into(),
-  ))
+fn invoke_prelinked_deno_test_fn(
+  function: usize,
+) -> Result<Option<String>, (u32, String)> {
+  crate::js2wasm::invoke_prelinked_deno_test_fn(function)
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -721,6 +772,56 @@ impl SharedDenoRuntime {
     linker
       .func_wrap(DENO_IMPORT_MODULE, DENO_PRINT_END_IMPORT, deno_print_end)
       .map_err(|error| format!("bind {DENO_PRINT_END_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_SCRIPT_LENGTH_IMPORT,
+        |caller: Caller<'_, DenoHostState>| -> f64 {
+          caller.data().script.len() as f64
+        },
+      )
+      .map_err(|error| format!("bind {DENO_SCRIPT_LENGTH_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_SCRIPT_CODE_UNIT_IMPORT,
+        |caller: Caller<'_, DenoHostState>, index: f64| -> f64 {
+          let index = if index.is_finite() && index >= 0.0 {
+            index as usize
+          } else {
+            usize::MAX
+          };
+          caller.data().script.get(index).copied().unwrap_or_default() as f64
+        },
+      )
+      .map_err(|error| {
+        format!("bind {DENO_SCRIPT_CODE_UNIT_IMPORT}: {error}")
+      })?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_TEST_FN_CALL_IMPORT,
+        deno_test_fn_call,
+      )
+      .map_err(|error| format!("bind {DENO_TEST_FN_CALL_IMPORT}: {error}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_TEST_FN_RESULT_LENGTH_IMPORT,
+        deno_test_fn_result_utf16_length,
+      )
+      .map_err(|error| {
+        format!("bind {DENO_TEST_FN_RESULT_LENGTH_IMPORT}: {error}")
+      })?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT,
+        deno_test_fn_result_utf16_code_unit,
+      )
+      .map_err(|error| {
+        format!("bind {DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT}: {error}")
+      })?;
     Ok(Self {
       engine,
       linker,
@@ -877,8 +978,10 @@ impl SharedDenoRuntime {
     for import in module.imports() {
       let known_deno_import = import.module() == DENO_IMPORT_MODULE
         && DENO_HOST_IMPORTS.contains(&import.name());
-      let runtime_eval_import = import.module() == RUNTIME_EVAL_IMPORT_MODULE
-        && RUNTIME_EVAL_IMPORTS.contains(&import.name());
+      let runtime_eval_import = (import.module() == RUNTIME_EVAL_IMPORT_MODULE
+        && RUNTIME_EVAL_IMPORTS.contains(&import.name()))
+        || (import.module() == RUNTIME_EVAL_JSON_IMPORT_MODULE
+          && import.name() == "__v8x_runtime_eval_json");
       needs_runtime_eval |= runtime_eval_import;
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
@@ -1128,9 +1231,15 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
     )
   })?;
   let shared = shared_runtime()?;
-  let precompiled = shared.precompile(&wasm)?;
-  persist_precompiled_deno_core_artifact(&precompiled)?;
-  let prepared = shared.development_bytes(&precompiled)?;
+  let prepared = if let Some(precompiled) =
+    std::env::var_os("V8X_JS2WASM_DENO_CORE_AOT_MODULE")
+  {
+    shared.precompiled_file(Path::new(&precompiled))?
+  } else {
+    let precompiled = shared.precompile(&wasm)?;
+    persist_precompiled_deno_core_artifact(&precompiled)?;
+    shared.development_bytes(&precompiled)?
+  };
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve test working directory: {error}"))?;
   DenoRuntime::instantiate(shared, &prepared, cwd.clone())?;
@@ -1213,8 +1322,11 @@ impl DenoRuntime {
       DenoHostState {
         cwd,
         cwd_op_calls: 0,
+        script: Vec::new(),
         deno_op_print: None,
         deno_op_sum: None,
+        deno_test_fn: None,
+        deno_test_fn_result: Vec::new(),
         pending_sum: None,
         pending_print: None,
         last_error: None,
@@ -1247,6 +1359,11 @@ impl DenoRuntime {
           .map_err(|error| {
             format!("bind js2wasm runtime-eval provider exports: {error:#}")
           })?;
+        linker
+          .instance(&mut store, RUNTIME_EVAL_JSON_IMPORT_MODULE, provider)
+          .map_err(|error| {
+            format!("bind js2wasm runtime-eval JSON export: {error:#}")
+          })?;
         let instance =
           linker.instantiate(&mut store, module).map_err(|error| {
             format!("instantiate js2wasm artifact: {error:#}")
@@ -1272,10 +1389,10 @@ impl DenoRuntime {
 
   pub(crate) fn bind_deno_ops(
     &mut self,
-    print: usize,
-    sum: usize,
+    print: Option<usize>,
+    sum: Option<usize>,
   ) -> Result<(), String> {
-    if print == 0 || sum == 0 {
+    if print == Some(0) || sum == Some(0) {
       return Err(
         "cannot bind an empty Deno op Function handle to Wasmtime".to_string(),
       );
@@ -1283,11 +1400,11 @@ impl DenoRuntime {
     let state = self.store.data_mut();
     match (state.deno_op_print, state.deno_op_sum) {
       (None, None) => {
-        state.deno_op_print = Some(print);
-        state.deno_op_sum = Some(sum);
+        state.deno_op_print = print;
+        state.deno_op_sum = sum;
         Ok(())
       }
-      (Some(previous_print), Some(previous_sum))
+      (previous_print, previous_sum)
         if previous_print == print && previous_sum == sum =>
       {
         Ok(())
@@ -1296,6 +1413,88 @@ impl DenoRuntime {
         "Deno op Function handles were rebound to different values".to_string(),
       ),
     }
+  }
+
+  pub(crate) fn bind_test_fn(
+    &mut self,
+    function: Option<usize>,
+  ) -> Result<(), String> {
+    if function == Some(0) {
+      return Err("cannot bind an empty test_fn Function handle".to_string());
+    }
+    self.store.data_mut().deno_test_fn = function;
+    Ok(())
+  }
+
+  pub(crate) fn run_classic_script(
+    &mut self,
+    source: &str,
+  ) -> Result<DenoScriptResult, String> {
+    self.store.data_mut().script = source.encode_utf16().collect();
+    let status = self
+      .require_function(DENO_RUN_CLASSIC_SCRIPT)?
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| format!("type {DENO_RUN_CLASSIC_SCRIPT}: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("call {DENO_RUN_CLASSIC_SCRIPT}: {error:#}"))?;
+    self.store.data_mut().script.clear();
+
+    if status == 0.0 {
+      return Ok(DenoScriptResult::Undefined);
+    }
+    let length = self
+      .require_function(DENO_SCRIPT_RESULT_LENGTH)?
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| format!("type {DENO_SCRIPT_RESULT_LENGTH}: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| {
+        format!("call {DENO_SCRIPT_RESULT_LENGTH}: {error:#}")
+      })?;
+    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
+      return Err(format!("classic-script result length is invalid: {length}"));
+    }
+    let code_unit = self
+      .require_function(DENO_SCRIPT_RESULT_CODE_UNIT)?
+      .typed::<f64, f64>(&self.store)
+      .map_err(|error| {
+        format!("type {DENO_SCRIPT_RESULT_CODE_UNIT}: {error}")
+      })?;
+    let mut units = Vec::with_capacity(length as usize);
+    for index in 0..length as usize {
+      let value =
+        code_unit
+          .call(&mut self.store, index as f64)
+          .map_err(|error| {
+            format!("call {DENO_SCRIPT_RESULT_CODE_UNIT}: {error:#}")
+          })?;
+      if !value.is_finite() || !(0.0..=65535.0).contains(&value) {
+        return Err(format!(
+          "classic-script result code unit {index} is invalid: {value}"
+        ));
+      }
+      units.push(value as u16);
+    }
+    let encoded = String::from_utf16(&units)
+      .map_err(|error| format!("decode classic-script result: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&encoded)
+      .map_err(|error| format!("decode classic-script JSON: {error}"))?;
+    if status == 1.0 {
+      return Ok(DenoScriptResult::Json(value));
+    }
+    if status == -1.0 {
+      let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Error")
+        .to_string();
+      let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+      return Ok(DenoScriptResult::Thrown { name, message });
+    }
+    Err(format!("classic-script evaluator returned status {status}"))
   }
 
   fn run_deferred_module_init(&mut self) -> Result<(), String> {

@@ -1100,12 +1100,8 @@ pub extern "C" fn v8__Isolate__Dispose(this: *mut RealIsolate) {
     // the thread-local would otherwise poison the next isolate on this thread.
     super::isolate::release_promise_hooks(st.ctx);
     for c in st.extra_contexts.drain(..) {
-      #[cfg(feature = "js2wasm_quickjs_compat")]
-      crate::js2wasm_deno_compat::forget_context(c as usize);
       JS_FreeContext(c);
     }
-    #[cfg(feature = "js2wasm_quickjs_compat")]
-    crate::js2wasm_deno_compat::forget_context(st.ctx as usize);
     JS_FreeContext(st.ctx);
     if std::env::var_os("QJS_SKIP_FREE_RT").is_none() {
       JS_FreeRuntime(st.rt);
@@ -2856,31 +2852,6 @@ pub extern "C" fn v8__Script__Run(
   let fname_owned = script_key.and_then(|key| {
     SCRIPT_RESOURCE_NAMES.with(|m| m.borrow().get(&key).cloned())
   });
-  #[cfg(feature = "js2wasm_quickjs_compat")]
-  let js2wasm_prelinked = {
-    let specifier = fname_owned
-      .as_ref()
-      .and_then(|name| name.to_str().ok())
-      .unwrap_or("<eval>");
-    match crate::js2wasm_deno_compat::prepare_script(
-      ctx as usize,
-      specifier,
-      source_bytes,
-    ) {
-      Ok(prelinked) => prelinked,
-      Err(error) => {
-        eprintln!("v8x/js2wasm: {error}");
-        unsafe {
-          JS_FreeCString(ctx, cstr);
-          JS_ThrowInternalError(
-            ctx,
-            c"JS2/Wasm Deno bootstrap transaction failed".as_ptr(),
-          );
-        }
-        return ptr::null();
-      }
-    }
-  };
   let host_defined_options = script_key.and_then(|key| {
     let isolate = current_iso();
     if isolate.is_null() {
@@ -2964,27 +2935,6 @@ pub extern "C" fn v8__Script__Run(
     eprintln!("[qjs snapshot]   -> result.tag={}", result.tag);
   }
   if result.tag != JS_TAG_EXCEPTION {
-    #[cfg(feature = "js2wasm_quickjs_compat")]
-    if js2wasm_prelinked {
-      let specifier = fname_owned
-        .as_ref()
-        .and_then(|name| name.to_str().ok())
-        .unwrap_or("<eval>");
-      if let Err(error) =
-        crate::js2wasm_deno_compat::commit_script(ctx as usize, specifier)
-      {
-        eprintln!("v8x/js2wasm: {error}");
-        unsafe {
-          JS_FreeCString(ctx, cstr);
-          JS_FreeValue(ctx, result);
-          JS_ThrowInternalError(
-            ctx,
-            c"JS2/Wasm Deno bootstrap commit failed".as_ptr(),
-          );
-        }
-        return ptr::null();
-      }
-    }
     super::isolate::run_microtasks_if_auto();
     if !iso.is_null() {
       super::isolate::maybe_drive_near_heap_limit_callback(iso);
