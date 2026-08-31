@@ -397,6 +397,7 @@ jobs:
               -p libm \
               -p indexmap \
               -p bumpalo \
+              -p semver \
               -p anyhow)
           fi
 
