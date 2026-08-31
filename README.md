@@ -124,7 +124,7 @@ Deno compatibility.
 
 The runner requires clean detached worktrees: the current v8x commit is
 recorded exactly, JS2 is fixed at
-`c3c95708b18f49e01bb3827c422a304d57e001be`, and Deno is fixed at
+`6d306d67543100dde8efcf89a70d068cd693927d`, and Deno is fixed at
 `1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. It reads all Deno source through
 `git show <pinned-ref>:path`, including the raw Rust string literal in
 `libs/core/examples/hello_world.rs`; it does not use a checked-out fixture or
