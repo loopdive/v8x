@@ -45,6 +45,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use wasmtime::{
   Caller, Config, Engine, Instance, InstancePre, Linker, Module, Store,
 };
+#[cfg(feature = "js2wasm_runtime_compile")]
+use wasmtime::OptLevel;
 
 #[cfg(feature = "js2wasm_runtime_compile")]
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -1346,6 +1348,12 @@ impl SharedDenoRuntime {
       .wasm_gc(true)
       .wasm_tail_call(true)
       .wasm_exceptions(true);
+    // js2 can emit multi-megabyte functions for closed interpreter graphs.
+    // Cranelift's default speed optimizations exhaust bounded packaging hosts;
+    // unoptimized code preserves Wasm semantics and remains compatible with
+    // the compiler-free engine that deserializes the resulting AOT artifact.
+    #[cfg(feature = "js2wasm_runtime_compile")]
+    config.cranelift_opt_level(OptLevel::None);
     let engine = Engine::new(&config)
       .map_err(|error| format!("configure embedded Wasmtime: {error}"))?;
     let mut linker = Linker::new(&engine);
