@@ -390,9 +390,9 @@ jobs:
           # crates whose locked versions are too old. Cargo can add the backend
           # graph without refreshing the rest of Deno's dependency tree.
           if [ "${{ matrix.backend }}" = "js2wasm" ]; then
-            test "$(grep -c 'semver = "=1.0.25"' ../deno/tests/util/server/Cargo.toml)" = 1
-            sed -i 's/semver = "=1.0.25"/semver = "=1.0.27"/' \
-              ../deno/tests/util/server/Cargo.toml
+            test "$(grep -c 'semver = "=1.0.25"' ../deno/Cargo.toml)" = 1
+            sed -i 's/semver = "=1.0.25"/semver = "=1.0.28"/' \
+              ../deno/Cargo.toml
             (cd ../deno && cargo update \
               -p async-trait \
               -p bitflags@2.9.3 \
@@ -401,6 +401,7 @@ jobs:
               -p indexmap \
               -p bumpalo \
               -p semver \
+              -p thiserror@2.0.12 \
               -p anyhow)
           fi
 
