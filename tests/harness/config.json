@@ -27,6 +27,7 @@
       "id": "js2wasm",
       "label": "js2wasm / Wasmtime",
       "features": "engine_js2wasm,js2wasm_diagnostic_abi",
+      "nextest_test_threads": 1,
       "os": "any",
       "comment": "Ahead-of-time js2wasm modules hosted by Wasmtime. Rust owns the v8 host surface, and the diagnostic ABI makes remaining unimplemented calls fail loudly; QuickJS is not linked into this backend."
     }

@@ -279,6 +279,7 @@ function parseArgs(argv) {
     "out",
     "provider-out",
     "provenance-out",
+    "profile",
   ]);
   for (const key of args.keys()) {
     if (!allowed.has(key)) fail(`unsupported --${key}`);
@@ -302,7 +303,11 @@ function parseArgs(argv) {
     output: requiredOutput("out"),
     providerOutput: requiredOutput("provider-out"),
     provenanceOutput: requiredOutput("provenance-out"),
+    profile: args.get("profile") ?? "poc",
   };
+  if (parsed.profile !== "poc" && parsed.profile !== "runtime") {
+    fail(`--profile must be poc or runtime, received ${parsed.profile}`);
+  }
   if (
     new Set([parsed.output, parsed.providerOutput, parsed.provenanceOutput])
       .size !== 3
@@ -435,7 +440,7 @@ function inputSetDigest(inputs) {
 }
 
 async function main() {
-  const { v8x, js2, deno, output, providerOutput, provenanceOutput } =
+  const { v8x, js2, deno, output, providerOutput, provenanceOutput, profile } =
     parseArgs(process.argv.slice(2));
   if (v8x !== SCRIPT_V8X_ROOT) {
     fail(
@@ -466,13 +471,14 @@ async function main() {
   ]) {
     if (process.env[name] !== undefined)
       fail(
-        `${name} is forbidden; this POC always builds the direct interpreter provider`,
+        `${name} is forbidden; this builder always builds the direct interpreter provider`,
       );
   }
 
   const denoSources = new Map();
   const lockSources = [];
-  for (const input of DENO_INPUTS) {
+  const selectedInputs = profile === "poc" ? DENO_INPUTS : CORE_SCRIPT_INPUTS;
+  for (const input of selectedInputs) {
     const raw = sourceFromPinnedDeno(deno, input.gitPath);
     const bytes = input.extract ? extractHelloWorldUsage(raw) : raw;
     if (bytes.length !== input.bytes) {
@@ -490,13 +496,14 @@ async function main() {
   }
 
   const exactUsage = denoSources.get("hello_world_usage.js");
+  const appRoot = profile === "poc" ? "/v8x-deno-poc" : "/v8x-deno-runtime";
   const files = {
-    "/v8x-deno-poc/runtime-seed.ts": RUNTIME_SEED,
+    [`${appRoot}/runtime-seed.ts`]: RUNTIME_SEED,
   };
   for (const input of CORE_SCRIPT_INPUTS) {
-    files[`/v8x-deno-poc/core/${input.path}`] = denoSources.get(input.path);
+    files[`${appRoot}/core/${input.path}`] = denoSources.get(input.path);
   }
-  files["/v8x-deno-poc/entry.ts"] = String.raw`
+  files[`${appRoot}/entry.ts`] = profile === "poc" ? String.raw`
 import { readHostScript } from "./runtime-seed.ts";
 import "./core/00_primordials.js";
 import "./core/00_infra.js";
@@ -552,6 +559,139 @@ export function __v8x_script_result_utf16_length(): number { return scriptResult
 export function __v8x_script_result_utf16_code_unit(index: number): number {
   return scriptResult.charCodeAt(index);
 }
+` : String.raw`
+import { readHostScript } from "./runtime-seed.ts";
+import "./core/00_primordials.js";
+import "./core/00_infra.js";
+import "./core/02_timers.js";
+import "./core/01_core.js";
+import * as coreModule from "./core/mod.js";
+
+let stage = 0;
+let scriptResult = "";
+
+function __v8xJsonHex(code: number): string {
+  const digits = "0123456789abcdef";
+  return digits[(code >>> 12) & 15] + digits[(code >>> 8) & 15] +
+    digits[(code >>> 4) & 15] + digits[code & 15];
+}
+
+function __v8xJsonQuote(value: string): string {
+  let result = '"';
+  const slash = String.fromCharCode(92);
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code === 34) result += slash + '"';
+    else if (code === 92) result += slash + slash;
+    else if (code === 8) result += slash + 'b';
+    else if (code === 9) result += slash + 't';
+    else if (code === 10) result += slash + 'n';
+    else if (code === 12) result += slash + 'f';
+    else if (code === 13) result += slash + 'r';
+    else if (code < 32) result += slash + 'u' + __v8xJsonHex(code);
+    else result += value[index];
+  }
+  return result + '"';
+}
+
+function __v8xEncodeEvalValue(
+  value: any,
+  arrayElement = false,
+): string | undefined {
+  if (value === null) return "null";
+  const kind = typeof value;
+  if (kind === "string") return __v8xJsonQuote(value);
+  if (kind === "boolean") return value ? "true" : "false";
+  if (kind === "number") {
+    return value !== value || value === Infinity || value === -Infinity
+      ? "null"
+      : String(value);
+  }
+  if (kind === "bigint") {
+    return __v8xJsonQuote(String.fromCharCode(0) + "v8x-bigint:" + String(value));
+  }
+  if (kind === "undefined" || kind === "function" || kind === "symbol") {
+    return arrayElement
+      ? "{" + __v8xJsonQuote(String.fromCharCode(0) + "v8x-undefined") + ":true}"
+      : undefined;
+  }
+  if (Array.isArray(value)) {
+    let result = "[";
+    for (let index = 0; index < value.length; index++) {
+      if (index !== 0) result += ",";
+      result += __v8xEncodeEvalValue(value[index], true);
+    }
+    return result + "]";
+  }
+  let result = "{";
+  let first = true;
+  for (const key in value) {
+    const encoded = __v8xEncodeEvalValue(value[key]);
+    if (encoded === undefined) continue;
+    if (!first) result += ",";
+    first = false;
+    result += __v8xJsonQuote(key) + ":" + encoded;
+  }
+  return result + "}";
+}
+
+function runHostScript(): number {
+  try {
+    const result = (0, eval)(readHostScript());
+    const encoded = __v8xEncodeEvalValue(result);
+    if (encoded === undefined) {
+      scriptResult = "";
+      return 0;
+    }
+    scriptResult = encoded;
+    return 1;
+  } catch (error) {
+    const value: any = error;
+    const encoded = __v8xEncodeEvalValue({
+      name: value != null && typeof value.name === "string" ? value.name : "Error",
+      message: value != null && typeof value.message === "string" ? value.message : String(value),
+    });
+    if (encoded === undefined) throw new Error("cannot encode classic script exception");
+    scriptResult = encoded;
+    return -1;
+  }
+}
+
+export function __v8x_probe_deno_core_bootstrap(): number {
+  const bootstrap: any = (globalThis as any).__bootstrap;
+  const captured: any = (globalThis as any).__capturedBootstrap;
+  if (bootstrap == null || captured == null) return 0;
+  if (captured.core == null || captured.core.ops == null) return 0;
+  if (captured.core === bootstrap.core || captured.core.ops === bootstrap.core.ops) return 0;
+  if (captured.core.print !== bootstrap.core.print) return 0;
+  if (captured.core.ops.op_print !== bootstrap.core.ops.op_print) return 0;
+  if (bootstrap.internals !== captured.internals || bootstrap.primordials !== captured.primordials) return 0;
+  if (coreModule.core !== bootstrap.core || coreModule.internals !== bootstrap.internals) return 0;
+  if (coreModule.primordials !== bootstrap.primordials) return 0;
+  return 42;
+}
+export function __v8x_stage_deno_core_wrappers(): number {
+  if (stage !== 0) throw new Error("Deno core wrappers stage order mismatch");
+  stage = 1;
+  return 42;
+}
+export function __v8x_stage_deno_core_module(): number {
+  if (stage !== 1) throw new Error("Deno core module stage order mismatch");
+  stage = 2;
+  return 43;
+}
+export function __v8x_stage_deno_hello_world_usage(): number {
+  if (stage !== 2) throw new Error("Deno core usage stage order mismatch");
+  stage = 3;
+  return runHostScript();
+}
+export function __v8x_probe_deno_stage_state(): number { return stage; }
+export function __v8x_probe_deno_runtime_usage_stage(): number { return 45; }
+export function __v8x_run_classic_script(): number { return runHostScript(); }
+export function __v8x_script_result_utf16_length(): number { return scriptResult.length; }
+export function __v8x_script_result_utf16_code_unit(index: number): number {
+  return scriptResult.charCodeAt(index);
+}
 `;
 
   const graphInputs = [
@@ -561,14 +701,19 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
     }),
     recordInput(
       "generated/entry.ts",
-      Buffer.from(files["/v8x-deno-poc/entry.ts"]),
-      { role: "closed-world-router" },
+      Buffer.from(files[`${appRoot}/entry.ts`]),
+      { role: profile === "poc" ? "closed-world-router" : "runtime-router" },
     ),
   ];
   const sourceGraphSha256 = inputSetDigest(graphInputs);
-  const canonicalCompileOptions = canonicalJson(COMPILE_OPTIONS_PREIMAGE);
+  const compileOptionsPreimage = profile === "poc" ? COMPILE_OPTIONS_PREIMAGE : {
+    ...COMPILE_OPTIONS_PREIMAGE,
+    entry: `${appRoot}/entry.ts`,
+    source_paths: CORE_SCRIPT_INPUTS.map((input) => input.path),
+  };
+  const canonicalCompileOptions = canonicalJson(compileOptionsPreimage);
   const computedCompileOptionsDigest = sha256(canonicalCompileOptions);
-  if (computedCompileOptionsDigest !== COMPILE_OPTIONS_SHA256) {
+  if (profile === "poc" && computedCompileOptionsDigest !== COMPILE_OPTIONS_SHA256) {
     fail(
       `compile-options SHA-256 is ${computedCompileOptionsDigest}, expected ${COMPILE_OPTIONS_SHA256}`,
     );
@@ -577,10 +722,10 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   const compiler = await import(pathToFileURL(join(js2, "src/index.ts")).href);
   const app = await compiler.compileMulti(
     files,
-    "/v8x-deno-poc/entry.ts",
+    `${appRoot}/entry.ts`,
     COMPILE_OPTIONS,
   );
-  const appBinary = checkedCompile(app, "Deno POC application");
+  const appBinary = checkedCompile(app, `Deno ${profile} application`);
   const appModule = new WebAssembly.Module(appBinary);
   if (
     !WebAssembly.Module.imports(appModule).some(
@@ -588,8 +733,31 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
     )
   ) {
     fail(
-      "application does not import the interpreter provider; the pinned literal was not routed through it",
+      "application does not import the interpreter provider",
     );
+  }
+  const appExports = new Set(
+    WebAssembly.Module.exports(appModule).map((entry) => entry.name),
+  );
+  const requiredAppExports = [
+    "__v8x_probe_deno_core_bootstrap",
+    "__v8x_run_classic_script",
+    "__v8x_script_result_utf16_length",
+    "__v8x_script_result_utf16_code_unit",
+    ...(profile === "runtime"
+      ? [
+          "__v8x_stage_deno_core_wrappers",
+          "__v8x_stage_deno_core_module",
+          "__v8x_stage_deno_hello_world_usage",
+          "__v8x_probe_deno_stage_state",
+          "__v8x_probe_deno_runtime_usage_stage",
+        ]
+      : []),
+  ];
+  for (const name of requiredAppExports) {
+    if (!appExports.has(name)) {
+      fail(`Deno ${profile} application does not export ${name}`);
+    }
   }
   atomicWrite(output, appBinary);
 
@@ -669,6 +837,7 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   };
   const contractPreimage = {
     schema_version: 1,
+    ...(profile === "runtime" ? { profile } : {}),
     revisions: {
       v8x: v8xRef,
       js2: EXPECTED_JS2_REF,
@@ -693,7 +862,10 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   const contractSha256 = sha256(canonicalJson(contractPreimage));
   const provenance = {
     schema_version: 1,
-    kind: "v8x-js2wasm-deno-poc-raw-inputs",
+    kind: profile === "poc"
+      ? "v8x-js2wasm-deno-poc-raw-inputs"
+      : "v8x-js2wasm-deno-runtime-raw-inputs",
+    ...(profile === "runtime" ? { profile } : {}),
     revisions: {
       v8x: { ref: v8xRef, clean: true, detached: true },
       js2: { ref: EXPECTED_JS2_REF, clean: true, detached: true },
@@ -701,7 +873,7 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
     },
     sources: lockSources,
     source_graph: {
-      entry: "/v8x-deno-poc/entry.ts",
+      entry: `${appRoot}/entry.ts`,
       sha256: sourceGraphSha256,
       inputs: graphInputs,
     },
@@ -738,6 +910,7 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   console.log(
     JSON.stringify(
       {
+        ...(profile === "runtime" ? { profile } : {}),
         provenance: provenanceOutput,
         app: {
           path: output,

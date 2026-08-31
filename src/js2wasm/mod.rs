@@ -4984,6 +4984,45 @@ fn run_prelinked_deno_usage_script(
   }
 }
 
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+fn run_runtime_deno_usage_stage(
+  context: *const Context,
+  state: &ScriptState,
+) -> Result<Option<crate::js2wasm_spike::DenoScriptResult>, String> {
+  if state.specifier != DENO_CORE_USAGE_SPECIFIER {
+    return Ok(None);
+  }
+  with_deno_core_runtime(context, "runtime usage evaluation", |runtime| {
+    if runtime.has_runtime_usage_stage()? {
+      runtime.run_deno_core_usage(&state.source).map(Some)
+    } else {
+      Ok(None)
+    }
+  })
+}
+
+fn materialize_deno_script_result(
+  source: &str,
+  result: crate::js2wasm_spike::DenoScriptResult,
+) -> *const Value {
+  match result {
+    crate::js2wasm_spike::DenoScriptResult::Undefined => {
+      v8__Undefined(current_isolate()).cast()
+    }
+    crate::js2wasm_spike::DenoScriptResult::Json(value) => {
+      allocate_script_json_value(current_isolate(), source, value)
+    }
+    crate::js2wasm_spike::DenoScriptResult::Thrown { name, message } => {
+      eprintln!("v8x/js2wasm: classic script threw {name}: {message}");
+      let name = prelinked_error_name(&name);
+      let message = new_string(current_isolate(), message);
+      let exception = allocate_error(message, name);
+      record_exception(current_isolate(), exception);
+      ptr::null()
+    }
+  }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Script__Compile(
   _context: *const Context,
@@ -5026,6 +5065,18 @@ pub extern "C" fn v8__Script__Run(
       return ptr::null();
     }
   }
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  match run_runtime_deno_usage_stage(context, state) {
+    Ok(Some(result)) => return materialize_deno_script_result(&state.source, result),
+    Ok(None) => {}
+    Err(error) => {
+      eprintln!("v8x/js2wasm: {error}");
+      let message = new_string(current_isolate(), error);
+      let exception = allocate_error(message, "Error");
+      record_exception(current_isolate(), exception);
+      return ptr::null();
+    }
+  }
   match run_prelinked_deno_usage_script(context, state) {
     Ok(true) => return v8__Undefined(current_isolate()).cast(),
     Ok(false) => {}
@@ -5049,20 +5100,7 @@ pub extern "C" fn v8__Script__Run(
       runtime.run_classic_script(&state.source)
     },
   ) {
-    Ok(crate::js2wasm_spike::DenoScriptResult::Undefined) => {
-      v8__Undefined(current_isolate()).cast()
-    }
-    Ok(crate::js2wasm_spike::DenoScriptResult::Json(value)) => {
-      allocate_script_json_value(current_isolate(), &state.source, value)
-    }
-    Ok(crate::js2wasm_spike::DenoScriptResult::Thrown { name, message }) => {
-      eprintln!("v8x/js2wasm: classic script threw {name}: {message}");
-      let name = prelinked_error_name(&name);
-      let message = new_string(current_isolate(), message);
-      let exception = allocate_error(message, name);
-      record_exception(current_isolate(), exception);
-      ptr::null()
-    }
+    Ok(result) => materialize_deno_script_result(&state.source, result),
     Err(error) => {
       eprintln!("v8x/js2wasm: {error}");
       let message = new_string(current_isolate(), error);

@@ -26,7 +26,7 @@ jobs:
   check:
     name: check-${{ matrix.backend }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +50,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+          fetch-depth: 1
+          ref: ${{ github.sha }}
       # vendor/webkit is 8.9 GB and only the jsc backend builds it. Init just
       # the submodules this backend needs (everything except webkit) unless
       # this is the jsc leg (matrix.ninja). Saves ~3min of checkout off the
@@ -247,40 +249,48 @@ jobs:
   # ---------------------------------------------------------------------------
   # deno_core test suite per backend: clone+patch deno, `cargo nextest run -p
   # deno_core` against our v8 shim. No full deno binary (node-compat + unit are
-  # dropped for now to keep CI cheap). macOS so the JSC backends link/JIT.
+  # dropped for now to keep CI cheap). JSC stays on macOS; js2wasm uses Linux
+  # so its target-native Wasmtime artifacts match the deployment POC.
   # ---------------------------------------------------------------------------
   deno_core:
     name: deno_core-${{ matrix.backend }}
-    runs-on: macos-15
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     # macOS 15+: WebKit's bmalloc uses os_unfair_lock_lock_with_flags (15.0+),
     # fatal under -Werror=unguarded-availability on an older deployment target.
     env:
-      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.os, 'macos') && '15.0' || '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - backend: jsc
+            os: macos-15
             features: '"engine_jsc", "vendor_jsc"'
             ninja: true
           - backend: sys-jsc
+            os: macos-15
             features: '"system_jsc"'
           - backend: quickjs
+            os: macos-15
             features: '"quickjs"'
           - backend: js2wasm
-            features: '"engine_js2wasm", "js2wasm_diagnostic_abi"'
+            os: ubuntu-latest
+            features: '"engine_js2wasm_runtime", "js2wasm_diagnostic_abi"'
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
+          fetch-depth: 1
+          ref: ${{ github.sha }}
       # See check job: skip the 8.9 GB vendor/webkit checkout except on jsc.
       - name: Init submodules
         run: |
           if [ "${{ matrix.ninja }}" = "true" ]; then
             git submodule update --init --depth 1 --recursive
           else
-            git submodule update --init --depth 1 vendor/rusty_v8 vendor/quickjs-ng vendor/wamr
+            git -c submodule.vendor/rusty_v8.update=checkout \
+              submodule update --init --depth 1 vendor/rusty_v8 vendor/quickjs-ng vendor/wamr
           fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
@@ -290,6 +300,9 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install ninja (WebKit build)
         if: matrix.ninja
         run: brew install ninja
@@ -306,14 +319,64 @@ jobs:
           path: vendor/webkit/WebKitBuild
           key: webkit-${{ runner.os }}-${{ steps.wk.outputs.sha }}-${{ hashFiles('patches/webkit-*.patch', 'tools/setup_webkit.sh') }}
 
-      - name: Clone deno + apply the v82jsc integration patch
+      - name: Clone pinned Deno source
         run: |
           set -euo pipefail
           DENO_REF="$(cat tools/deno/DENO_REF)"
           mkdir -p ../deno && git -C ../deno init -q
           git -C ../deno remote add origin https://github.com/denoland/deno
           git -C ../deno fetch --depth 1 origin "$DENO_REF"
-          git -C ../deno checkout -q FETCH_HEAD
+          git -C ../deno checkout --detach -q FETCH_HEAD
+          test "$(git -C ../deno rev-parse HEAD)" = "$DENO_REF"
+          test -z "$(git -C ../deno status --porcelain=v1 --untracked-files=all)"
+
+      - name: Reserve bounded js2wasm compiler swap
+        if: matrix.backend == 'js2wasm'
+        run: |
+          sudo fallocate -l 16G /mnt/v8x-deno-core-compiler.swap
+          sudo chmod 600 /mnt/v8x-deno-core-compiler.swap
+          sudo mkswap /mnt/v8x-deno-core-compiler.swap
+          sudo swapon /mnt/v8x-deno-core-compiler.swap
+
+      - name: Check out pinned js2 compiler
+        if: matrix.backend == 'js2wasm'
+        run: |
+          set -euo pipefail
+          js2_ref=7bdafea67cf263f923d8039058d99aa6a5720e02
+          js2_dir="$RUNNER_TEMP/js2-deno-core"
+          git init -q "$js2_dir"
+          git -C "$js2_dir" remote add origin https://github.com/loopdive/js2
+          git -C "$js2_dir" fetch --depth 1 origin "$js2_ref"
+          git -C "$js2_dir" checkout --detach -q FETCH_HEAD
+          test "$(git -C "$js2_dir" rev-parse HEAD)" = "$js2_ref"
+          test -z "$(git -C "$js2_dir" status --porcelain=v1 --untracked-files=all)"
+          cd "$js2_dir"
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Build generic Deno js2wasm inputs
+        if: matrix.backend == 'js2wasm'
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/v8x-deno-core-js2wasm"
+          js2_dir="$RUNNER_TEMP/js2-deno-core"
+          mkdir -p "$artifact_dir"
+          cd "$js2_dir"
+          node --max-old-space-size=5120 --experimental-wasm-exnref --import tsx \
+            "$GITHUB_WORKSPACE/tools/js2wasm/build-deno-core-artifact.mjs" \
+            --profile=runtime \
+            --v8x="$GITHUB_WORKSPACE" \
+            --js2="$js2_dir" \
+            --deno="$(realpath "$GITHUB_WORKSPACE/../deno")" \
+            --out="$artifact_dir/deno-core.wasm" \
+            --provider-out="$artifact_dir/runtime-eval-provider.wasm" \
+            --provenance-out="$artifact_dir/raw-inputs.json"
+          test -s "$artifact_dir/deno-core.wasm"
+          test -s "$artifact_dir/runtime-eval-provider.wasm"
+
+      - name: Apply the v82jsc integration patch
+        run: |
+          set -euo pipefail
           # The patch's v8x dependency uses a local development path. Point it
           # at this checkout.
           sed "s#/Users/divy/gh/v8x#${GITHUB_WORKSPACE}#g" \
@@ -344,20 +407,53 @@ jobs:
           workspaces: "../deno"
           key: deno_core-${{ matrix.backend }}
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      # Precompile once in separate processes. Supplying raw Wasm to nextest
+      # would make every test process run Cranelift again, including for the
+      # ~49 MB interpreter provider.
+      - name: Precompile generic Deno js2wasm artifacts
+        if: matrix.backend == 'js2wasm'
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/v8x-deno-core-js2wasm"
+          common=(
+            --release
+            --locked
+            --no-default-features
+            --features engine_js2wasm_runtime,js2wasm_diagnostic_abi
+            --test js2wasm_spike
+          )
+          V8X_JS2WASM_DENO_CORE_WASM="$artifact_dir/deno-core.wasm" \
+          V8X_JS2WASM_DENO_CORE_AOT_OUTPUT="$artifact_dir/deno-core.cwasm" \
+          CARGO_TARGET_DIR="$RUNNER_TEMP/v8x-deno-core-packaging-target" \
+            cargo test "${common[@]}" precompiles_exact_deno_core_artifact -- --exact
+          V8X_JS2WASM_RUNTIME_EVAL_WASM="$artifact_dir/runtime-eval-provider.wasm" \
+          V8X_JS2WASM_RUNTIME_EVAL_AOT_OUTPUT="$artifact_dir/runtime-eval-provider.cwasm" \
+          CARGO_TARGET_DIR="$RUNNER_TEMP/v8x-deno-core-packaging-target" \
+            cargo test "${common[@]}" precompiles_exact_runtime_eval_provider_artifact -- --exact
+          test -s "$artifact_dir/deno-core.cwasm"
+          test -s "$artifact_dir/runtime-eval-provider.cwasm"
+
       # deno_core test suite only — `cargo nextest run -p deno_core`, no full deno
       # binary (node-compat + unit are dropped for now to keep CI cheap).
       - name: Run deno_core suite (${{ matrix.backend }})
         env:
           PR: ${{ github.event_name == 'pull_request' && '--check' || '' }}
         run: |
-          set -uo pipefail
-          # Same linker flags v82jsc/deno use; otherwise cargo nextest for
-          # deno_core picks up the deno repo's default -fuse-ld=lld (absent on
-          # the runner) and fails with "invalid linker name".
-          export RUSTFLAGS="-C link-arg=-fuse-ld=/usr/bin/ld -C link-arg=-L$(xcrun --show-sdk-path)/usr/lib"
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # Same linker flags v82jsc/deno use; otherwise cargo nextest picks
+            # up the deno repo's unavailable default lld linker.
+            export RUSTFLAGS="-C link-arg=-fuse-ld=/usr/bin/ld -C link-arg=-L$(xcrun --show-sdk-path)/usr/lib"
+          fi
+          if [ "${{ matrix.backend }}" = "js2wasm" ]; then
+            artifact_dir="$RUNNER_TEMP/v8x-deno-core-js2wasm"
+            export V8X_JS2WASM_DENO_CORE_AOT_MODULE="$artifact_dir/deno-core.cwasm"
+            export V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE="$artifact_dir/runtime-eval-provider.cwasm"
+            export V8X_JS2WASM_COMPILER_SCRIPT="$RUNNER_TEMP/js2-deno-core/examples/v8x-js2wasm-spike/compile-graph.ts"
+            export V8X_JS2WASM_WORKDIR="$RUNNER_TEMP/js2-deno-core"
+            export V8X_JS2WASM_CACHE_DIR="$RUNNER_TEMP/v8x-deno-core-js2wasm-cache"
+            export V8X_JS2WASM_COMPILER_ID="js2-7bdafea67cf263f923d8039058d99aa6a5720e02"
+          fi
           node tests/harness/run.mjs deno_core "${{ matrix.backend }}" $PR --deno-dir=../deno
       - name: Upload run results
         if: always()
@@ -383,6 +479,7 @@ jobs:
         with:
           submodules: false
           fetch-depth: 1
+          ref: ${{ github.sha }}
       - name: Init v8x Rust API source
         run: |
           git -c submodule.vendor/rusty_v8.update=checkout \
@@ -393,7 +490,7 @@ jobs:
           node-version: 22
       - name: Reserve bounded AOT compiler swap
         run: |
-          sudo fallocate -l 8G /mnt/v8x-aot-compiler.swap
+          sudo fallocate -l 16G /mnt/v8x-aot-compiler.swap
           sudo chmod 600 /mnt/v8x-aot-compiler.swap
           sudo mkswap /mnt/v8x-aot-compiler.swap
           sudo swapon /mnt/v8x-aot-compiler.swap

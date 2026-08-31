@@ -181,6 +181,9 @@ const DENO_CORE_MODULE_STAGE: &str = "__v8x_stage_deno_core_module";
 const DENO_CORE_USAGE_STAGE: &str = "__v8x_stage_deno_hello_world_usage";
 #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const DENO_CORE_STAGE_STATE_PROBE: &str = "__v8x_probe_deno_stage_state";
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+const DENO_CORE_RUNTIME_USAGE_STAGE_PROBE: &str =
+  "__v8x_probe_deno_runtime_usage_stage";
 const DENO_CORE_SET_TICK_INFO: &str = "__v8x_set_deno_tick_info";
 const DENO_CORE_SET_IMMEDIATE_INFO: &str = "__v8x_set_deno_immediate_info";
 const DENO_CORE_SET_TIMER_INFO: &str = "__v8x_set_deno_timer_info";
@@ -1949,11 +1952,12 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
   Ok(())
 }
 
-/// Precompile and attest only the pinned Deno application artifact.
+/// Precompile one Deno application artifact.
 ///
-/// The POC runner invokes this in its own process so the compiler's memory is
-/// returned to the OS before the much larger runtime-eval provider is built.
-#[cfg(feature = "js2wasm_deno_poc")]
+/// The packaging runner invokes this in its own process so its compiler memory
+/// is returned to the OS before the much larger runtime-eval provider is built.
+/// The strict POC profile additionally writes its existing paired attestation.
+#[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
 pub fn js2wasm_precompile_deno_core_for_test(
   artifact: &Path,
@@ -1968,12 +1972,13 @@ pub fn js2wasm_precompile_deno_core_for_test(
   persist_precompiled_deno_core_artifact(&wasm, &precompiled)
 }
 
-/// Precompile and attest only the pinned runtime-eval provider artifact.
+/// Precompile one runtime-eval provider artifact.
 ///
 /// Keeping this out of the application validation process bounds peak memory:
 /// no application module or store remains resident while Cranelift processes
-/// the provider's large closed interpreter graph.
-#[cfg(feature = "js2wasm_deno_poc")]
+/// the provider's large closed interpreter graph. The strict POC profile
+/// additionally writes its existing paired attestation.
+#[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
 pub fn js2wasm_precompile_runtime_eval_provider_for_test(
   artifact: &Path,
@@ -2196,7 +2201,66 @@ impl DenoRuntime {
       .call(&mut self.store, ())
       .map_err(|error| format!("call {DENO_RUN_CLASSIC_SCRIPT}: {error:#}"))?;
     self.store.data_mut().script.clear();
+    self.decode_classic_script_status(status)
+  }
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  pub(crate) fn has_runtime_usage_stage(&mut self) -> Result<bool, String> {
+    let Some(probe) = self
+      .instance
+      .get_func(&mut self.store, DENO_CORE_RUNTIME_USAGE_STAGE_PROBE)
+    else {
+      return Ok(false);
+    };
+    let value = probe
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| {
+        format!("type {DENO_CORE_RUNTIME_USAGE_STAGE_PROBE}: {error}")
+      })?
+      .call(&mut self.store, ())
+      .map_err(|error| {
+        format!("call {DENO_CORE_RUNTIME_USAGE_STAGE_PROBE}: {error:#}")
+      })?;
+    if value != 45.0 {
+      return Err(format!(
+        "Deno runtime usage-stage probe returned {value}, expected 45"
+      ));
+    }
+    Ok(true)
+  }
+
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  pub(crate) fn run_deno_core_usage(
+    &mut self,
+    source: &str,
+  ) -> Result<DenoScriptResult, String> {
+    self.store.data_mut().script = source.encode_utf16().collect();
+    let status = self
+      .require_function(DENO_CORE_USAGE_STAGE)?
+      .typed::<(), f64>(&self.store)
+      .map_err(|error| format!("type {DENO_CORE_USAGE_STAGE}: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("call {DENO_CORE_USAGE_STAGE}: {error:#}"))?;
+    self.store.data_mut().script.clear();
+    let state = self
+      .call_optional_number_export(DENO_CORE_STAGE_STATE_PROBE)?
+      .ok_or_else(|| {
+        format!(
+          "artifact exports {DENO_CORE_USAGE_STAGE} without {DENO_CORE_STAGE_STATE_PROBE}"
+        )
+      })?;
+    if state != 3.0 {
+      return Err(format!(
+        "Deno core usage stage left state {state}, expected 3"
+      ));
+    }
+    self.decode_classic_script_status(status)
+  }
+
+  fn decode_classic_script_status(
+    &mut self,
+    status: f64,
+  ) -> Result<DenoScriptResult, String> {
     if status == 0.0 {
       return Ok(DenoScriptResult::Undefined);
     }

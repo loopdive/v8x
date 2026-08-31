@@ -428,6 +428,9 @@ async function runCargoDeno() {
       "none",
       "--final-status-level",
       "none",
+      ...(b.nextest_test_threads
+        ? ["--test-threads", String(b.nextest_test_threads)]
+        : []),
       ...(skipArgs.length ? ["--", ...skipArgs] : []),
     ],
     { cwd: denoDir, env, echo: false },
