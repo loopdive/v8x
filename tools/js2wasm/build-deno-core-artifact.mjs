@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "7bdafea67cf263f923d8039058d99aa6a5720e02";
+const EXPECTED_JS2_REF = "5a32349df25f6492de80e046fe4b3ad7d08e80b3";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
