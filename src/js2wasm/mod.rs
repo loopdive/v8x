@@ -90,10 +90,32 @@ struct PromiseStateData {
   settlement: PromiseSettlement,
   result: *const Value,
   handled: bool,
+  reactions: Vec<PromiseReaction>,
+}
+
+#[derive(Clone, Copy)]
+struct PromiseReaction {
+  on_fulfilled: *const crate::Function,
+  on_rejected: *const crate::Function,
+  derived: *const Promise,
 }
 
 struct PromiseResolverState {
   promise: *const Promise,
+}
+
+enum Microtask {
+  Function(*const crate::Function),
+  PromiseReaction {
+    handler: *const crate::Function,
+    argument: *const Value,
+    settlement: PromiseSettlement,
+    derived: *const Promise,
+  },
+}
+
+struct SymbolState {
+  description: Option<*const V8String>,
 }
 
 struct UnboundModuleScriptState {
@@ -237,6 +259,7 @@ enum HeapValue {
   UnboundModuleScript(UnboundModuleScriptState),
   Promise(PromiseStateData),
   PromiseResolver(PromiseResolverState),
+  Symbol(SymbolState),
   Error { name: &'static str, message: String },
   External(*mut c_void),
   Boolean(bool),
@@ -248,6 +271,14 @@ enum HeapValue {
 
 #[repr(C)]
 pub(crate) struct RawReturnValue(usize);
+
+#[repr(C)]
+struct RawCachedData {
+  data: *const u8,
+  length: i32,
+  rejected: bool,
+  buffer_policy: i32,
+}
 
 #[repr(C)]
 struct MaybeMirror<T> {
@@ -282,11 +313,14 @@ struct IsolateState {
   contexts: Vec<*const Context>,
   data_slots: [*mut c_void; 4],
   microtasks_policy: crate::MicrotasksPolicy,
-  microtasks: Vec<*const crate::Function>,
+  microtasks: Vec<Microtask>,
   running_microtasks: bool,
   terminating: AtomicBool,
   active_try_catch: *mut TryCatchAbiState,
   pending_exception: *const Value,
+  error_prototype: *const Object,
+  symbol_registry: Vec<(String, *const crate::Symbol)>,
+  iterator_symbol: *const crate::Symbol,
 }
 
 // rusty_v8's raw TryCatch is an inline `[MaybeUninit<usize>; 6]`. Keep all
@@ -383,6 +417,7 @@ fn allocate_promise(
       settlement,
       result,
       handled: false,
+      reactions: Vec::new(),
     }),
   )
 }
@@ -456,6 +491,22 @@ fn allocate_error(
       message: message.to_owned(),
     },
   )
+}
+
+fn canonical_error_prototype(isolate: *mut RealIsolate) -> *const Value {
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let existing = unsafe { isolate_state(isolate).error_prototype };
+  if !existing.is_null() {
+    return existing.cast();
+  }
+  let prototype = new_object(isolate);
+  if prototype.is_null() {
+    return ptr::null();
+  }
+  unsafe { isolate_state(isolate).error_prototype = prototype };
+  prototype.cast()
 }
 
 fn object_from_template(
@@ -897,7 +948,8 @@ fn heap_to_json_value(
     | HeapValue::FixedArray(_)
     | HeapValue::UnboundModuleScript(_)
     | HeapValue::Promise(_)
-    | HeapValue::PromiseResolver(_) => None,
+    | HeapValue::PromiseResolver(_)
+    | HeapValue::Symbol(_) => None,
   }
 }
 
@@ -997,6 +1049,15 @@ pub extern "C" fn v8__Platform__NotifyIsolateShutdown(
   _platform: *mut Platform,
   _isolate: *mut c_void,
 ) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorClient__BASE__CONSTRUCT(
+  client: *mut MaybeUninit<crate::inspector::RawV8InspectorClient>,
+) {
+  if !client.is_null() {
+    unsafe { ptr::write_bytes(client, 0, 1) };
+  }
 }
 
 #[repr(C)]
@@ -1135,6 +1196,29 @@ pub extern "C" fn v8__Isolate__CreateParams__CONSTRUCT(
     let params =
       &mut *params.cast::<crate::isolate_create_params::raw::CreateParams>();
     params.allow_atomics_wait = true;
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ResourceConstraints__ConfigureDefaultsFromHeapSize(
+  constraints: *mut crate::isolate_create_params::raw::ResourceConstraints,
+  _initial_heap_size_in_bytes: usize,
+  maximum_heap_size_in_bytes: usize,
+) {
+  if constraints.is_null() {
+    return;
+  }
+  unsafe {
+    ptr::write_bytes(
+      constraints.cast::<u8>(),
+      0,
+      size_of::<crate::isolate_create_params::raw::ResourceConstraints>(),
+    );
+    // The second word is rusty_v8's max-old-generation limit field.
+    constraints
+      .cast::<usize>()
+      .add(1)
+      .write(maximum_heap_size_in_bytes);
   }
 }
 
@@ -1372,6 +1456,9 @@ pub extern "C" fn v8__Isolate__New(_params: *const c_void) -> *mut RealIsolate {
     terminating: AtomicBool::new(false),
     active_try_catch: ptr::null_mut(),
     pending_exception: ptr::null(),
+    error_prototype: ptr::null(),
+    symbol_registry: Vec::new(),
+    iterator_symbol: ptr::null(),
   }))
   .cast()
 }
@@ -1410,6 +1497,31 @@ pub extern "C" fn v8__Isolate__Exit(isolate: *mut RealIsolate) {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__GetCurrent() -> *mut RealIsolate {
   current_isolate()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__HasPendingBackgroundTasks(
+  _isolate: *const RealIsolate,
+) -> bool {
+  // Wasmtime does not own an engine worker pool. Promise reactions and
+  // embedder microtasks live in the explicit isolate queue instead.
+  false
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__AddNearHeapLimitCallback(
+  _isolate: *mut RealIsolate,
+  _callback: crate::isolate::NearHeapLimitCallback,
+  _data: *mut c_void,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__RemoveNearHeapLimitCallback(
+  _isolate: *mut RealIsolate,
+  _callback: crate::isolate::NearHeapLimitCallback,
+  _heap_limit: usize,
+) {
 }
 
 #[unsafe(no_mangle)]
@@ -1539,7 +1651,11 @@ pub extern "C" fn v8__Isolate__EnqueueMicrotask(
   {
     return;
   }
-  unsafe { isolate_state(isolate).microtasks.push(function) };
+  unsafe {
+    isolate_state(isolate)
+      .microtasks
+      .push(Microtask::Function(function))
+  };
 }
 
 #[unsafe(no_mangle)]
@@ -1556,7 +1672,7 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
   state.running_microtasks = true;
 
   loop {
-    let function = {
+    let task = {
       let state = unsafe { isolate_state(isolate) };
       if state.microtasks.is_empty() {
         state.running_microtasks = false;
@@ -1564,8 +1680,39 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
       }
       state.microtasks.remove(0)
     };
-    let receiver = v8__Undefined(isolate).cast();
-    let _ = invoke_function(function, receiver, 0, ptr::null(), false);
+    match task {
+      Microtask::Function(function) => {
+        let receiver = v8__Undefined(isolate).cast();
+        let _ = invoke_function(function, receiver, 0, ptr::null(), false);
+      }
+      Microtask::PromiseReaction {
+        handler,
+        argument,
+        settlement,
+        derived,
+      } => {
+        if handler.is_null() {
+          settle_promise_value(derived, argument, settlement);
+        } else {
+          let receiver = v8__Undefined(isolate).cast();
+          let arguments = [argument];
+          let result =
+            invoke_function(handler, receiver, 1, arguments.as_ptr(), false);
+          let exception = unsafe { isolate_state(isolate).pending_exception };
+          if exception.is_null() && !result.is_null() {
+            settle_promise_value(derived, result, PromiseSettlement::Fulfilled);
+          } else {
+            unsafe { isolate_state(isolate).pending_exception = ptr::null() };
+            let reason = if exception.is_null() {
+              v8__Undefined(isolate).cast()
+            } else {
+              exception
+            };
+            settle_promise_value(derived, reason, PromiseSettlement::Rejected);
+          }
+        }
+      }
+    }
     // V8 reports and clears exceptions thrown by microtasks rather than
     // leaking them into the caller of PerformMicrotaskCheckpoint.
     let state = unsafe { isolate_state(isolate) };
@@ -1652,6 +1799,22 @@ pub extern "C" fn v8__HandleScope__CONSTRUCT(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__HandleScope__DESTRUCT(_scope: *mut usize) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__EscapeSlot__reserve(_isolate: *mut RealIsolate) -> usize {
+  // HeapValue allocations are stable for the whole isolate lifetime, so an
+  // escaped Local needs no retargeted storage slot.
+  0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__EscapeSlot__escape(
+  _isolate: *mut RealIsolate,
+  _index: usize,
+  value: *const Data,
+) -> *const Data {
+  value
+}
 
 unsafe fn try_catch_state<'a>(
   this: *const usize,
@@ -1880,6 +2043,46 @@ pub extern "C" fn v8__Data__EQ(left: *const Data, right: *const Data) -> bool {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__StrictEquals(
+  left: *const Value,
+  right: *const Value,
+) -> bool {
+  if ptr::eq(left, right) {
+    return true;
+  }
+  match (unsafe { heap_value(left) }, unsafe { heap_value(right) }) {
+    (Some(HeapValue::String(left)), Some(HeapValue::String(right))) => {
+      left == right
+    }
+    (Some(HeapValue::Boolean(left)), Some(HeapValue::Boolean(right))) => {
+      left == right
+    }
+    (Some(HeapValue::Number(left)), Some(HeapValue::Number(right))) => {
+      left == right
+    }
+    (Some(HeapValue::BigInt(left)), Some(HeapValue::BigInt(right))) => {
+      left == right
+    }
+    (Some(HeapValue::Null), Some(HeapValue::Null))
+    | (Some(HeapValue::Undefined), Some(HeapValue::Undefined)) => true,
+    _ => false,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__SameValue(
+  left: *const Value,
+  right: *const Value,
+) -> bool {
+  match (unsafe { heap_value(left) }, unsafe { heap_value(right) }) {
+    (Some(HeapValue::Number(left)), Some(HeapValue::Number(right))) => {
+      (left.is_nan() && right.is_nan()) || left.to_bits() == right.to_bits()
+    }
+    _ => v8__Value__StrictEquals(left, right),
+  }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__SnapshotCreator__DESTRUCT(_creator: *mut c_void) {}
 
 #[unsafe(no_mangle)]
@@ -1992,6 +2195,23 @@ pub extern "C" fn v8__ObjectTemplate__SetInternalFieldCount(
   {
     state.internal_field_count = count.max(0);
   }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ObjectTemplate__SetNamedPropertyHandler(
+  _template: *const crate::ObjectTemplate,
+  _getter: Option<crate::NamedPropertyGetterCallback>,
+  _setter: Option<crate::NamedPropertySetterCallback>,
+  _query: Option<crate::NamedPropertyQueryCallback>,
+  _deleter: Option<crate::NamedPropertyDeleterCallback>,
+  _enumerator: Option<crate::NamedPropertyEnumeratorCallback>,
+  _definer: Option<crate::NamedPropertyDefinerCallback>,
+  _descriptor: Option<crate::NamedPropertyDescriptorCallback>,
+  _data: *const Value,
+  _flags: crate::PropertyHandlerFlags,
+) {
+  // The Rust-owned object model currently has no interceptor dispatch. Deno
+  // installs this handler defensively; ordinary own properties still work.
 }
 
 #[unsafe(no_mangle)]
@@ -2510,6 +2730,9 @@ pub extern "C" fn v8__Object__GetPrototype(
     Some(HeapValue::Object(state)) => state
       .prototype
       .unwrap_or_else(|| v8__Null(current_isolate()).cast()),
+    Some(HeapValue::Error { .. }) => {
+      canonical_error_prototype(current_isolate())
+    }
     _ => ptr::null(),
   }
 }
@@ -2924,6 +3147,26 @@ pub extern "C" fn v8__Function__SetName(
       attributes: 0,
     });
   }
+}
+
+fn placeholder_code_cache() -> *mut CachedData<'static> {
+  let bytes = vec![0_u8; 1].into_boxed_slice();
+  let length = bytes.len() as i32;
+  let data = Box::into_raw(bytes) as *const u8;
+  Box::into_raw(Box::new(RawCachedData {
+    data,
+    length,
+    rejected: false,
+    buffer_policy: 1,
+  }))
+  .cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Function__CreateCodeCache(
+  _function: *const crate::Function,
+) -> *mut CachedData<'static> {
+  placeholder_code_cache()
 }
 
 unsafe fn callback_info<'a>(
@@ -4006,7 +4249,7 @@ pub extern "C" fn v8__Value__IsString(value: *const Value) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Value__IsName(value: *const Value) -> bool {
-  v8__Value__IsString(value)
+  v8__Value__IsString(value) || v8__Value__IsSymbol(value)
 }
 
 #[unsafe(no_mangle)]
@@ -4093,6 +4336,13 @@ pub extern "C" fn v8__Value__ToString(
     Some(HeapValue::Error { name, message }) => {
       new_string(isolate, format!("{name}: {message}"))
     }
+    Some(HeapValue::Symbol(state)) => {
+      let description = state
+        .description
+        .and_then(|description| unsafe { string_value(description) })
+        .unwrap_or_default();
+      new_string(isolate, format!("Symbol({description})"))
+    }
     Some(HeapValue::Array(_)) => new_string(isolate, String::new()),
     Some(
       HeapValue::Object(_)
@@ -4102,6 +4352,80 @@ pub extern "C" fn v8__Value__ToString(
     ) => new_string(isolate, "[object Object]".to_string()),
     Some(_) | None => ptr::null(),
   }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Symbol__New(
+  isolate: *mut RealIsolate,
+  description: *const V8String,
+) -> *const crate::Symbol {
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let description = (!description.is_null()).then_some(description);
+  allocate(isolate, HeapValue::Symbol(SymbolState { description }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Symbol__For(
+  isolate: *mut RealIsolate,
+  description: *const V8String,
+) -> *const crate::Symbol {
+  let Some(key) = (unsafe { string_value(description) }) else {
+    return ptr::null();
+  };
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  if let Some((_, symbol)) = unsafe { isolate_state(isolate) }
+    .symbol_registry
+    .iter()
+    .find(|(candidate, _)| candidate == key)
+  {
+    return *symbol;
+  }
+  let key = key.to_owned();
+  let symbol = v8__Symbol__New(isolate, description);
+  unsafe { isolate_state(isolate) }
+    .symbol_registry
+    .push((key, symbol));
+  symbol
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Symbol__Description(
+  symbol: *const crate::Symbol,
+  isolate: *mut RealIsolate,
+) -> *const Value {
+  match unsafe { heap_value(symbol) } {
+    Some(HeapValue::Symbol(SymbolState {
+      description: Some(description),
+    })) => description.cast(),
+    Some(HeapValue::Symbol(_)) => v8__Undefined(isolate).cast(),
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Symbol__GetIterator(
+  isolate: *mut RealIsolate,
+) -> *const crate::Symbol {
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let existing = unsafe { isolate_state(isolate).iterator_symbol };
+  if !existing.is_null() {
+    return existing;
+  }
+  let description = new_string(isolate, "Symbol.iterator".to_string());
+  let symbol = v8__Symbol__New(isolate, description);
+  unsafe { isolate_state(isolate).iterator_symbol = symbol };
+  symbol
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsSymbol(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Symbol(_)))
 }
 
 #[unsafe(no_mangle)]
@@ -4169,7 +4493,6 @@ unsupported_value_predicates!(
   v8__Value__IsAsyncFunction,
   v8__Value__IsRegExp,
   v8__Value__IsDate,
-  v8__Value__IsSymbol,
   v8__Value__IsSymbolObject,
 );
 
@@ -4392,14 +4715,44 @@ fn settle_promise(
   else {
     return MaybeBool::Nothing;
   };
-  let Some(state) = (unsafe { promise_state(promise) }) else {
-    return MaybeBool::Nothing;
-  };
-  if state.settlement == PromiseSettlement::Pending {
+  settle_promise_value(promise, value, settlement);
+  MaybeBool::JustTrue
+}
+
+fn settle_promise_value(
+  promise: *const Promise,
+  value: *const Value,
+  settlement: PromiseSettlement,
+) {
+  let reactions = {
+    let Some(state) = (unsafe { promise_state(promise) }) else {
+      return;
+    };
+    if state.settlement != PromiseSettlement::Pending {
+      return;
+    }
     state.settlement = settlement;
     state.result = value;
+    std::mem::take(&mut state.reactions)
+  };
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return;
   }
-  MaybeBool::JustTrue
+  let queue = &mut unsafe { isolate_state(isolate) }.microtasks;
+  queue.extend(reactions.into_iter().map(|reaction| {
+    let handler = match settlement {
+      PromiseSettlement::Fulfilled => reaction.on_fulfilled,
+      PromiseSettlement::Rejected => reaction.on_rejected,
+      PromiseSettlement::Pending => ptr::null(),
+    };
+    Microtask::PromiseReaction {
+      handler,
+      argument: value,
+      settlement,
+      derived: reaction.derived,
+    }
+  }));
 }
 
 #[unsafe(no_mangle)]
@@ -4454,6 +4807,89 @@ pub extern "C" fn v8__Promise__Result(promise: *const Promise) -> *const Value {
   } else {
     state.result
   }
+}
+
+fn promise_then(
+  promise: *const Promise,
+  context: *const Context,
+  on_fulfilled: *const crate::Function,
+  on_rejected: *const crate::Function,
+) -> *const Promise {
+  if context.is_null()
+    || !matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_)))
+  {
+    return ptr::null();
+  }
+  for handler in [on_fulfilled, on_rejected] {
+    if !handler.is_null()
+      && !matches!(unsafe { heap_value(handler) }, Some(HeapValue::Function(_)))
+    {
+      return ptr::null();
+    }
+  }
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let derived =
+    allocate_promise(isolate, PromiseSettlement::Pending, ptr::null());
+  let (settlement, result) = {
+    let Some(state) = (unsafe { promise_state(promise) }) else {
+      return ptr::null();
+    };
+    state.handled = true;
+    if state.settlement == PromiseSettlement::Pending {
+      state.reactions.push(PromiseReaction {
+        on_fulfilled,
+        on_rejected,
+        derived,
+      });
+      return derived;
+    }
+    (state.settlement, state.result)
+  };
+  let handler = match settlement {
+    PromiseSettlement::Fulfilled => on_fulfilled,
+    PromiseSettlement::Rejected => on_rejected,
+    PromiseSettlement::Pending => ptr::null(),
+  };
+  unsafe { isolate_state(isolate) }.microtasks.push(
+    Microtask::PromiseReaction {
+      handler,
+      argument: result,
+      settlement,
+      derived,
+    },
+  );
+  derived
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Then2(
+  promise: *const Promise,
+  context: *const Context,
+  on_fulfilled: *const crate::Function,
+  on_rejected: *const crate::Function,
+) -> *const Promise {
+  promise_then(promise, context, on_fulfilled, on_rejected)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Then(
+  promise: *const Promise,
+  context: *const Context,
+  on_fulfilled: *const crate::Function,
+) -> *const Promise {
+  promise_then(promise, context, on_fulfilled, ptr::null())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Promise__Catch(
+  promise: *const Promise,
+  context: *const Context,
+  on_rejected: *const crate::Function,
+) -> *const Promise {
+  promise_then(promise, context, ptr::null(), on_rejected)
 }
 
 // --- Classic scripts ------------------------------------------------------
@@ -5067,7 +5503,9 @@ pub extern "C" fn v8__Script__Run(
   }
   #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   match run_runtime_deno_usage_stage(context, state) {
-    Ok(Some(result)) => return materialize_deno_script_result(&state.source, result),
+    Ok(Some(result)) => {
+      return materialize_deno_script_result(&state.source, result);
+    }
     Ok(None) => {}
     Err(error) => {
       eprintln!("v8x/js2wasm: {error}");
@@ -5112,6 +5550,55 @@ pub extern "C" fn v8__Script__Run(
 }
 
 // --- Source-text modules --------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ScriptCompiler__CachedData__NEW<'a>(
+  data: *const u8,
+  length: i32,
+) -> *mut CachedData<'a> {
+  Box::into_raw(Box::new(RawCachedData {
+    data,
+    length,
+    rejected: false,
+    buffer_policy: 0,
+  }))
+  .cast()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ScriptCompiler__CachedData__DELETE<'a>(
+  cached_data: *mut CachedData<'a>,
+) {
+  if cached_data.is_null() {
+    return;
+  }
+  let cached_data =
+    unsafe { Box::from_raw(cached_data.cast::<RawCachedData>()) };
+  if cached_data.buffer_policy == 1
+    && !cached_data.data.is_null()
+    && cached_data.length > 0
+  {
+    let bytes = ptr::slice_from_raw_parts_mut(
+      cached_data.data.cast_mut(),
+      cached_data.length as usize,
+    );
+    unsafe { drop(Box::from_raw(bytes)) };
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__UnboundScript__CreateCodeCache(
+  _script: *const crate::UnboundScript,
+) -> *mut CachedData<'static> {
+  placeholder_code_cache()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__UnboundModuleScript__CreateCodeCache(
+  _script: *const UnboundModuleScript,
+) -> *mut CachedData<'static> {
+  placeholder_code_cache()
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__ScriptOrigin__CONSTRUCT(

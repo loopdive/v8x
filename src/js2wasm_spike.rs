@@ -100,7 +100,7 @@ const DENO_POC_PROVIDER_AOT_MODULE_ENV: &str =
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const POC_EXPECTED_DENO_REF: &str = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
-const POC_EXPECTED_JS2_REF: &str = "6d306d67543100dde8efcf89a70d068cd693927d";
+const POC_EXPECTED_JS2_REF: &str = "00d0cc0352bd456e81fdfcf66f5a2e5f86cb0deb";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const POC_EXPECTED_WASMTIME_VERSION: &str = "47.0.3";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -2030,6 +2030,21 @@ pub fn js2wasm_precompile_runtime_eval_provider_for_test(
   persist_runtime_eval_provider_artifact(&wasm, &precompiled)
 }
 
+fn take_pending_wasm_exception_summary<T>(store: &mut Store<T>) -> String {
+  store.take_pending_exception().map_or_else(
+    || "no pending Wasm exception payload".to_string(),
+    |exception| match exception.fields(&mut *store) {
+      Ok(fields) => format!(
+        "pending Wasm exception payload {:?}",
+        fields.collect::<Vec<_>>(),
+      ),
+      Err(error) => {
+        format!("pending Wasm exception payload is unreadable: {error}")
+      }
+    },
+  )
+}
+
 /// Instantiate the prelinked core-bootstrap transaction used by the
 /// experimental classic-script bridge. Production uses a trusted artifact;
 /// development builds may precompile the exact raw module in-process.
@@ -2231,13 +2246,18 @@ impl DenoRuntime {
     source: &str,
   ) -> Result<DenoScriptResult, String> {
     self.store.data_mut().script = source.encode_utf16().collect();
-    let status = self
-      .require_function(DENO_RUN_CLASSIC_SCRIPT)?
-      .typed::<(), f64>(&self.store)
-      .map_err(|error| format!("type {DENO_RUN_CLASSIC_SCRIPT}: {error}"))?
-      .call(&mut self.store, ())
-      .map_err(|error| format!("call {DENO_RUN_CLASSIC_SCRIPT}: {error:#}"))?;
+    let result = (|| {
+      let function = self.require_function(DENO_RUN_CLASSIC_SCRIPT)?;
+      let function = function
+        .typed::<(), f64>(&self.store)
+        .map_err(|error| format!("type {DENO_RUN_CLASSIC_SCRIPT}: {error}"))?;
+      function.call(&mut self.store, ()).map_err(|error| {
+        let pending = take_pending_wasm_exception_summary(&mut self.store);
+        format!("call {DENO_RUN_CLASSIC_SCRIPT}: {error:#}; {pending}")
+      })
+    })();
     self.store.data_mut().script.clear();
+    let status = result?;
     self.decode_classic_script_status(status)
   }
 

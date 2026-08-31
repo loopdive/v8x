@@ -68,6 +68,7 @@ thread_local! {
   static SYNTHETIC_LABEL_VALUE: RefCell<Option<v8::Global<v8::Value>>> =
     const { RefCell::new(None) };
   static MICROTASK_EVENTS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+  static PROMISE_EVENTS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -161,6 +162,21 @@ unsafe extern "C" fn first_microtask(_info: *const v8::FunctionCallbackInfo) {
 
 unsafe extern "C" fn second_microtask(_info: *const v8::FunctionCallbackInfo) {
   MICROTASK_EVENTS.with(|events| events.borrow_mut().push(2));
+}
+
+unsafe extern "C" fn increment_promise_value(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let value = args.get(0).number_value(scope).unwrap();
+  PROMISE_EVENTS.with(|events| events.borrow_mut().push(value));
+  let mut return_value = parts.return_value;
+  return_value.set_double(value + 1.0);
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -659,6 +675,28 @@ fn creates_objects_with_live_explicit_prototype_chains() {
 }
 
 #[test]
+fn gives_native_errors_a_canonical_error_prototype() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  let first_message = v8::String::new(scope, "first failure").unwrap();
+  let first_error = v8::Exception::error(scope, first_message);
+  let first_error = v8::Local::<v8::Object>::try_from(first_error).unwrap();
+  let first_prototype = first_error.get_prototype(scope).unwrap();
+  assert!(first_prototype.is_object());
+  assert!(!first_prototype.is_null());
+
+  let second_message = v8::String::new(scope, "second failure").unwrap();
+  let second_error = v8::Exception::type_error(scope, second_message);
+  let second_error = v8::Local::<v8::Object>::try_from(second_error).unwrap();
+  let second_prototype = second_error.get_prototype(scope).unwrap();
+  assert!(std::ptr::eq(&*first_prototype, &*second_prototype));
+}
+
+#[test]
 fn aliases_external_backing_stores_through_typed_arrays_and_deletes() {
   initialize();
   let deletion_count = AtomicUsize::new(0);
@@ -779,6 +817,61 @@ fn drains_enqueued_microtasks_in_fifo_order_once() {
 
   scope.perform_microtask_checkpoint();
   MICROTASK_EVENTS.with(|events| assert_eq!(&*events.borrow(), &[1, 2]));
+}
+
+#[test]
+fn chains_settled_promises_through_the_microtask_queue() {
+  initialize();
+  PROMISE_EVENTS.with(|events| events.borrow_mut().clear());
+
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  let handler = v8::FunctionTemplate::new_raw(scope, increment_promise_value)
+    .get_function(scope)
+    .unwrap();
+  let derived = promise.then2(scope, handler, handler).unwrap();
+  assert!(promise.has_handler());
+
+  let value = v8::Number::new(scope, 41.0);
+  assert_eq!(resolver.resolve(scope, value.into()), Some(true));
+  assert_eq!(derived.state(), v8::PromiseState::Pending);
+  PROMISE_EVENTS.with(|events| assert!(events.borrow().is_empty()));
+
+  scope.perform_microtask_checkpoint();
+  PROMISE_EVENTS.with(|events| assert_eq!(&*events.borrow(), &[41.0]));
+  assert_eq!(derived.state(), v8::PromiseState::Fulfilled);
+  assert_eq!(derived.result(scope).number_value(scope), Some(42.0));
+}
+
+#[test]
+fn keeps_symbol_identity_and_escaped_values_stable() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+
+  let description = v8::String::new(scope, "deno-core-symbol").unwrap();
+  let first = v8::Symbol::for_key(scope, description);
+  let second = v8::Symbol::for_key(scope, description);
+  assert!(std::ptr::eq(&*first, &*second));
+  assert!(first.is_symbol());
+  assert!(first.description(scope).strict_equals(description.into()));
+  let iterator = v8::Symbol::get_iterator(scope);
+  assert!(std::ptr::eq(&*iterator, &*v8::Symbol::get_iterator(scope)));
+
+  let escaped = {
+    let escapable = std::pin::pin!(v8::EscapableHandleScope::new(scope));
+    let scope = &mut escapable.init();
+    let value = v8::Number::new(scope, 17.0);
+    scope.escape(value)
+  };
+  assert_eq!(escaped.value(), 17.0);
+  assert!(!scope.has_pending_background_tasks());
 }
 
 #[test]

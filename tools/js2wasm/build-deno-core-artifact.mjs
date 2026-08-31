@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "6d306d67543100dde8efcf89a70d068cd693927d";
+const EXPECTED_JS2_REF = "00d0cc0352bd456e81fdfcf66f5a2e5f86cb0deb";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
@@ -507,6 +507,65 @@ function assertRawModuleInitializesWithStubImports(appBinary, profile) {
   }
 }
 
+function describeProviderCanaryException(error, instance) {
+  const describe = (value) =>
+    typeof value === "string" ? JSON.stringify(value) : String(value);
+  const name = describe(error?.name);
+  const message = describe(error?.message);
+  let payload = "";
+  const tag = instance.exports.__exn_tag;
+  if (
+    tag !== undefined &&
+    typeof WebAssembly.Exception === "function" &&
+    error instanceof WebAssembly.Exception &&
+    typeof error.is === "function" &&
+    error.is(tag) &&
+    typeof error.getArg === "function"
+  ) {
+    try {
+      const value = error.getArg(tag, 0);
+      payload = ` (payload ${value === undefined ? "undefined" : Object.prototype.toString.call(value)})`;
+    } catch {
+      payload = " (payload unreadable)";
+    }
+  }
+  return `name=${name}; message=${message}${payload}`;
+}
+
+function assertRuntimeEvalProviderCanaries(providerModule) {
+  const instance = new WebAssembly.Instance(providerModule, {});
+  // Keep this aligned with js2's provider cache builder. The POC invokes the
+  // compiler directly, which otherwise bypasses js2's own canary verification
+  // and can publish an ABI-complete provider that cannot create a local
+  // function for the pinned hello_world script.
+  const canaries = [
+    ["__runtime_eval_canary", 3],
+    ["__runtime_function_canary", 3],
+    ["__runtime_direct_eval_canary", 84],
+    ["__runtime_apply_interpreted_canary", 3],
+    ["__runtime_positive_corpus_canary", 30],
+  ];
+  for (const [name, expected] of canaries) {
+    const canary = instance.exports[name];
+    if (typeof canary !== "function") {
+      fail(`runtime-eval interpreter provider has no required ${name} export`);
+    }
+    let actual;
+    try {
+      actual = canary();
+    } catch (error) {
+      fail(
+        `runtime-eval interpreter provider ${name} threw ${describeProviderCanaryException(error, instance)}`,
+      );
+    }
+    if (actual !== expected) {
+      fail(
+        `runtime-eval interpreter provider ${name} returned ${actual}, expected ${expected}`,
+      );
+    }
+  }
+}
+
 function lockedInputRecord(record) {
   const locked = {
     path: record.path,
@@ -895,6 +954,7 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
       `runtime-eval interpreter provider has ${providerImports.length} imports, expected zero`,
     );
   }
+  assertRuntimeEvalProviderCanaries(providerModule);
   atomicWrite(providerOutput, providerBinary);
 
   const acornPinPath = "tests/dogfood/acorn-pin.json";
