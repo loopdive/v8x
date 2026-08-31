@@ -385,11 +385,14 @@ jobs:
           # Select this job's backend by swapping the v82jsc feature list the
           # patch hardcodes (vendored JSC) for this matrix entry's features.
           perl -0pi -e 's/"engine_jsc", "vendor_jsc"/${{ matrix.features }}/g' ../deno/Cargo.toml
-          # Deno's lockfile predates Wasmtime 47. Unlock only the shared crates
-          # whose locked versions are below Wasmtime's semver-compatible
-          # minimums; Cargo then adds the new backend graph without refreshing
-          # the rest of Deno's dependency tree.
+          # Deno's manifest and lockfile predate Wasmtime 47. Raise the one
+          # exact semver pin to Wasmtime's minimum, then unlock only shared
+          # crates whose locked versions are too old. Cargo can add the backend
+          # graph without refreshing the rest of Deno's dependency tree.
           if [ "${{ matrix.backend }}" = "js2wasm" ]; then
+            test "$(grep -c 'semver = "=1.0.25"' ../deno/tests/util/server/Cargo.toml)" = 1
+            sed -i 's/semver = "=1.0.25"/semver = "=1.0.27"/' \
+              ../deno/tests/util/server/Cargo.toml
             (cd ../deno && cargo update \
               -p async-trait \
               -p bitflags@2.9.3 \
