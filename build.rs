@@ -76,7 +76,7 @@ fn emit_quickjs_cache_tag(manifest_dir: &Path) {
 /// one prints the exact unresolved ABI symbol and aborts. A real strong
 /// implementation with the same name always wins over the weak definition.
 fn build_js2wasm_diagnostic_abi(manifest_dir: &Path) {
-  const EXPECTED_SYMBOLS: usize = 278;
+  const EXPECTED_SYMBOLS: usize = 282;
 
   let manifest = manifest_dir.join("src/js2wasm/diagnostic_abi_symbols.txt");
   println!("cargo:rerun-if-changed={}", manifest.display());
@@ -171,7 +171,33 @@ v8x_js2wasm_abort_unresolved_abi(const char *symbol) {
 }
 
 fn main() {
+  if env::var_os("CARGO_FEATURE_JS2WASM_DENO_POC_REPLAY").is_some()
+    && [
+      "CARGO_FEATURE_JS2WASM_RUNTIME_COMPILE",
+      "CARGO_FEATURE_ENGINE_QUICKJS",
+      "CARGO_FEATURE_LINK_QUICKJS",
+      "CARGO_FEATURE_ENGINE_JSC",
+      "CARGO_FEATURE_VENDOR_JSC",
+      "CARGO_FEATURE_SYSTEM_JSC",
+    ]
+    .iter()
+    .any(|name| env::var_os(name).is_some())
+  {
+    panic!(
+      "`js2wasm_deno_poc_replay` is compiler-free and cannot be combined with \
+       `js2wasm_runtime_compile`, QuickJS, or JSC backend features"
+    );
+  }
+
   let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+  let target = env::var("TARGET").expect("Cargo did not provide TARGET");
+  println!("cargo:rustc-env=V8X_BUILD_TARGET_TRIPLE={target}");
+
+  // The strict Deno replay bakes the exact v8x revision into the crate and
+  // its final, AOT-inclusive contract digest into the crate. Make incremental
+  // Cargo builds notice when the orchestrator changes either replay lock pin.
+  println!("cargo:rerun-if-env-changed=V8X_JS2WASM_POC_V8X_REF");
+  println!("cargo:rerun-if-env-changed=V8X_JS2WASM_POC_CONTRACT_SHA256");
 
   // Init the pinned rusty_v8 submodule + apply our 2 patches BEFORE compile:
   // src/lib.rs `#[path]`-includes its modules, so the vendored Rust API surface

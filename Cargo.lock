@@ -1313,6 +1313,7 @@ dependencies = [
  "icu_collator",
  "icu_locale",
  "paste",
+ "serde",
  "serde_json",
  "sha2",
  "temporal_capi",

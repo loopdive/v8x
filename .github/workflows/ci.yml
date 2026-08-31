@@ -368,6 +368,79 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------------------
+  # Bounded, compiler-free Deno evidence. This is intentionally a separate
+  # Linux x86_64 job: Wasmtime native precompiled artifacts are target/config
+  # specific, and the final process must not see raw Wasm, Node, QuickJS, or a
+  # js2 compiler. It builds the real pinned deno_core hello_world example.
+  # ---------------------------------------------------------------------------
+  deno-js2wasm-poc:
+    name: deno-js2wasm-poc-linux-x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+      - name: Init v8x Rust API source
+        run: |
+          git -c submodule.vendor/rusty_v8.update=checkout \
+            submodule update --init --depth 1 vendor/rusty_v8
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reserve bounded AOT compiler swap
+        run: |
+          sudo fallocate -l 8G /mnt/v8x-aot-compiler.swap
+          sudo chmod 600 /mnt/v8x-aot-compiler.swap
+          sudo mkswap /mnt/v8x-aot-compiler.swap
+          sudo swapon /mnt/v8x-aot-compiler.swap
+      - name: Check out pinned js2 compiler
+        run: |
+          set -euo pipefail
+          js2_ref=7bdafea67cf263f923d8039058d99aa6a5720e02
+          js2_dir="$RUNNER_TEMP/js2-deno-poc"
+          git init -q "$js2_dir"
+          git -C "$js2_dir" remote add origin https://github.com/loopdive/js2
+          git -C "$js2_dir" fetch --depth 1 origin "$js2_ref"
+          git -C "$js2_dir" checkout --detach -q FETCH_HEAD
+          test "$(git -C "$js2_dir" rev-parse HEAD)" = "$js2_ref"
+          test -z "$(git -C "$js2_dir" status --porcelain=v1 --untracked-files=all)"
+          cd "$js2_dir"
+          corepack enable
+          pnpm install --frozen-lockfile
+      - name: Check out pinned Deno source
+        run: |
+          set -euo pipefail
+          deno_ref=1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44
+          deno_dir="$RUNNER_TEMP/deno-js2wasm-poc"
+          git init -q "$deno_dir"
+          git -C "$deno_dir" remote add origin https://github.com/denoland/deno
+          git -C "$deno_dir" fetch --depth 1 origin "$deno_ref"
+          git -C "$deno_dir" checkout --detach -q FETCH_HEAD
+          test "$(git -C "$deno_dir" rev-parse HEAD)" = "$deno_ref"
+          test -z "$(git -C "$deno_dir" status --porcelain=v1 --untracked-files=all)"
+      - name: Build, bind, and replay real Deno hello_world
+        run: |
+          set -euo pipefail
+          tools/deno/run-js2wasm-poc.sh \
+            --v8x="$GITHUB_WORKSPACE" \
+            --js2="$RUNNER_TEMP/js2-deno-poc" \
+            --deno="$RUNNER_TEMP/deno-js2wasm-poc" \
+            --out-dir="$RUNNER_TEMP/v8x-deno-js2wasm-poc" \
+            --node="$(command -v node)" \
+            --cargo="$(command -v cargo)"
+      - name: Upload strict POC evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deno-js2wasm-poc-linux-x64
+          path: ${{ runner.temp }}/v8x-deno-js2wasm-poc
+          include-hidden-files: true
+          if-no-files-found: ignore
+
   module-tests:
     name: module suite (stock-v8 oracle)
     runs-on: ubuntu-latest

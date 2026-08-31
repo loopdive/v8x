@@ -9,6 +9,24 @@
 //! wrapper reconstructs its string from two direct UTF-16 imports, avoiding a
 //! JavaScript-host `externref` ABI or a WASI/component boundary.
 
+#[cfg(all(
+  feature = "js2wasm_deno_poc_replay",
+  any(
+    feature = "js2wasm_runtime_compile",
+    feature = "engine_quickjs",
+    feature = "link_quickjs",
+    feature = "engine_jsc",
+    feature = "vendor_jsc",
+    feature = "system_jsc",
+  ),
+))]
+compile_error!(
+  "`js2wasm_deno_poc_replay` is compiler-free and cannot be combined with \
+   `js2wasm_runtime_compile`, QuickJS, or JSC backend features"
+);
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -59,7 +77,90 @@ const RUNTIME_EVAL_IMPORTS: &[&str] = &[
   "__runtime_direct_eval",
   "__v8x_runtime_eval_json",
 ];
+const RUNTIME_EVAL_PROVIDER_EXPORTS: &[&str] = &[
+  "__runtime_apply_interpreted",
+  "__runtime_new_function",
+  "__runtime_indirect_eval",
+  "__runtime_direct_eval",
+];
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const RUNTIME_EVAL_AOT_MODULE_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const DENO_POC_MANIFEST_ENV: &str = "V8X_JS2WASM_DENO_POC_MANIFEST";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const DENO_POC_APP_AOT_MODULE_ENV: &str = "V8X_JS2WASM_DENO_CORE_AOT_MODULE";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const DENO_POC_PROVIDER_AOT_MODULE_ENV: &str =
+  "V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_DENO_REF: &str = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_JS2_REF: &str = "7bdafea67cf263f923d8039058d99aa6a5720e02";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_WASMTIME_VERSION: &str = "47.0.3";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_TARGET_OS: &str = "linux";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_TARGET_ARCH: &str = "x86_64";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_EXPECTED_COMPILE_OPTIONS_SHA256: &str =
+  "a31c09c7e31b4852799975e9c8cb8d132aad6ecab79bbf8c98d5848f7c3bde9e";
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_V8X_REF: Option<&str> = option_env!("V8X_JS2WASM_POC_V8X_REF");
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_CONTRACT_SHA256: Option<&str> =
+  option_env!("V8X_JS2WASM_POC_CONTRACT_SHA256");
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_SOURCE_LOCK: [(&str, u64, &str); 6] = [
+  (
+    "00_primordials.js",
+    19_076,
+    "5a2dfbdc4bb81412575d035901a11788001c7e0110e3f736d16289891af44a52",
+  ),
+  (
+    "00_infra.js",
+    17_520,
+    "33984000be930f3b02a2d1149ac0319724e8d95891623c8cc74699da4ce97287",
+  ),
+  (
+    "02_timers.js",
+    10_932,
+    "305596528c679be30d0ac61fa049ec0f1777c287054d119ff4b341575afac7f9",
+  ),
+  (
+    "01_core.js",
+    39_939,
+    "6e67972322cc5385a2b642a4f7e941fccb6f992c9de662a5111d11fd0aaf1a3a",
+  ),
+  (
+    "mod.js",
+    342,
+    "6850db621a5325d8737ad87d2d24cbc35b7010d5e5f36c88dc53c16610cc40e5",
+  ),
+  (
+    "hello_world_usage.js",
+    339,
+    "33bf6b9698833319ad98c0cf88f2fb4dd7634859816ec784aa8902b3eeba1804",
+  ),
+];
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const POC_REPLAY_FORBIDDEN_ENV: &[&str] = &[
+  "V8X_JS2WASM_AOT_MODULE",
+  "V8X_JS2WASM_ARTIFACT_OUTPUT",
+  "V8X_JS2WASM_CACHE_DIR",
+  "V8X_JS2WASM_COMPILER",
+  "V8X_JS2WASM_COMPILER_ID",
+  "V8X_JS2WASM_COMPILER_SCRIPT",
+  "V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION",
+  "V8X_JS2WASM_DENO_CORE_AOT_OUTPUT",
+  "V8X_JS2WASM_DENO_CORE_WASM",
+  "V8X_JS2WASM_RUNTIME_EVAL_AOT_ATTESTATION",
+  "V8X_JS2WASM_RUNTIME_EVAL_AOT_OUTPUT",
+  "V8X_JS2WASM_RUNTIME_EVAL_WASM",
+  "V8X_JS2WASM_WORKDIR",
+];
 #[cfg(feature = "js2wasm_runtime_compile")]
 const RUNTIME_EVAL_WASM_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_WASM";
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -72,9 +173,13 @@ const DENO_CORE_BOOTSTRAP_PROBE: &str = "__v8x_probe_deno_core_bootstrap";
 const RUNTIME_EVAL_STATE_PROBE: &str = "__v8x_probe_runtime_eval_state";
 const RUNTIME_EVAL_STATE_PROBE_ENV: &str =
   "V8X_JS2WASM_VERIFY_RUNTIME_EVAL_STATE";
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const DENO_CORE_WRAPPERS_STAGE: &str = "__v8x_stage_deno_core_wrappers";
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const DENO_CORE_MODULE_STAGE: &str = "__v8x_stage_deno_core_module";
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const DENO_CORE_USAGE_STAGE: &str = "__v8x_stage_deno_hello_world_usage";
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const DENO_CORE_STAGE_STATE_PROBE: &str = "__v8x_probe_deno_stage_state";
 const DENO_CORE_SET_TICK_INFO: &str = "__v8x_set_deno_tick_info";
 const DENO_CORE_SET_IMMEDIATE_INFO: &str = "__v8x_set_deno_immediate_info";
@@ -85,6 +190,12 @@ const DENO_SCRIPT_RESULT_CODE_UNIT: &str =
   "__v8x_script_result_utf16_code_unit";
 #[cfg(feature = "js2wasm_runtime_compile")]
 const DENO_CORE_AOT_OUTPUT_ENV: &str = "V8X_JS2WASM_DENO_CORE_AOT_OUTPUT";
+#[cfg(feature = "js2wasm_deno_poc")]
+const DENO_CORE_AOT_ATTESTATION_ENV: &str =
+  "V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION";
+#[cfg(feature = "js2wasm_deno_poc")]
+const RUNTIME_EVAL_AOT_ATTESTATION_ENV: &str =
+  "V8X_JS2WASM_RUNTIME_EVAL_AOT_ATTESTATION";
 #[cfg(feature = "js2wasm_runtime_compile")]
 const RUNTIME_CACHE_DIR_ENV: &str = "V8X_JS2WASM_CACHE_DIR";
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -117,6 +228,527 @@ const DENO_HOST_IMPORTS: &[&str] = &[
   DENO_TEST_FN_RESULT_LENGTH_IMPORT,
   DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT,
 ];
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenoPocManifest {
+  schema_version: u32,
+  contract_sha256: String,
+  raw_contract_sha256: String,
+  deno_ref: String,
+  js2_ref: String,
+  v8x_ref: String,
+  wasmtime_version: String,
+  target: DenoPocTarget,
+  engine_config: DenoPocEngineConfig,
+  compile_options_sha256: String,
+  sources: [DenoPocSource; 6],
+  artifacts: DenoPocArtifacts,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenoPocTarget {
+  os: String,
+  arch: String,
+  triple: String,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenoPocEngineConfig {
+  wasm_function_references: bool,
+  wasm_gc: bool,
+  wasm_tail_call: bool,
+  wasm_exceptions: bool,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenoPocSource {
+  path: String,
+  bytes: u64,
+  sha256: String,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenoPocArtifacts {
+  app: DenoPocArtifact,
+  runtime_eval_provider: DenoPocArtifact,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DenoPocArtifact {
+  role: String,
+  raw_path: String,
+  raw_sha256: String,
+  aot_sha256: String,
+  attestation_sha256: String,
+}
+
+/// An AOT payload read once and hash-checked against the replay lock. The
+/// bytes, rather than their path, are the only thing later handed to
+/// `Module::deserialize`, so replacing the file after validation is harmless.
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+#[derive(Debug)]
+struct VerifiedDenoPocArtifact {
+  bytes: Vec<u8>,
+  sha256: String,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+struct DenoPocReplayArtifacts {
+  app: VerifiedDenoPocArtifact,
+  runtime_eval_provider: VerifiedDenoPocArtifact,
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn is_lowercase_sha256(value: &str) -> bool {
+  value.len() == 64
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn is_full_lowercase_git_ref(value: &str) -> bool {
+  value.len() == 40
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn require_poc_sha256(field: &str, value: &str) -> Result<(), String> {
+  if is_lowercase_sha256(value) {
+    Ok(())
+  } else {
+    Err(format!(
+      "Deno POC manifest field {field} must be 64 lowercase hexadecimal SHA-256 digits"
+    ))
+  }
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn append_canonical_poc_json(
+  value: &serde_json::Value,
+  output: &mut String,
+) -> Result<(), String> {
+  match value {
+    serde_json::Value::Null => output.push_str("null"),
+    serde_json::Value::Bool(value) => {
+      output.push_str(if *value { "true" } else { "false" })
+    }
+    serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+    serde_json::Value::String(value) => {
+      output.push_str(&serde_json::to_string(value).map_err(|error| {
+        format!("serialize Deno POC contract string: {error}")
+      })?)
+    }
+    serde_json::Value::Array(values) => {
+      output.push('[');
+      for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+          output.push(',');
+        }
+        append_canonical_poc_json(value, output)?;
+      }
+      output.push(']');
+    }
+    serde_json::Value::Object(values) => {
+      output.push('{');
+      let mut entries = values.iter().collect::<Vec<_>>();
+      entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+      for (index, (key, value)) in entries.into_iter().enumerate() {
+        if index != 0 {
+          output.push(',');
+        }
+        output.push_str(&serde_json::to_string(key).map_err(|error| {
+          format!("serialize Deno POC contract object key: {error}")
+        })?);
+        output.push(':');
+        append_canonical_poc_json(value, output)?;
+      }
+      output.push('}');
+    }
+  }
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn poc_contract_sha256(value: &serde_json::Value) -> Result<String, String> {
+  let mut preimage = value.clone();
+  let object = preimage.as_object_mut().ok_or_else(|| {
+    "Deno POC manifest must be a JSON object to compute contract_sha256"
+      .to_string()
+  })?;
+  object.remove("contract_sha256");
+  let mut canonical_json = String::new();
+  append_canonical_poc_json(&preimage, &mut canonical_json)?;
+  Ok(bytes_digest(canonical_json.as_bytes()))
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn validate_poc_artifact(
+  artifact: &DenoPocArtifact,
+  expected_role: &str,
+  expected_raw_path: &str,
+) -> Result<(), String> {
+  if artifact.role != expected_role {
+    return Err(format!(
+      "Deno POC manifest artifact role must be {expected_role:?}, found {:?}",
+      artifact.role,
+    ));
+  }
+  if artifact.raw_path != expected_raw_path {
+    return Err(format!(
+      "Deno POC manifest {expected_role} raw_path must be {expected_raw_path:?}, found {:?}",
+      artifact.raw_path,
+    ));
+  }
+  require_poc_sha256(
+    &format!("artifacts.{expected_role}.raw_sha256"),
+    &artifact.raw_sha256,
+  )?;
+  require_poc_sha256(
+    &format!("artifacts.{expected_role}.aot_sha256"),
+    &artifact.aot_sha256,
+  )?;
+  require_poc_sha256(
+    &format!("artifacts.{expected_role}.attestation_sha256"),
+    &artifact.attestation_sha256,
+  )
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn expected_poc_attestation_sha256(
+  manifest: &DenoPocManifest,
+  artifact: &DenoPocArtifact,
+) -> Result<String, String> {
+  let attestation = serde_json::json!({
+    "schema_version": 1,
+    "role": artifact.role,
+    "wasmtime_version": manifest.wasmtime_version,
+    "target": {
+      "os": manifest.target.os,
+      "arch": manifest.target.arch,
+      "triple": manifest.target.triple,
+    },
+    "engine_config": {
+      "wasm_function_references": manifest.engine_config.wasm_function_references,
+      "wasm_gc": manifest.engine_config.wasm_gc,
+      "wasm_tail_call": manifest.engine_config.wasm_tail_call,
+      "wasm_exceptions": manifest.engine_config.wasm_exceptions,
+    },
+    "raw_sha256": artifact.raw_sha256,
+    "aot_sha256": artifact.aot_sha256,
+  });
+  let mut canonical_json = String::new();
+  append_canonical_poc_json(&attestation, &mut canonical_json)?;
+  Ok(bytes_digest(canonical_json.as_bytes()))
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn validate_poc_engine_config(
+  engine_config: &DenoPocEngineConfig,
+) -> Result<(), String> {
+  for (name, enabled) in [
+    (
+      "wasm_function_references",
+      engine_config.wasm_function_references,
+    ),
+    ("wasm_gc", engine_config.wasm_gc),
+    ("wasm_tail_call", engine_config.wasm_tail_call),
+    ("wasm_exceptions", engine_config.wasm_exceptions),
+  ] {
+    if !enabled {
+      return Err(format!(
+        "Deno POC manifest engine_config.{name} must be true"
+      ));
+    }
+  }
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn validate_deno_poc_manifest(
+  manifest: &DenoPocManifest,
+  computed_contract_sha256: &str,
+  compiled_v8x_ref: Option<&str>,
+  compiled_contract_sha256: Option<&str>,
+) -> Result<(), String> {
+  if manifest.schema_version != 1 {
+    return Err(format!(
+      "Deno POC manifest schema_version must be 1, found {}",
+      manifest.schema_version,
+    ));
+  }
+  require_poc_sha256("contract_sha256", &manifest.contract_sha256)?;
+  require_poc_sha256("raw_contract_sha256", &manifest.raw_contract_sha256)?;
+  if manifest.contract_sha256 != computed_contract_sha256 {
+    return Err(format!(
+      "Deno POC manifest contract_sha256 does not match its canonical lock preimage: expected {computed_contract_sha256}, found {}",
+      manifest.contract_sha256,
+    ));
+  }
+  if manifest.deno_ref != POC_EXPECTED_DENO_REF {
+    return Err(format!(
+      "Deno POC manifest deno_ref mismatch: expected {POC_EXPECTED_DENO_REF}, found {}",
+      manifest.deno_ref,
+    ));
+  }
+  if manifest.js2_ref != POC_EXPECTED_JS2_REF {
+    return Err(format!(
+      "Deno POC manifest js2_ref mismatch: expected {POC_EXPECTED_JS2_REF}, found {}",
+      manifest.js2_ref,
+    ));
+  }
+  let compiled_v8x_ref = compiled_v8x_ref.ok_or_else(|| {
+    "Deno POC replay was built without V8X_JS2WASM_POC_V8X_REF; rebuild with the exact v8x Git revision"
+      .to_string()
+  })?;
+  if !is_full_lowercase_git_ref(compiled_v8x_ref) {
+    return Err(
+      "compile-time V8X_JS2WASM_POC_V8X_REF must be a full lowercase Git revision"
+        .to_string(),
+    );
+  }
+  if !is_full_lowercase_git_ref(&manifest.v8x_ref) {
+    return Err(
+      "Deno POC manifest v8x_ref must be a full lowercase Git revision"
+        .to_string(),
+    );
+  }
+  if manifest.v8x_ref != compiled_v8x_ref {
+    return Err(format!(
+      "Deno POC manifest v8x_ref mismatch: crate was built for {compiled_v8x_ref}, manifest has {}",
+      manifest.v8x_ref,
+    ));
+  }
+  if manifest.wasmtime_version != POC_EXPECTED_WASMTIME_VERSION {
+    return Err(format!(
+      "Deno POC manifest wasmtime_version mismatch: expected {POC_EXPECTED_WASMTIME_VERSION}, found {}",
+      manifest.wasmtime_version,
+    ));
+  }
+  if manifest.target.os != POC_EXPECTED_TARGET_OS
+    || manifest.target.arch != POC_EXPECTED_TARGET_ARCH
+    || manifest.target.triple != POC_EXPECTED_TARGET_TRIPLE
+  {
+    return Err(format!(
+      "Deno POC manifest target mismatch: expected {}/{}/{}, found {}/{}/{}",
+      POC_EXPECTED_TARGET_OS,
+      POC_EXPECTED_TARGET_ARCH,
+      POC_EXPECTED_TARGET_TRIPLE,
+      manifest.target.os,
+      manifest.target.arch,
+      manifest.target.triple,
+    ));
+  }
+  validate_poc_engine_config(&manifest.engine_config)?;
+  if manifest.compile_options_sha256 != POC_EXPECTED_COMPILE_OPTIONS_SHA256 {
+    return Err(format!(
+      "Deno POC manifest compile_options_sha256 mismatch: expected {POC_EXPECTED_COMPILE_OPTIONS_SHA256}, found {}",
+      manifest.compile_options_sha256,
+    ));
+  }
+  for (index, (expected, actual)) in
+    POC_SOURCE_LOCK.iter().zip(&manifest.sources).enumerate()
+  {
+    let (expected_path, expected_bytes, expected_sha256) = *expected;
+    if actual.path != expected_path {
+      return Err(format!(
+        "Deno POC manifest sources[{index}].path mismatch: expected {expected_path:?}, found {:?}",
+        actual.path,
+      ));
+    }
+    if actual.bytes != expected_bytes {
+      return Err(format!(
+        "Deno POC manifest sources[{index}].bytes mismatch for {expected_path}: expected {expected_bytes}, found {}",
+        actual.bytes,
+      ));
+    }
+    if actual.sha256 != expected_sha256 {
+      return Err(format!(
+        "Deno POC manifest sources[{index}].sha256 mismatch for {expected_path}: expected {expected_sha256}, found {}",
+        actual.sha256,
+      ));
+    }
+  }
+  validate_poc_artifact(&manifest.artifacts.app, "app", "deno-core.wasm")?;
+  validate_poc_artifact(
+    &manifest.artifacts.runtime_eval_provider,
+    "runtime_eval_provider",
+    "runtime-eval-provider.wasm",
+  )?;
+  for artifact in [
+    &manifest.artifacts.app,
+    &manifest.artifacts.runtime_eval_provider,
+  ] {
+    let expected = expected_poc_attestation_sha256(manifest, artifact)?;
+    if artifact.attestation_sha256 != expected {
+      return Err(format!(
+        "Deno POC manifest {} attestation_sha256 mismatch: expected {expected}, found {}",
+        artifact.role, artifact.attestation_sha256,
+      ));
+    }
+  }
+  let compiled_contract_sha256 = compiled_contract_sha256.ok_or_else(|| {
+    "Deno POC replay was built without V8X_JS2WASM_POC_CONTRACT_SHA256; rebuild with the exact final replay contract digest"
+      .to_string()
+  })?;
+  if !is_lowercase_sha256(compiled_contract_sha256) {
+    return Err(
+      "compile-time V8X_JS2WASM_POC_CONTRACT_SHA256 must be 64 lowercase hexadecimal SHA-256 digits"
+        .to_string(),
+    );
+  }
+  if manifest.contract_sha256 != compiled_contract_sha256 {
+    return Err(format!(
+      "Deno POC manifest contract_sha256 mismatch: crate was built for {compiled_contract_sha256}, manifest has {}",
+      manifest.contract_sha256,
+    ));
+  }
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn parse_deno_poc_manifest_with_refs(
+  contents: &str,
+  compiled_v8x_ref: Option<&str>,
+  compiled_contract_sha256: Option<&str>,
+) -> Result<DenoPocManifest, String> {
+  let value: serde_json::Value = serde_json::from_str(contents)
+    .map_err(|error| format!("parse Deno POC manifest JSON: {error}"))?;
+  let computed_contract_sha256 = poc_contract_sha256(&value)?;
+  let manifest: DenoPocManifest = serde_json::from_value(value)
+    .map_err(|error| format!("parse Deno POC manifest JSON: {error}"))?;
+  validate_deno_poc_manifest(
+    &manifest,
+    &computed_contract_sha256,
+    compiled_v8x_ref,
+    compiled_contract_sha256,
+  )?;
+  Ok(manifest)
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn parse_deno_poc_manifest(contents: &str) -> Result<DenoPocManifest, String> {
+  parse_deno_poc_manifest_with_refs(contents, POC_V8X_REF, POC_CONTRACT_SHA256)
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn reject_poc_replay_compiler_envs<F>(mut is_set: F) -> Result<(), String>
+where
+  F: FnMut(&str) -> bool,
+{
+  if let Some(name) = POC_REPLAY_FORBIDDEN_ENV
+    .iter()
+    .copied()
+    .find(|name| is_set(name))
+  {
+    return Err(format!(
+      "Deno POC replay rejects compiler-related environment variable {name}"
+    ));
+  }
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn required_poc_replay_path(env: &str) -> Result<PathBuf, String> {
+  let value = std::env::var_os(env).ok_or_else(|| {
+    format!("Deno POC replay requires {env} to name a verified AOT artifact")
+  })?;
+  if value.is_empty() {
+    return Err(format!(
+      "Deno POC replay requires non-empty {env} to name a verified AOT artifact"
+    ));
+  }
+  Ok(PathBuf::from(value))
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn read_verified_poc_aot(
+  artifact: &Path,
+  expected_sha256: &str,
+  label: &str,
+) -> Result<VerifiedDenoPocArtifact, String> {
+  let bytes = fs::read(artifact).map_err(|error| {
+    format!(
+      "read verified Deno POC {label} AOT artifact {}: {error}",
+      artifact.display(),
+    )
+  })?;
+  if bytes.is_empty() {
+    return Err(format!(
+      "verified Deno POC {label} AOT artifact {} is empty",
+      artifact.display(),
+    ));
+  }
+  let actual_sha256 = bytes_digest(&bytes);
+  if actual_sha256 != expected_sha256 {
+    return Err(format!(
+      "Deno POC {label} AOT artifact hash mismatch for {}: expected {expected_sha256}, found {actual_sha256}",
+      artifact.display(),
+    ));
+  }
+  Ok(VerifiedDenoPocArtifact {
+    bytes,
+    sha256: actual_sha256,
+  })
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+impl DenoPocReplayArtifacts {
+  fn from_env() -> Result<Self, String> {
+    reject_poc_replay_compiler_envs(|name| std::env::var_os(name).is_some())?;
+    let manifest_path =
+      std::env::var_os(DENO_POC_MANIFEST_ENV).ok_or_else(|| {
+        format!("Deno POC replay requires {DENO_POC_MANIFEST_ENV}")
+      })?;
+    if manifest_path.is_empty() {
+      return Err(format!(
+        "Deno POC replay requires non-empty {DENO_POC_MANIFEST_ENV}"
+      ));
+    }
+    let manifest_path = PathBuf::from(manifest_path);
+    let manifest_contents =
+      fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+          "read Deno POC manifest {}: {error}",
+          manifest_path.display(),
+        )
+      })?;
+    let manifest = parse_deno_poc_manifest(&manifest_contents)?;
+    let app_path = required_poc_replay_path(DENO_POC_APP_AOT_MODULE_ENV)?;
+    let provider_path =
+      required_poc_replay_path(DENO_POC_PROVIDER_AOT_MODULE_ENV)?;
+    // Read and verify both AOT payloads before any caller can deserialize one
+    // of them. Replay never maps a path through `deserialize_file`.
+    let app = read_verified_poc_aot(
+      &app_path,
+      &manifest.artifacts.app.aot_sha256,
+      "application",
+    )?;
+    let runtime_eval_provider = read_verified_poc_aot(
+      &provider_path,
+      &manifest.artifacts.runtime_eval_provider.aot_sha256,
+      "runtime-eval provider",
+    )?;
+    Ok(Self {
+      app,
+      runtime_eval_provider,
+    })
+  }
+}
 
 // The exact bootstrap fixture is tiny. Keep malformed or adversarial callers
 // from asking the embedding process for an unbounded transaction allocation;
@@ -643,11 +1275,17 @@ fn invoke_prelinked_deno_test_fn(
 
 #[derive(Hash, PartialEq, Eq)]
 enum ModuleCacheKey {
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   TrustedFile(PathBuf),
   GraphBoundFile {
     artifact: PathBuf,
     graph_sha256: String,
     artifact_sha256: String,
+  },
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  DenoPocReplay {
+    role: &'static str,
+    aot_sha256: String,
   },
   #[cfg(feature = "js2wasm_runtime_compile")]
   DevelopmentBytes(Vec<u8>),
@@ -664,6 +1302,8 @@ struct SharedDenoRuntime {
   linker: Linker<DenoHostState>,
   modules: Mutex<HashMap<ModuleCacheKey, PreparedModule>>,
   runtime_eval_provider: Mutex<Option<Module>>,
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  poc_replay: DenoPocReplayArtifacts,
   module_loads: AtomicUsize,
   instantiations: AtomicUsize,
   runtime_eval_provider_loads: AtomicUsize,
@@ -691,6 +1331,12 @@ pub struct Js2WasmRuntimeStats {
 
 impl SharedDenoRuntime {
   fn new() -> Result<Self, String> {
+    // Lock and read both executable replay artifacts before constructing any
+    // Wasmtime Module. This deliberately happens before the shared runtime is
+    // published through OnceLock, so every replay consumer sees the same
+    // verified byte buffers.
+    #[cfg(feature = "js2wasm_deno_poc_replay")]
+    let poc_replay = DenoPocReplayArtifacts::from_env()?;
     let mut config = Config::new();
     config
       .wasm_function_references(true)
@@ -827,6 +1473,8 @@ impl SharedDenoRuntime {
       linker,
       modules: Mutex::new(HashMap::new()),
       runtime_eval_provider: Mutex::new(None),
+      #[cfg(feature = "js2wasm_deno_poc_replay")]
+      poc_replay,
       module_loads: AtomicUsize::new(0),
       instantiations: AtomicUsize::new(0),
       runtime_eval_provider_loads: AtomicUsize::new(0),
@@ -838,6 +1486,7 @@ impl SharedDenoRuntime {
     })
   }
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   fn precompiled_file(
     &self,
     artifact: &Path,
@@ -923,6 +1572,38 @@ impl SharedDenoRuntime {
           "load trusted precompiled js2wasm artifact {}: {error:#}",
           artifact.display()
         )
+      })?;
+    self.trace_imports(&module);
+    let prepared = self.prepare_module(&module)?;
+    modules.insert(key, prepared.clone());
+    self.module_loads.fetch_add(1, Ordering::Relaxed);
+    Ok(prepared)
+  }
+
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  fn precompiled_deno_poc_replay(
+    &self,
+    role: &'static str,
+    artifact: &VerifiedDenoPocArtifact,
+  ) -> Result<PreparedModule, String> {
+    let key = ModuleCacheKey::DenoPocReplay {
+      role,
+      aot_sha256: artifact.sha256.clone(),
+    };
+    let mut modules = self
+      .modules
+      .lock()
+      .map_err(|_| "lock shared js2wasm module cache".to_string())?;
+    if let Some(module) = modules.get(&key) {
+      return Ok(module.clone());
+    }
+
+    // The bytes were read and hash-checked from the replay lock before this
+    // runtime existed. Do not replace this with deserialize_file: native AOT
+    // mappings would reopen a mutable path after the verifier has run.
+    let module = unsafe { Module::deserialize(&self.engine, &artifact.bytes) }
+      .map_err(|error| {
+        format!("load verified Deno POC {role} AOT artifact: {error:#}")
       })?;
     self.trace_imports(&module);
     let prepared = self.prepare_module(&module)?;
@@ -1037,7 +1718,7 @@ impl SharedDenoRuntime {
       .exports()
       .map(|export| export.name().to_string())
       .collect();
-    let missing: Vec<_> = RUNTIME_EVAL_IMPORTS
+    let missing: Vec<_> = RUNTIME_EVAL_PROVIDER_EXPORTS
       .iter()
       .copied()
       .filter(|name| !exports.contains(*name))
@@ -1079,14 +1760,14 @@ impl SharedDenoRuntime {
       && bytes_digest(&bytes) == bound_artifact
       && let Ok(module) = unsafe { Module::deserialize(&self.engine, &bytes) }
     {
-      persist_runtime_eval_provider_artifact(&bytes)?;
+      persist_runtime_eval_provider_artifact(&wasm, &bytes)?;
       self.cache_hits.fetch_add(1, Ordering::Relaxed);
       return Ok(module);
     }
 
     let bytes = self.precompile(&wasm)?;
     publish_bound_artifact(&artifact, &bytes, &source_digest)?;
-    persist_runtime_eval_provider_artifact(&bytes)?;
+    persist_runtime_eval_provider_artifact(&wasm, &bytes)?;
     unsafe { Module::deserialize(&self.engine, &bytes) }.map_err(|error| {
       format!(
         "load cached js2wasm runtime-eval provider {}: {error:#}",
@@ -1104,6 +1785,24 @@ impl SharedDenoRuntime {
       return Ok(module.clone());
     }
 
+    #[cfg(feature = "js2wasm_deno_poc_replay")]
+    let module = unsafe {
+      // `SharedDenoRuntime::new` has already read and verified this exact
+      // payload from the manifest-selected provider path. Keep the provider
+      // in memory through deserialization so replay never reopens an AOT
+      // pathname after validation.
+      Module::deserialize(
+        &self.engine,
+        &self.poc_replay.runtime_eval_provider.bytes,
+      )
+    }
+    .map_err(|error| {
+      format!(
+        "load verified Deno POC runtime-eval provider AOT artifact: {error:#}"
+      )
+    })?;
+
+    #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
     let module = if let Some(path) =
       std::env::var_os(RUNTIME_EVAL_AOT_MODULE_ENV)
     {
@@ -1219,7 +1918,10 @@ pub fn js2wasm_verify_graph_binding_for_test(
 }
 
 /// Diagnostic entry point for the pinned Deno-core bootstrap integration.
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(all(
+  feature = "js2wasm_runtime_compile",
+  not(feature = "js2wasm_deno_poc_replay"),
+))]
 #[doc(hidden)]
 pub fn js2wasm_bootstrap_raw_module_for_test(
   artifact: &Path,
@@ -1237,7 +1939,7 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
     shared.precompiled_file(Path::new(&precompiled))?
   } else {
     let precompiled = shared.precompile(&wasm)?;
-    persist_precompiled_deno_core_artifact(&precompiled)?;
+    persist_precompiled_deno_core_artifact(&wasm, &precompiled)?;
     shared.development_bytes(&precompiled)?
   };
   let cwd = std::env::current_dir()
@@ -1247,12 +1949,57 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
   Ok(())
 }
 
+/// Precompile and attest only the pinned Deno application artifact.
+///
+/// The POC runner invokes this in its own process so the compiler's memory is
+/// returned to the OS before the much larger runtime-eval provider is built.
+#[cfg(feature = "js2wasm_deno_poc")]
+#[doc(hidden)]
+pub fn js2wasm_precompile_deno_core_for_test(
+  artifact: &Path,
+) -> Result<(), String> {
+  let wasm = fs::read(artifact).map_err(|error| {
+    format!(
+      "read exact Deno core artifact {}: {error}",
+      artifact.display()
+    )
+  })?;
+  let precompiled = shared_runtime()?.precompile(&wasm)?;
+  persist_precompiled_deno_core_artifact(&wasm, &precompiled)
+}
+
+/// Precompile and attest only the pinned runtime-eval provider artifact.
+///
+/// Keeping this out of the application validation process bounds peak memory:
+/// no application module or store remains resident while Cranelift processes
+/// the provider's large closed interpreter graph.
+#[cfg(feature = "js2wasm_deno_poc")]
+#[doc(hidden)]
+pub fn js2wasm_precompile_runtime_eval_provider_for_test(
+  artifact: &Path,
+) -> Result<(), String> {
+  let wasm = fs::read(artifact).map_err(|error| {
+    format!(
+      "read exact js2wasm runtime-eval provider {}: {error}",
+      artifact.display()
+    )
+  })?;
+  let precompiled = shared_runtime()?.precompile(&wasm)?;
+  persist_runtime_eval_provider_artifact(&wasm, &precompiled)
+}
+
 /// Instantiate the prelinked core-bootstrap transaction used by the
 /// experimental classic-script bridge. Production uses a trusted artifact;
 /// development builds may precompile the exact raw module in-process.
 pub(crate) fn deno_core_bootstrap_runtime_from_env()
 -> Result<DenoRuntime, String> {
   let shared = shared_runtime()?;
+
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  let prepared =
+    shared.precompiled_deno_poc_replay("app", &shared.poc_replay.app)?;
+
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   let prepared = if let Some(artifact) =
     std::env::var_os("V8X_JS2WASM_DENO_CORE_AOT_MODULE")
   {
@@ -1271,7 +2018,7 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env()
         )
       })?;
       let precompiled = shared.precompile(&wasm)?;
-      persist_precompiled_deno_core_artifact(&precompiled)?;
+      persist_precompiled_deno_core_artifact(&wasm, &precompiled)?;
       shared.development_bytes(&precompiled)?
     }
     #[cfg(not(feature = "js2wasm_runtime_compile"))]
@@ -1290,17 +2037,28 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env()
 
 #[cfg(feature = "js2wasm_runtime_compile")]
 fn persist_precompiled_deno_core_artifact(
+  raw_wasm: &[u8],
   artifact: &[u8],
 ) -> Result<(), String> {
-  let Some(output) = std::env::var_os(DENO_CORE_AOT_OUTPUT_ENV) else {
-    return Ok(());
-  };
-  fs::write(&output, artifact).map_err(|error| {
-    format!(
-      "write precompiled Deno core artifact {}: {error}",
-      Path::new(&output).display()
-    )
-  })
+  #[cfg(feature = "js2wasm_deno_poc")]
+  {
+    return persist_deno_poc_precompile_pair(
+      DENO_CORE_AOT_OUTPUT_ENV,
+      DENO_CORE_AOT_ATTESTATION_ENV,
+      "app",
+      raw_wasm,
+      artifact,
+    );
+  }
+  #[cfg(not(feature = "js2wasm_deno_poc"))]
+  let _ = raw_wasm;
+  #[cfg(not(feature = "js2wasm_deno_poc"))]
+  {
+    let Some(output) = std::env::var_os(DENO_CORE_AOT_OUTPUT_ENV) else {
+      return Ok(());
+    };
+    atomic_write(Path::new(&output), artifact)
+  }
 }
 
 /// One private Wasmtime store and instance owned by a v8x module handle.
@@ -1559,10 +2317,17 @@ impl DenoRuntime {
   }
 
   fn verify_deno_core_bootstrap_probe(&mut self) -> Result<(), String> {
-    let Some(probe) = self
+    let probe = self
       .instance
-      .get_func(&mut self.store, DENO_CORE_BOOTSTRAP_PROBE)
-    else {
+      .get_func(&mut self.store, DENO_CORE_BOOTSTRAP_PROBE);
+    #[cfg(feature = "js2wasm_deno_poc_replay")]
+    let probe = probe.ok_or_else(|| {
+      format!(
+        "closed-world Deno replay artifact has no required {DENO_CORE_BOOTSTRAP_PROBE} export"
+      )
+    })?;
+    #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+    let Some(probe) = probe else {
       return Ok(());
     };
     let value = probe
@@ -1603,6 +2368,7 @@ impl DenoRuntime {
     Ok(())
   }
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   fn call_optional_number_export(
     &mut self,
     name: &str,
@@ -1691,6 +2457,7 @@ impl DenoRuntime {
     Ok(())
   }
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   fn advance_deno_core_stage(
     &mut self,
     export: &str,
@@ -1720,10 +2487,12 @@ impl DenoRuntime {
     Ok(true)
   }
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   pub(crate) fn advance_deno_core_wrappers(&mut self) -> Result<bool, String> {
     self.advance_deno_core_stage(DENO_CORE_WRAPPERS_STAGE, 42.0, 1.0)
   }
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   pub(crate) fn advance_deno_core_module(&mut self) -> Result<(), String> {
     if self.advance_deno_core_stage(DENO_CORE_MODULE_STAGE, 43.0, 2.0)? {
       Ok(())
@@ -1735,6 +2504,7 @@ impl DenoRuntime {
   }
 
   #[allow(dead_code)]
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   pub(crate) fn advance_deno_core_usage(&mut self) -> Result<(), String> {
     if self.advance_deno_core_stage(DENO_CORE_USAGE_STAGE, 44.0, 3.0)? {
       Ok(())
@@ -1922,6 +2692,69 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
   }
 }
 
+#[cfg(feature = "js2wasm_deno_poc")]
+fn persist_deno_poc_precompile_pair(
+  artifact_output_env: &str,
+  attestation_output_env: &str,
+  role: &str,
+  raw_wasm: &[u8],
+  artifact: &[u8],
+) -> Result<(), String> {
+  let artifact_output = std::env::var_os(artifact_output_env);
+  let attestation_output = std::env::var_os(attestation_output_env);
+  let (Some(artifact_output), Some(attestation_output)) =
+    (artifact_output, attestation_output)
+  else {
+    if std::env::var_os(artifact_output_env).is_none()
+      && std::env::var_os(attestation_output_env).is_none()
+    {
+      return Ok(());
+    }
+    return Err(format!(
+      "trusted Deno POC precompile requires {artifact_output_env} and \
+       {attestation_output_env} to be set together"
+    ));
+  };
+  let artifact_output = Path::new(&artifact_output);
+  let attestation_output = Path::new(&attestation_output);
+  if artifact_output == attestation_output {
+    return Err(format!(
+      "trusted Deno POC artifact and attestation paths must differ: {}",
+      artifact_output.display(),
+    ));
+  }
+
+  let attestation = serde_json::json!({
+    "schema_version": 1,
+    "role": role,
+    "wasmtime_version": "47.0.3",
+    "target": {
+      "os": std::env::consts::OS,
+      "arch": std::env::consts::ARCH,
+      "triple": env!("V8X_BUILD_TARGET_TRIPLE"),
+    },
+    "engine_config": {
+      "wasm_function_references": true,
+      "wasm_gc": true,
+      "wasm_tail_call": true,
+      "wasm_exceptions": true,
+    },
+    "raw_sha256": bytes_digest(raw_wasm),
+    "aot_sha256": bytes_digest(artifact),
+  });
+  let mut attestation_bytes =
+    serde_json::to_vec_pretty(&attestation).map_err(|error| {
+      format!("serialize Deno POC precompile attestation: {error}")
+    })?;
+  attestation_bytes.push(b'\n');
+
+  // Publish the native bytes first and the binding record second. A crash can
+  // leave an untrusted artifact without an attestation, but never a completed
+  // attestation that names bytes which have not yet been written.
+  atomic_write(artifact_output, artifact)?;
+  atomic_write(attestation_output, &attestation_bytes)
+}
+
 #[cfg(feature = "js2wasm_runtime_compile")]
 fn publish_graph_artifact(
   artifact: &Path,
@@ -1947,11 +2780,29 @@ fn publish_bound_artifact(
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
-fn persist_runtime_eval_provider_artifact(bytes: &[u8]) -> Result<(), String> {
-  let Some(output) = std::env::var_os(RUNTIME_EVAL_AOT_OUTPUT_ENV) else {
-    return Ok(());
-  };
-  atomic_write(Path::new(&output), bytes)
+fn persist_runtime_eval_provider_artifact(
+  raw_wasm: &[u8],
+  bytes: &[u8],
+) -> Result<(), String> {
+  #[cfg(feature = "js2wasm_deno_poc")]
+  {
+    return persist_deno_poc_precompile_pair(
+      RUNTIME_EVAL_AOT_OUTPUT_ENV,
+      RUNTIME_EVAL_AOT_ATTESTATION_ENV,
+      "runtime_eval_provider",
+      raw_wasm,
+      bytes,
+    );
+  }
+  #[cfg(not(feature = "js2wasm_deno_poc"))]
+  let _ = raw_wasm;
+  #[cfg(not(feature = "js2wasm_deno_poc"))]
+  {
+    let Some(output) = std::env::var_os(RUNTIME_EVAL_AOT_OUTPUT_ENV) else {
+      return Ok(());
+    };
+    atomic_write(Path::new(&output), bytes)
+  }
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -2101,5 +2952,473 @@ impl TempDir {
 impl Drop for TempDir {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.path);
+  }
+}
+
+#[cfg(all(test, feature = "js2wasm_deno_poc_replay"))]
+mod deno_poc_replay_tests {
+  use super::*;
+
+  const TEST_V8X_REF: &str = "0123456789abcdef0123456789abcdef01234567";
+
+  fn source_entries() -> String {
+    POC_SOURCE_LOCK
+      .iter()
+      .map(|(path, bytes, sha256)| {
+        format!(r#"{{"path":"{path}","bytes":{bytes},"sha256":"{sha256}"}}"#)
+      })
+      .collect::<Vec<_>>()
+      .join(",")
+  }
+
+  fn valid_manifest(
+    app_aot_sha256: &str,
+    provider_aot_sha256: &str,
+  ) -> (String, String) {
+    let raw_contract_sha256 =
+      bytes_digest(b"test Deno POC raw artifact contract");
+    let app_raw_sha256 = bytes_digest(b"test app raw Wasm provenance");
+    let provider_raw_sha256 =
+      bytes_digest(b"test provider raw Wasm provenance");
+    let attestation_sha256 =
+      |role: &str, raw_sha256: &str, aot_sha256: &str| {
+        let value = serde_json::json!({
+          "schema_version": 1,
+          "role": role,
+          "wasmtime_version": POC_EXPECTED_WASMTIME_VERSION,
+          "target": {
+            "os": POC_EXPECTED_TARGET_OS,
+            "arch": POC_EXPECTED_TARGET_ARCH,
+            "triple": POC_EXPECTED_TARGET_TRIPLE,
+          },
+          "engine_config": {
+            "wasm_function_references": true,
+            "wasm_gc": true,
+            "wasm_tail_call": true,
+            "wasm_exceptions": true,
+          },
+          "raw_sha256": raw_sha256,
+          "aot_sha256": aot_sha256,
+        });
+        let mut canonical = String::new();
+        append_canonical_poc_json(&value, &mut canonical)
+          .expect("canonicalize test precompile attestation");
+        bytes_digest(canonical.as_bytes())
+      };
+    let app_attestation_sha256 =
+      attestation_sha256("app", &app_raw_sha256, app_aot_sha256);
+    let provider_attestation_sha256 = attestation_sha256(
+      "runtime_eval_provider",
+      &provider_raw_sha256,
+      provider_aot_sha256,
+    );
+    let mut value: serde_json::Value = serde_json::from_str(&format!(
+      r#"{{"schema_version":1,"raw_contract_sha256":"{raw_contract_sha256}","deno_ref":"{POC_EXPECTED_DENO_REF}","js2_ref":"{POC_EXPECTED_JS2_REF}","v8x_ref":"{TEST_V8X_REF}","wasmtime_version":"{POC_EXPECTED_WASMTIME_VERSION}","target":{{"os":"{POC_EXPECTED_TARGET_OS}","arch":"{POC_EXPECTED_TARGET_ARCH}","triple":"{POC_EXPECTED_TARGET_TRIPLE}"}},"engine_config":{{"wasm_function_references":true,"wasm_gc":true,"wasm_tail_call":true,"wasm_exceptions":true}},"compile_options_sha256":"{POC_EXPECTED_COMPILE_OPTIONS_SHA256}","sources":[{}],"artifacts":{{"app":{{"role":"app","raw_path":"deno-core.wasm","raw_sha256":"{app_raw_sha256}","aot_sha256":"{app_aot_sha256}","attestation_sha256":"{app_attestation_sha256}"}},"runtime_eval_provider":{{"role":"runtime_eval_provider","raw_path":"runtime-eval-provider.wasm","raw_sha256":"{provider_raw_sha256}","aot_sha256":"{provider_aot_sha256}","attestation_sha256":"{provider_attestation_sha256}"}}}}}}"#,
+      source_entries(),
+    ))
+    .expect("construct valid Deno POC replay lock");
+    let contract_sha256 =
+      poc_contract_sha256(&value).expect("hash valid Deno POC replay lock");
+    value
+      .as_object_mut()
+      .expect("replay lock is an object")
+      .insert(
+        "contract_sha256".to_string(),
+        serde_json::Value::String(contract_sha256.clone()),
+      );
+    (
+      serde_json::to_string(&value)
+        .expect("serialize valid Deno POC replay lock"),
+      contract_sha256,
+    )
+  }
+
+  fn relock_manifest(mut manifest: String) -> String {
+    let mut value: serde_json::Value =
+      serde_json::from_str(&manifest).expect("parse test Deno POC lock");
+    let contract_sha256 =
+      poc_contract_sha256(&value).expect("hash test Deno POC lock");
+    value
+      .as_object_mut()
+      .expect("replay lock is an object")
+      .insert(
+        "contract_sha256".to_string(),
+        serde_json::Value::String(contract_sha256),
+      );
+    manifest = serde_json::to_string(&value).expect("serialize test lock");
+    manifest
+  }
+
+  fn parse_test_manifest(
+    contents: &str,
+    compiled_v8x_ref: Option<&str>,
+    compiled_contract_sha256: Option<&str>,
+  ) -> Result<DenoPocManifest, String> {
+    parse_deno_poc_manifest_with_refs(
+      contents,
+      compiled_v8x_ref,
+      compiled_contract_sha256,
+    )
+  }
+
+  fn temporary_path(label: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    std::env::temp_dir().join(format!(
+      "v8x-deno-poc-replay-{label}-{}-{nonce}",
+      std::process::id(),
+    ))
+  }
+
+  #[test]
+  fn parses_the_complete_pinned_manifest_without_raw_wasm_files() {
+    let (manifest, contract_sha256) = valid_manifest(
+      &bytes_digest(b"application AOT"),
+      &bytes_digest(b"provider AOT"),
+    );
+    let parsed = parse_test_manifest(
+      &manifest,
+      Some(TEST_V8X_REF),
+      Some(&contract_sha256),
+    )
+    .expect("parse complete replay lock");
+    assert_eq!(parsed.sources.len(), 6);
+    assert!(is_lowercase_sha256(&parsed.contract_sha256));
+    assert!(is_lowercase_sha256(&parsed.raw_contract_sha256));
+    assert_eq!(parsed.artifacts.app.raw_path, "deno-core.wasm");
+    assert!(is_lowercase_sha256(
+      &parsed.artifacts.app.attestation_sha256
+    ));
+    assert_eq!(
+      parsed.artifacts.runtime_eval_provider.raw_path,
+      "runtime-eval-provider.wasm"
+    );
+  }
+
+  #[test]
+  fn rejects_unknown_or_mismatched_pinned_manifest_fields() {
+    let (manifest, contract_sha256) = valid_manifest(
+      &bytes_digest(b"application AOT"),
+      &bytes_digest(b"provider AOT"),
+    );
+    let unknown = manifest.replacen(
+      "\"schema_version\":1",
+      "\"schema_version\":1,\"unexpected\":true",
+      1,
+    );
+    assert!(
+      parse_test_manifest(&unknown, Some(TEST_V8X_REF), Some(&contract_sha256))
+        .unwrap_err()
+        .contains("unknown field")
+    );
+    assert!(
+      parse_test_manifest(
+        r#"{"schema_version":1}"#,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("missing field")
+    );
+    let mut missing_role_value: serde_json::Value =
+      serde_json::from_str(&manifest).expect("parse test Deno POC lock");
+    missing_role_value["artifacts"]["app"]
+      .as_object_mut()
+      .expect("application artifact is an object")
+      .remove("role");
+    let missing_role = serde_json::to_string(&missing_role_value)
+      .expect("serialize test Deno POC lock");
+    assert!(
+      parse_test_manifest(
+        &missing_role,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("missing field `role`")
+    );
+    let wrong_role = relock_manifest(manifest.replacen(
+      "\"role\":\"app\"",
+      "\"role\":\"provider\"",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &wrong_role,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256)
+      )
+      .unwrap_err()
+      .contains("artifact role must be \"app\"")
+    );
+
+    let invalid_attestation = relock_manifest(manifest.replacen(
+      &format!(
+        "\"attestation_sha256\":\"{}\"",
+        serde_json::from_str::<serde_json::Value>(&manifest).unwrap()
+          ["artifacts"]["app"]["attestation_sha256"]
+          .as_str()
+          .unwrap(),
+      ),
+      &format!("\"attestation_sha256\":\"{}\"", "0".repeat(64),),
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &invalid_attestation,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("attestation_sha256 mismatch")
+    );
+
+    let wrong_source = relock_manifest(manifest.replacen(
+      "5a2dfbdc4bb81412575d035901a11788001c7e0110e3f736d16289891af44a52",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &wrong_source,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256)
+      )
+      .unwrap_err()
+      .contains("sources[0].sha256 mismatch")
+    );
+
+    let wrong_bytes =
+      relock_manifest(manifest.replacen("\"bytes\":19076", "\"bytes\":1", 1));
+    assert!(
+      parse_test_manifest(
+        &wrong_bytes,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256)
+      )
+      .unwrap_err()
+      .contains("sources[0].bytes mismatch")
+    );
+
+    let wrong_options = relock_manifest(manifest.replacen(
+      POC_EXPECTED_COMPILE_OPTIONS_SHA256,
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &wrong_options,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256)
+      )
+      .unwrap_err()
+      .contains("compile_options_sha256 mismatch")
+    );
+
+    let invalid_contract_digest = manifest.replacen(
+      "\"contract_sha256\":\"",
+      "\"contract_sha256\":\"not-a-digest-",
+      1,
+    );
+    assert!(
+      parse_test_manifest(
+        &invalid_contract_digest,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("field contract_sha256")
+    );
+
+    let mut missing_raw_contract_value: serde_json::Value =
+      serde_json::from_str(&manifest).expect("parse test Deno POC lock");
+    missing_raw_contract_value
+      .as_object_mut()
+      .expect("replay lock is an object")
+      .remove("raw_contract_sha256");
+    let missing_raw_contract_digest =
+      serde_json::to_string(&missing_raw_contract_value)
+        .expect("serialize test Deno POC lock");
+    assert!(
+      parse_test_manifest(
+        &missing_raw_contract_digest,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("missing field `raw_contract_sha256`")
+    );
+    let invalid_raw_contract_digest = manifest.replacen(
+      "\"raw_contract_sha256\":\"",
+      "\"raw_contract_sha256\":\"not-a-digest-",
+      1,
+    );
+    assert!(
+      parse_test_manifest(
+        &invalid_raw_contract_digest,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("field raw_contract_sha256")
+    );
+
+    let wrong_target = relock_manifest(manifest.replacen(
+      POC_EXPECTED_TARGET_TRIPLE,
+      "x86_64-unknown-linux-musl",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &wrong_target,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256)
+      )
+      .unwrap_err()
+      .contains("target mismatch")
+    );
+
+    let disabled_engine_flag = relock_manifest(manifest.replacen(
+      "\"wasm_gc\":true",
+      "\"wasm_gc\":false",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &disabled_engine_flag,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("engine_config.wasm_gc must be true")
+    );
+
+    let unknown_engine_flag = manifest.replacen(
+      "\"wasm_exceptions\":true",
+      "\"wasm_exceptions\":true,\"unexpected\":true",
+      1,
+    );
+    assert!(
+      parse_test_manifest(
+        &unknown_engine_flag,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("unknown field")
+    );
+
+    assert!(
+      parse_test_manifest(&manifest, None, Some(&contract_sha256))
+        .unwrap_err()
+        .contains("built without V8X_JS2WASM_POC_V8X_REF")
+    );
+    assert!(
+      parse_test_manifest(&manifest, Some(TEST_V8X_REF), None)
+        .unwrap_err()
+        .contains("built without V8X_JS2WASM_POC_CONTRACT_SHA256")
+    );
+    assert!(
+      parse_test_manifest(&manifest, Some(TEST_V8X_REF), Some("not-a-digest"))
+        .unwrap_err()
+        .contains("compile-time V8X_JS2WASM_POC_CONTRACT_SHA256")
+    );
+    let other_contract_sha256 =
+      bytes_digest(b"another valid replay lock digest");
+    assert!(
+      parse_test_manifest(
+        &manifest,
+        Some(TEST_V8X_REF),
+        Some(&other_contract_sha256),
+      )
+      .unwrap_err()
+      .contains("crate was built for")
+    );
+  }
+
+  #[test]
+  fn rejects_paired_manifest_and_aot_substitution_before_aot_read() {
+    let (original_manifest, original_contract_sha256) = valid_manifest(
+      &bytes_digest(b"original application AOT"),
+      &bytes_digest(b"provider AOT"),
+    );
+    let replacement_aot = b"replacement application AOT";
+    let replacement_aot_sha256 = bytes_digest(replacement_aot);
+    let (replacement_manifest, replacement_contract_sha256) =
+      valid_manifest(&replacement_aot_sha256, &bytes_digest(b"provider AOT"));
+    assert_ne!(original_contract_sha256, replacement_contract_sha256);
+    let paired_substitution_manifest = replacement_manifest.replacen(
+      &replacement_contract_sha256,
+      &original_contract_sha256,
+      1,
+    );
+
+    // The pair's per-artifact hash agrees, but preserving the original compiled
+    // contract digest makes the lock's canonical preimage mismatch. This check
+    // runs before the replay path opens either AOT artifact.
+    assert!(
+      parse_test_manifest(
+        &paired_substitution_manifest,
+        Some(TEST_V8X_REF),
+        Some(&original_contract_sha256),
+      )
+      .unwrap_err()
+      .contains("canonical lock preimage")
+    );
+    let artifact = temporary_path("paired-substitution");
+    fs::write(&artifact, replacement_aot).unwrap();
+    read_verified_poc_aot(&artifact, &replacement_aot_sha256, "application")
+      .expect("substituted AOT agrees with substituted manifest hash");
+    fs::remove_file(&artifact).unwrap();
+    assert!(
+      parse_test_manifest(
+        &original_manifest,
+        Some(TEST_V8X_REF),
+        Some(&original_contract_sha256),
+      )
+      .is_ok()
+    );
+  }
+
+  #[test]
+  fn verifies_aot_bytes_and_rejects_tampering_or_missing_artifacts() {
+    let artifact = temporary_path("aot");
+    let expected = bytes_digest(b"verified AOT bytes");
+    fs::write(&artifact, b"verified AOT bytes").unwrap();
+    let verified =
+      read_verified_poc_aot(&artifact, &expected, "application").unwrap();
+    assert_eq!(verified.bytes, b"verified AOT bytes");
+
+    fs::write(&artifact, b"").unwrap();
+    assert!(
+      read_verified_poc_aot(&artifact, &expected, "application")
+        .unwrap_err()
+        .contains("is empty")
+    );
+
+    fs::write(&artifact, b"tampered AOT bytes").unwrap();
+    assert!(
+      read_verified_poc_aot(&artifact, &expected, "application")
+        .unwrap_err()
+        .contains("hash mismatch")
+    );
+    fs::remove_file(&artifact).unwrap();
+
+    assert!(
+      read_verified_poc_aot(&artifact, &expected, "application")
+        .unwrap_err()
+        .contains("read verified Deno POC application AOT artifact")
+    );
+  }
+
+  #[test]
+  fn rejects_compiler_configuration_in_replay() {
+    let error =
+      reject_poc_replay_compiler_envs(|name| name == "V8X_JS2WASM_COMPILER")
+        .unwrap_err();
+    assert!(error.contains("V8X_JS2WASM_COMPILER"));
+    assert!(reject_poc_replay_compiler_envs(|_| false).is_ok());
   }
 }

@@ -1110,6 +1110,26 @@ fn links_runtime_eval_provider_with_shared_realm_state() {
 
 #[test]
 #[cfg(feature = "js2wasm_deno_poc")]
+fn precompiles_exact_deno_core_artifact() {
+  let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM").expect(
+    "set V8X_JS2WASM_DENO_CORE_WASM to the raw pinned bootstrap module",
+  );
+  v8::js2wasm_precompile_deno_core_for_test(Path::new(&artifact))
+    .expect("precompile and attest exact Deno core artifact");
+}
+
+#[test]
+#[cfg(feature = "js2wasm_deno_poc")]
+fn precompiles_exact_runtime_eval_provider_artifact() {
+  let artifact = std::env::var_os("V8X_JS2WASM_RUNTIME_EVAL_WASM").expect(
+    "set V8X_JS2WASM_RUNTIME_EVAL_WASM to the raw interpreter provider",
+  );
+  v8::js2wasm_precompile_runtime_eval_provider_for_test(Path::new(&artifact))
+    .expect("precompile and attest exact runtime-eval provider artifact");
+}
+
+#[test]
+#[cfg(feature = "js2wasm_deno_poc")]
 fn boots_exact_deno_core_artifact_in_two_wasmtime_stores() {
   let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM").expect(
     "set V8X_JS2WASM_DENO_CORE_WASM to the raw pinned bootstrap module",

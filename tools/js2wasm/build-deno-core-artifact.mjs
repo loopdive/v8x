@@ -1,47 +1,117 @@
 #!/usr/bin/env node
 // Copyright 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
+/**
+ * Build the raw inputs for the bounded Deno/js2wasm POC.
+ *
+ * This deliberately does not precompile Wasm. Native Wasmtime artifacts are
+ * target-specific executable code and are produced in the separate trusted
+ * packaging phase. The output here is the exact, graph-bound raw Wasm plus a
+ * provenance record that the packaging/replay steps validate.
+ */
+
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
-const V8X_ROOT = resolve(TOOL_DIR, "../..");
-const EXPECTED_DENO_REF = readFileSync(join(V8X_ROOT, "tools/deno/DENO_REF"), "utf8").trim();
+const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_HASHES = new Map([
-  ["00_primordials.js", 0x49d0171d7d2c3f4dn],
-  ["00_infra.js", 0xe1a2673875ca364cn],
-  ["02_timers.js", 0xcbd26ee0c68dcb66n],
-  ["01_core.js", 0xd2f9d9c62c037a70n],
-  ["mod.js", 0xcb8eac5051e421a4n],
-  ["hello_world_usage.js", 0xd9c8b2cb5b20c3bcn],
+const EXPECTED_JS2_REF = "7bdafea67cf263f923d8039058d99aa6a5720e02";
+const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
+const WASMTIME_VERSION = "47.0.3";
+const TARGET_EXPECTATION = Object.freeze({
+  os: "linux",
+  arch: "x86_64",
+  triple: "x86_64-unknown-linux-gnu",
+});
+const ENGINE_CONFIG = Object.freeze({
+  wasm_function_references: true,
+  wasm_gc: true,
+  wasm_tail_call: true,
+  wasm_exceptions: true,
+});
+const CANONICALIZATION =
+  "UTF-8 recursively lexicographic object keys; array order preserved; no whitespace";
+
+const DENO_INPUTS = Object.freeze([
+  {
+    gitPath: "libs/core/00_primordials.js",
+    path: "00_primordials.js",
+    bytes: 19076,
+    sha256: "5a2dfbdc4bb81412575d035901a11788001c7e0110e3f736d16289891af44a52",
+  },
+  {
+    gitPath: "libs/core/00_infra.js",
+    path: "00_infra.js",
+    bytes: 17520,
+    sha256: "33984000be930f3b02a2d1149ac0319724e8d95891623c8cc74699da4ce97287",
+  },
+  {
+    gitPath: "libs/core/02_timers.js",
+    path: "02_timers.js",
+    bytes: 10932,
+    sha256: "305596528c679be30d0ac61fa049ec0f1777c287054d119ff4b341575afac7f9",
+  },
+  {
+    gitPath: "libs/core/01_core.js",
+    path: "01_core.js",
+    bytes: 39939,
+    sha256: "6e67972322cc5385a2b642a4f7e941fccb6f992c9de662a5111d11fd0aaf1a3a",
+  },
+  {
+    gitPath: "libs/core/mod.js",
+    path: "mod.js",
+    bytes: 342,
+    sha256: "6850db621a5325d8737ad87d2d24cbc35b7010d5e5f36c88dc53c16610cc40e5",
+  },
+  {
+    gitPath: "libs/core/examples/hello_world.rs",
+    path: "hello_world_usage.js",
+    bytes: 339,
+    sha256: "33bf6b9698833319ad98c0cf88f2fb4dd7634859816ec784aa8902b3eeba1804",
+    extract: "hello-world-usage",
+  },
 ]);
 
-const WRAPPERS = ["00_primordials.js", "00_infra.js", "02_timers.js", "01_core.js"];
-const USAGE = String.raw`
-// Print helper function, calling Deno.core.print()
-function print(value) {
-  Deno.core.print(value.toString()+"\n");
-}
+const CORE_SCRIPT_INPUTS = DENO_INPUTS.filter((input) => !input.extract);
+const LOCK_SOURCE_PATHS = DENO_INPUTS.map((input) => input.path);
 
-const arr = [1, 2, 3];
-print("The sum of");
-print(arr);
-print("is");
-print(Deno.core.ops.op_sum(arr));
+// This object is intentionally small and frozen. Its recursively sorted JSON
+// is the POC's compile-options commitment; Rust replay requires the digest.
+const COMPILE_OPTIONS = Object.freeze({
+  target: "standalone",
+  platform: "deno",
+  externImportModule: "v8x:deno",
+  allowJs: true,
+  skipSemanticDiagnostics: true,
+  deferTopLevelInit: true,
+});
+const COMPILE_OPTIONS_PREIMAGE = Object.freeze({
+  entry: "/v8x-deno-poc/entry.ts",
+  compiler: Object.freeze({
+    api: "compileMulti",
+    provider: "buildRuntimeEvalProviderSource",
+    provider_kind: "interpreter",
+  }),
+  options: COMPILE_OPTIONS,
+  source_paths: LOCK_SOURCE_PATHS,
+});
+const COMPILE_OPTIONS_SHA256 =
+  "a31c09c7e31b4852799975e9c8cb8d132aad6ecab79bbf8c98d5848f7c3bde9e";
 
-// And incorrect usage
-try {
-  print(Deno.core.ops.op_sum(0));
-} catch(e) {
-  print('Exception:');
-  print(e);
-}
-`;
-
+// This is an ABI bridge, not an implementation of the Deno example. The
+// pinned usage source is embedded below and executed through the interpreter
+// provider by __v8x_run_classic_script. In particular, do not add a copied
+// print/sum sequence here: changing the upstream source must change the graph.
 const RUNTIME_SEED = String.raw`
 declare function __v8x_deno_sum_begin(isArray: boolean, length: number): void;
 declare function __v8x_deno_sum_value(index: number, value: number): void;
@@ -76,17 +146,16 @@ function finishSum(): number {
   return result;
 }
 
-export function opSumArray(values: number[]): number {
-  __v8x_deno_sum_begin(true, values.length);
-  for (let index = 0; index < values.length; index++) {
-    __v8x_deno_sum_value(index, values[index]);
+export function opSum(values: any): number {
+  if (Array.isArray(values)) {
+    __v8x_deno_sum_begin(true, values.length);
+    for (let index = 0; index < values.length; index++) {
+      __v8x_deno_sum_value(index, values[index]);
+    }
+  } else {
+    __v8x_deno_sum_begin(false, 1);
+    __v8x_deno_sum_value(0, values);
   }
-  return finishSum();
-}
-
-export function opSumNumber(value: number): number {
-  __v8x_deno_sum_begin(false, 1);
-  __v8x_deno_sum_value(0, value);
   return finishSum();
 }
 
@@ -141,7 +210,7 @@ const ops: any = {
   op_get_ext_import_meta_proto() { return importMetaPrototype; },
   op_set_captured_bootstrap(bootstrap: any) { (globalThis as any).__capturedBootstrap = bootstrap; },
   op_print: opPrint,
-  op_sum: opSumArray,
+  op_sum: opSum,
 };
 const core: any = {
   ops,
@@ -168,406 +237,523 @@ const core: any = {
 };
 `;
 
+function fail(message) {
+  throw new Error(`v8x Deno POC builder: ${message}`);
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string" ||
+    typeof value === "number"
+  ) {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  fail(`cannot canonicalize ${typeof value}`);
+}
+
 function parseArgs(argv) {
   const args = new Map();
   for (const arg of argv) {
     const match = /^--([^=]+)=(.*)$/.exec(arg);
-    if (!match) throw new Error(`expected --name=value, received ${arg}`);
+    if (!match) fail(`expected --name=value, received ${arg}`);
+    if (args.has(match[1])) fail(`duplicate --${match[1]}`);
     args.set(match[1], match[2]);
   }
-  const required = (name) => {
+  const allowed = new Set([
+    "v8x",
+    "js2",
+    "deno",
+    "out",
+    "provider-out",
+    "provenance-out",
+  ]);
+  for (const key of args.keys()) {
+    if (!allowed.has(key)) fail(`unsupported --${key}`);
+  }
+  const requiredInput = (name) => {
     const value = args.get(name);
-    if (!value) throw new Error(`missing --${name}=PATH`);
+    if (!value) fail(`missing --${name}=PATH`);
+    if (!isAbsolute(value)) fail(`--${name} must be absolute`);
+    return realpathSync(value);
+  };
+  const requiredOutput = (name) => {
+    const value = args.get(name);
+    if (!value) fail(`missing --${name}=PATH`);
+    if (!isAbsolute(value)) fail(`--${name} must be absolute`);
     return resolve(value);
   };
-  const js2 = required("js2");
-  return {
-    js2,
-    deno: required("deno"),
-    output: required("out"),
-    fixtures: required("fixtures"),
-    wasmOpt: args.has("wasm-opt") ? resolve(args.get("wasm-opt")) : js2WasmOpt(js2),
-    providerOutput: args.has("provider-out") ? resolve(args.get("provider-out")) : undefined,
+  const parsed = {
+    v8x: requiredInput("v8x"),
+    js2: requiredInput("js2"),
+    deno: requiredInput("deno"),
+    output: requiredOutput("out"),
+    providerOutput: requiredOutput("provider-out"),
+    provenanceOutput: requiredOutput("provenance-out"),
   };
-}
-
-function js2WasmOpt(js2) {
-  return join(js2, "node_modules/.bin/wasm-opt");
-}
-
-function fnv1a64(source) {
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of Buffer.from(source)) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  if (
+    new Set([parsed.output, parsed.providerOutput, parsed.provenanceOutput])
+      .size !== 3
+  ) {
+    fail(
+      "--out, --provider-out, and --provenance-out must name different files",
+    );
   }
-  return hash;
+  return parsed;
 }
 
-function assertHash(name, source) {
-  const actual = fnv1a64(source);
-  const expected = EXPECTED_HASHES.get(name);
-  if (actual !== expected) {
-    throw new Error(`${name} FNV-1a is 0x${actual.toString(16)}, expected 0x${expected.toString(16)}`);
-  }
-}
-
-function pristineDenoSource(deno, name) {
-  return execFileSync("git", ["-C", deno, "show", `HEAD:libs/core/${name}`], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
+function git(repo, args, encoding = "utf8") {
+  return execFileSync("git", ["-C", repo, ...args], {
+    encoding,
+    maxBuffer: 32 * 1024 * 1024,
   });
 }
 
-function checkedCompile(result, label) {
-  const fatal = (result.errors ?? []).filter((error) => error.severity !== "warning");
-  const warnings = (result.errors ?? []).filter((error) => error.severity === "warning");
-  if (!result.success || !result.binary || result.binary.length === 0 || fatal.length > 0) {
-    throw new Error(`${label} compile failed: ${fatal.map((error) => error.message).join("\n") || "no binary"}`);
+function assertCleanDetachedCheckout(label, repo, expectedRef) {
+  const inside = git(repo, ["rev-parse", "--is-inside-work-tree"]).trim();
+  if (inside !== "true") fail(`${label} is not a Git worktree: ${repo}`);
+  const actual = git(repo, ["rev-parse", "HEAD"]).trim();
+  if (actual !== expectedRef)
+    fail(`${label} checkout is ${actual}, expected ${expectedRef}`);
+  try {
+    const branch = git(repo, [
+      "symbolic-ref",
+      "--quiet",
+      "--short",
+      "HEAD",
+    ]).trim();
+    fail(`${label} must be detached at ${expectedRef}, found branch ${branch}`);
+  } catch (error) {
+    if (error?.message?.startsWith("v8x Deno POC builder:")) throw error;
+    if (error?.status !== 1) throw error;
   }
-  for (const warning of warnings) console.warn(`${label}: ${warning.message}`);
-  return result.binary;
+  const status = git(repo, [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+  ]);
+  if (status !== "") fail(`${label} checkout is not clean:\n${status}`);
 }
 
-function optimizeBinary(wasmOpt, binary, label) {
-  const work = mkdtempSync(join(tmpdir(), "v8x-deno-wasm-opt-"));
-  const input = join(work, "input.wasm");
-  const output = join(work, "output.wasm");
-  try {
-    writeFileSync(input, binary);
-    execFileSync(wasmOpt, [
-      input,
-      "-O3",
-      "-o",
-      output,
-      "--all-features",
-      "--disable-custom-descriptors",
-      // Binaryen enables this experimental binary encoding under
-      // --all-features, but Wasmtime 47 deliberately has no matching switch.
-      "--disable-compact-imports",
-    ], { stdio: "inherit", timeout: 600_000 });
-    const optimized = readFileSync(output);
-    if (optimized.length === 0) throw new Error(`${label} optimizer emitted an empty module`);
-    return optimized;
-  } finally {
-    rmSync(work, { recursive: true, force: true });
+function utf8(name, bytes) {
+  const text = Buffer.from(bytes).toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes))
+    fail(`${name} is not canonical UTF-8`);
+  return text;
+}
+
+function sourceFromPinnedDeno(deno, gitPath) {
+  return Buffer.from(
+    git(deno, ["show", `${EXPECTED_DENO_REF}:${gitPath}`], null),
+  );
+}
+
+function extractHelloWorldUsage(exampleBytes) {
+  const example = utf8("libs/core/examples/hello_world.rs", exampleBytes);
+  const open = /\.execute_script\(\s*"<usage>"\s*,\s*r(#+)?"/g;
+  const matches = [...example.matchAll(open)];
+  if (matches.length !== 1) {
+    fail(
+      `expected exactly one <usage> raw Rust string, found ${matches.length}`,
+    );
   }
+  const match = matches[0];
+  const hashes = match[1] ?? "";
+  const start = match.index + match[0].length;
+  const close = `"${hashes}`;
+  const end = example.indexOf(close, start);
+  if (end < 0) fail("unterminated <usage> raw Rust string");
+  const source = example.slice(start, end);
+  if (!example.slice(end + close.length).match(/^\s*,\s*\)/)) {
+    fail("<usage> raw Rust string is not the execute_script argument");
+  }
+  return Buffer.from(source, "utf8");
+}
+
+function recordInput(path, bytes, extra = {}) {
+  return { path, bytes: bytes.length, sha256: sha256(bytes), ...extra };
+}
+
+function recordFile(root, relativePath, role) {
+  const bytes = readFileSync(join(root, relativePath));
+  return recordInput(relativePath, bytes, { role });
+}
+
+function atomicWrite(path, bytes) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporary, bytes);
+  renameSync(temporary, path);
+}
+
+function checkedCompile(result, label) {
+  const fatal = (result.errors ?? []).filter(
+    (error) => error.severity !== "warning",
+  );
+  const warnings = (result.errors ?? []).filter(
+    (error) => error.severity === "warning",
+  );
+  if (
+    !result.success ||
+    !result.binary ||
+    result.binary.length === 0 ||
+    fatal.length > 0
+  ) {
+    fail(
+      `${label} compile failed: ${fatal.map((error) => error.message).join("\n") || "no binary"}`,
+    );
+  }
+  for (const warning of warnings) console.warn(`${label}: ${warning.message}`);
+  return Buffer.from(result.binary);
+}
+
+function lockedInputRecord(record) {
+  const locked = {
+    path: record.path,
+    bytes: record.bytes,
+    sha256: record.sha256,
+  };
+  if (record.git_path !== undefined) locked.git_path = record.git_path;
+  if (record.role !== undefined) locked.role = record.role;
+  return locked;
+}
+
+function inputSetDigest(inputs) {
+  return sha256(canonicalJson(inputs.map(lockedInputRecord)));
 }
 
 async function main() {
-  const { js2, deno, output, fixtures, wasmOpt, providerOutput } = parseArgs(process.argv.slice(2));
-  const actualDenoRef = execFileSync("git", ["-C", deno, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  if (actualDenoRef !== EXPECTED_DENO_REF) {
-    throw new Error(`Deno checkout is ${actualDenoRef}, expected ${EXPECTED_DENO_REF}`);
+  const { v8x, js2, deno, output, providerOutput, provenanceOutput } =
+    parseArgs(process.argv.slice(2));
+  if (v8x !== SCRIPT_V8X_ROOT) {
+    fail(
+      `--v8x must identify this builder's checkout (${SCRIPT_V8X_ROOT}), received ${v8x}`,
+    );
   }
 
-  const sources = new Map();
-  for (const name of [...WRAPPERS, "mod.js"]) {
-    const source = pristineDenoSource(deno, name);
-    assertHash(name, source);
-    sources.set(name, source);
+  // Verify all revisions before reading any tracked source. The v8x ref is
+  // intentionally recorded rather than hard-coded: the CI checkout's exact
+  // commit is compiled into the replay build and verified from the manifest.
+  const v8xRef = git(v8x, ["rev-parse", "HEAD"]).trim();
+  assertCleanDetachedCheckout("v8x", v8x, v8xRef);
+  assertCleanDetachedCheckout("js2", js2, EXPECTED_JS2_REF);
+  assertCleanDetachedCheckout("Deno", deno, EXPECTED_DENO_REF);
+  const denoRefFile = readFileSync(
+    join(v8x, "tools/deno/DENO_REF"),
+    "utf8",
+  ).trim();
+  if (denoRefFile !== EXPECTED_DENO_REF) {
+    fail(
+      `tools/deno/DENO_REF is ${denoRefFile}, expected ${EXPECTED_DENO_REF}`,
+    );
   }
-  assertHash("hello_world_usage.js", USAGE);
-  sources.set("hello_world_usage.js", USAGE);
-  mkdirSync(fixtures, { recursive: true });
-  for (const [name, source] of sources) writeFileSync(join(fixtures, name), source);
+  for (const name of [
+    "JS2WASM_EVAL_ENGINE",
+    "TEST262_DISABLE_RUNTIME_EVAL_PROVIDER",
+    "TEST262_FULL_RUNTIME_EVAL",
+  ]) {
+    if (process.env[name] !== undefined)
+      fail(
+        `${name} is forbidden; this POC always builds the direct interpreter provider`,
+      );
+  }
 
-  const compiler = await import(pathToFileURL(join(js2, "src/index.ts")).href);
-  const files = { "/deno-script-run/runtime-seed.ts": RUNTIME_SEED };
-  for (const [index, name] of WRAPPERS.entries()) {
-    files[`/deno-script-run/wrapper-${index}.js`] = sources.get(name);
+  const denoSources = new Map();
+  const lockSources = [];
+  for (const input of DENO_INPUTS) {
+    const raw = sourceFromPinnedDeno(deno, input.gitPath);
+    const bytes = input.extract ? extractHelloWorldUsage(raw) : raw;
+    if (bytes.length !== input.bytes) {
+      fail(`${input.path} has ${bytes.length} bytes, expected ${input.bytes}`);
+    }
+    const actual = sha256(bytes);
+    if (actual !== input.sha256) {
+      fail(`${input.path} SHA-256 is ${actual}, expected ${input.sha256}`);
+    }
+    const source = utf8(input.path, bytes);
+    denoSources.set(input.path, source);
+    lockSources.push(
+      recordInput(input.path, bytes, { git_path: input.gitPath }),
+    );
   }
-  const imports = [
-    `import { opPrint, opSumArray, opSumNumber, readHostScript } from "./runtime-seed.ts";`,
-    ...WRAPPERS.map((_name, index) => `import "./wrapper-${index}.js";`),
-  ].join("\n");
-  // Script::Run validates the exact usage source separately. This stage is its
-  // AOT lowering: the observable operation sequence crosses the typed Rust-op
-  // bridge without widening every Deno.core member into the retained graph.
-files["/deno-script-run/entry.ts"] = `${imports}
-let stage = 0;
+
+  const exactUsage = denoSources.get("hello_world_usage.js");
+  const files = {
+    "/v8x-deno-poc/runtime-seed.ts": RUNTIME_SEED,
+  };
+  for (const input of CORE_SCRIPT_INPUTS) {
+    files[`/v8x-deno-poc/core/${input.path}`] = denoSources.get(input.path);
+  }
+  files["/v8x-deno-poc/entry.ts"] = String.raw`
+import { readHostScript } from "./runtime-seed.ts";
+import "./core/00_primordials.js";
+import "./core/00_infra.js";
+import "./core/02_timers.js";
+import "./core/01_core.js";
+import * as coreModule from "./core/mod.js";
+
+// Value-preserving embedding of the raw Rust literal extracted above. The
+// classic-script bridge accepts no alternative source: it first compares the
+// host script with these exact bytes, then the interpreter executes this value.
+const PINNED_HELLO_WORLD_USAGE = ${JSON.stringify(exactUsage)};
 let scriptResult = "";
-function print(value: any): void { opPrint(String(value) + "\\n"); }
-export function __v8x_probe_deno_core_bootstrap(): number { return 42; }
-export function __v8x_probe_deno_stage_state(): number { return stage; }
-export function __v8x_set_deno_tick_info(_a: number, _b: number): number { return 52; }
-export function __v8x_set_deno_immediate_info(_a: number, _b: number, _c: number): number { return 53; }
-export function __v8x_set_deno_timer_info(_a: number): number { return 51; }
-export function __v8x_run_classic_script(): number {
-  const packet: any = (0, eval)(readHostScript());
-  const status = packet[0];
-  scriptResult = "";
-  for (let index = 1; index < packet.length; index++) {
-    scriptResult += String.fromCharCode(packet[index]);
+
+export function __v8x_probe_deno_core_bootstrap(): number {
+  const bootstrap: any = (globalThis as any).__bootstrap;
+  const captured: any = (globalThis as any).__capturedBootstrap;
+  if (bootstrap == null || captured == null) return 0;
+  if (captured.core == null || captured.core.ops == null) return 0;
+  if (captured.core === bootstrap.core || captured.core.ops === bootstrap.core.ops) return 0;
+  if (captured.core.print !== bootstrap.core.print) return 0;
+  if (captured.core.ops.op_print !== bootstrap.core.ops.op_print) return 0;
+  if (bootstrap.internals !== captured.internals || bootstrap.primordials !== captured.primordials) return 0;
+  if (coreModule.core !== bootstrap.core || coreModule.internals !== bootstrap.internals) return 0;
+  if (coreModule.primordials !== bootstrap.primordials) return 0;
+  const requiredCoreFunctions = [
+    "setUpAsyncStub",
+    "__eventLoopTick",
+    "__processTimers",
+    "__drainNextTickAndMacrotasks",
+    "__handleRejections",
+    "buildCustomError",
+    "runImmediateCallbacks",
+    "__setTickInfo",
+    "__setImmediateInfo",
+    "__setTimerInfo",
+  ];
+  for (const name of requiredCoreFunctions) {
+    if (typeof captured.core[name] !== "function") return 0;
   }
-  if (status === 85) return 0;
-  if (status === 74) return 1;
-  if (status === 69) return -1;
-  throw new Error("runtime-eval provider returned an invalid envelope");
+  if (captured.core.errorConstructors == null || typeof captured.core.errorConstructors !== "object") return 0;
+  return 42;
+}
+export function __v8x_run_classic_script(): number {
+  const source = readHostScript();
+  if (source !== PINNED_HELLO_WORLD_USAGE) {
+    throw new Error("v8x Deno POC rejects a classic script outside the pinned hello_world literal");
+  }
+  (0, eval)(source);
+  scriptResult = "";
+  return 0;
 }
 export function __v8x_script_result_utf16_length(): number { return scriptResult.length; }
 export function __v8x_script_result_utf16_code_unit(index: number): number {
   return scriptResult.charCodeAt(index);
 }
-export function __v8x_stage_deno_core_wrappers(): number {
-  if ((globalThis as any).__bootstrap == null) return 0;
-  stage = 1; return 42;
-}
-export function __v8x_stage_deno_core_module(): number {
-  if (stage !== 1 || (globalThis as any).__bootstrap == null) return 0;
-  stage = 2; return 43;
-}
-export function __v8x_stage_deno_hello_world_usage(): number {
-  if (stage !== 2) return 0;
-  const arr = [1, 2, 3];
-  print("The sum of"); print(arr); print("is"); print(opSumArray(arr));
-  try { print(opSumNumber(0)); } catch (error) { print("Exception:"); print(error); }
-  stage = 3; return 44;
-}
 `;
-  const app = await compiler.compileMulti(files, "/deno-script-run/entry.ts", {
-    target: "standalone",
-    platform: "deno",
-    externImportModule: "v8x:deno",
-    allowJs: true,
-    skipSemanticDiagnostics: true,
-    deferTopLevelInit: true,
+
+  const graphInputs = [
+    ...lockSources,
+    recordInput("generated/runtime-seed.ts", Buffer.from(RUNTIME_SEED), {
+      role: "abi-bridge",
+    }),
+    recordInput(
+      "generated/entry.ts",
+      Buffer.from(files["/v8x-deno-poc/entry.ts"]),
+      { role: "closed-world-router" },
+    ),
+  ];
+  const sourceGraphSha256 = inputSetDigest(graphInputs);
+  const canonicalCompileOptions = canonicalJson(COMPILE_OPTIONS_PREIMAGE);
+  const computedCompileOptionsDigest = sha256(canonicalCompileOptions);
+  if (computedCompileOptionsDigest !== COMPILE_OPTIONS_SHA256) {
+    fail(
+      `compile-options SHA-256 is ${computedCompileOptionsDigest}, expected ${COMPILE_OPTIONS_SHA256}`,
+    );
+  }
+
+  const compiler = await import(pathToFileURL(join(js2, "src/index.ts")).href);
+  const app = await compiler.compileMulti(
+    files,
+    "/v8x-deno-poc/entry.ts",
+    COMPILE_OPTIONS,
+  );
+  const appBinary = checkedCompile(app, "Deno POC application");
+  const appModule = new WebAssembly.Module(appBinary);
+  if (
+    !WebAssembly.Module.imports(appModule).some(
+      (entry) => entry.module === "js2wasm:runtime-eval",
+    )
+  ) {
+    fail(
+      "application does not import the interpreter provider; the pinned literal was not routed through it",
+    );
+  }
+  atomicWrite(output, appBinary);
+
+  const provider = await import(
+    pathToFileURL(join(js2, "scripts/runtime-eval-provider.mjs")).href
+  );
+  if (typeof provider.buildRuntimeEvalProviderSource !== "function") {
+    fail(
+      "js2 runtime-eval provider does not expose buildRuntimeEvalProviderSource()",
+    );
+  }
+  // Never use selectCachedRuntimeEvalProvider(): that selector can choose
+  // QuickJS, refusal, or cache fallback. This direct call is interpreter-only.
+  const providerSource = provider.buildRuntimeEvalProviderSource();
+  const providerResult = await compiler.compile(providerSource, {
+    ...provider.RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
   });
-  const appBinary = optimizeBinary(wasmOpt, checkedCompile(app, "Deno Script::Run artifact"), "Deno Script::Run artifact");
-  mkdirSync(dirname(output), { recursive: true });
-  writeFileSync(output, appBinary);
+  const providerBinary = checkedCompile(
+    providerResult,
+    "runtime-eval interpreter provider",
+  );
+  const providerModule = new WebAssembly.Module(providerBinary);
+  const providerImports = WebAssembly.Module.imports(providerModule);
+  if (providerImports.length !== 0) {
+    fail(
+      `runtime-eval interpreter provider has ${providerImports.length} imports, expected zero`,
+    );
+  }
+  atomicWrite(providerOutput, providerBinary);
 
-  if (providerOutput) {
-    const provider = await import(pathToFileURL(join(js2, "scripts/runtime-eval-provider.mjs")).href);
-    const providerBridge = String.raw`
-function __v8xJsonHex(code: number): string {
-  const digits = "0123456789abcdef";
-  return digits[(code >>> 12) & 15] + digits[(code >>> 8) & 15] +
-    digits[(code >>> 4) & 15] + digits[code & 15];
-}
-function __v8xJsonQuote(value: string): string {
-  let result = '"';
-  const slash = String.fromCharCode(92);
-  for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
-    if (code === 34) result += slash + '"';
-    else if (code === 92) result += slash + slash;
-    else if (code === 8) result += slash + 'b';
-    else if (code === 9) result += slash + 't';
-    else if (code === 10) result += slash + 'n';
-    else if (code === 12) result += slash + 'f';
-    else if (code === 13) result += slash + 'r';
-    else if (code < 32) result += slash + 'u' + __v8xJsonHex(code);
-    else result += value[index];
+  const acornPinPath = "tests/dogfood/acorn-pin.json";
+  const acornPin = JSON.parse(readFileSync(join(js2, acornPinPath), "utf8"));
+  if (
+    typeof acornPin.tarball !== "string" ||
+    !acornPin.tarball.startsWith("fixtures/")
+  ) {
+    fail(`invalid pinned Acorn tarball path in ${acornPinPath}`);
   }
-  return result + '"';
-}
-function __v8xEncodeEvalValue(
-  value: any,
-  arrayElement = false,
-): string | undefined {
-  if (value === null) return "null";
-  const kind = typeof value;
-  if (kind === "string") return __v8xJsonQuote(value);
-  if (kind === "boolean") return value ? "true" : "false";
-  if (kind === "number") {
-    return value !== value || value === Infinity || value === -Infinity ? "null" : String(value);
-  }
-  if (kind === "undefined" || kind === "function" || kind === "symbol") {
-    return arrayElement
-      ? "{" + __v8xJsonQuote(String.fromCharCode(0) + "v8x-undefined") + ":true}"
-      : undefined;
-  }
-  if (Array.isArray(value)) {
-    let result = "[";
-    for (let index = 0; index < value.length; index++) {
-      if (index !== 0) result += ",";
-      result += __v8xEncodeEvalValue(value[index], true);
-    }
-    return result + "]";
-  }
-  let result = "{";
-  let first = true;
-  for (const key in value) {
-    const encoded = __v8xEncodeEvalValue(value[key]);
-    if (encoded === undefined) continue;
-    if (!first) result += ",";
-    first = false;
-    result += __v8xJsonQuote(key) + ":" + encoded;
-  }
-  return result + "}";
-}
-function __v8xRuntimeEvalJson(source: any, globalObject: any): string {
-  try {
-    let rewritten = "";
-    let index = 0;
-    let quote = 0;
-    let escaped = false;
-    let lineComment = false;
-    let blockComment = false;
-    while (index < source.length) {
-      const code = source.charCodeAt(index);
-      const nextCode = index + 1 < source.length
-        ? source.charCodeAt(index + 1)
-        : -1;
-      if (lineComment) {
-        rewritten += String.fromCharCode(code);
-        index += 1;
-        if (code === 10 || code === 13) lineComment = false;
-        continue;
-      }
-      if (blockComment) {
-        rewritten += String.fromCharCode(code);
-        index += 1;
-        if (code === 42 && nextCode === 47) {
-          rewritten += "/";
-          index += 1;
-          blockComment = false;
-        }
-        continue;
-      }
-      if (quote !== 0) {
-        rewritten += String.fromCharCode(code);
-        index += 1;
-        if (escaped) escaped = false;
-        else if (code === 92) escaped = true;
-        else if (code === quote) quote = 0;
-        continue;
-      }
-      if (code === 39 || code === 34 || code === 96) {
-        quote = code;
-        rewritten += String.fromCharCode(code);
-        index += 1;
-        continue;
-      }
-      if (code === 47 && nextCode === 47) {
-        lineComment = true;
-        rewritten += "//";
-        index += 2;
-        continue;
-      }
-      if (code === 47 && nextCode === 42) {
-        blockComment = true;
-        rewritten += "/*";
-        index += 2;
-        continue;
-      }
-      if (source.substring(index, index + 4) === "new ") {
-        const constructorStart = index + 4;
-        const constructor = source.substring(constructorStart);
-        let constructorLength = 0;
-        if (constructor.substring(0, 11) === "Uint8Array(") {
-          constructorLength = 10;
-        } else if (constructor.substring(0, 12) === "Uint16Array(") {
-          constructorLength = 11;
-        } else if (constructor.substring(0, 12) === "Uint32Array(") {
-          constructorLength = 11;
-        } else if (constructor.substring(0, 11) === "Int32Array(") {
-          constructorLength = 10;
-        } else if (constructor.substring(0, 15) === "BigUint64Array(") {
-          constructorLength = 14;
-        } else if (constructor.substring(0, 14) === "BigInt64Array(") {
-          constructorLength = 13;
-        }
-        if (constructorLength !== 0) {
-          index = constructorStart + constructorLength;
-          continue;
-        }
-      }
-      if (source.substring(index, index + 10) === ".subarray(") {
-        index += 10;
-        while (index < source.length && source.charCodeAt(index) !== 41) {
-          index += 1;
-        }
-        if (index < source.length) index += 1;
-        continue;
-      }
-      const start = index;
-      let sign = "";
-      if (source.charCodeAt(index) === 45 && index + 1 < source.length) {
-        const next = source.charCodeAt(index + 1);
-        if (next >= 48 && next <= 57) { sign = "-"; index += 1; }
-      }
-      const first = source.charCodeAt(index);
-      if (first >= 48 && first <= 57) {
-        const digitsStart = index;
-        while (index < source.length) {
-          const code = source.charCodeAt(index);
-          if (code < 48 || code > 57) break;
-          index += 1;
-        }
-        if (index < source.length && source.charCodeAt(index) === 110) {
-          const marker = String.fromCharCode(0) + "v8x-bigint:" + sign +
-            source.substring(digitsStart, index);
-          rewritten += __v8xJsonQuote(marker);
-          index += 1;
-          continue;
-        }
-      }
-      index = start;
-      rewritten += String.fromCharCode(source.charCodeAt(index));
-      index += 1;
-    }
-    const value = executeIndirectEval(parse, rewritten, globalObject);
-    exposeRuntimeEvalGlobalLexicalCells(globalObject);
-    exposeRuntimeEvalObject(globalObject);
-    if (value === undefined) return "U";
-    const encoded = __v8xEncodeEvalValue(value);
-    return encoded === undefined ? "U" : "J" + encoded;
-  } catch (error) {
-    exposeRuntimeEvalGlobalLexicalCells(globalObject);
-    exposeRuntimeEvalObject(globalObject);
-    const name = error && (error as any).name || "Error";
-    const message = error && (error as any).message || String(error);
-    return "E{" + __v8xJsonQuote("name") + ":" + __v8xJsonQuote(name) +
-      "," + __v8xJsonQuote("message") + ":" + __v8xJsonQuote(message) + "}";
-  }
-}
-export function __runtime_indirect_eval(source: any, globalObject: any): any {
-  const encoded = __v8xRuntimeEvalJson(source, globalObject);
-  const packet: any[] = [];
-  for (let index = 0; index < encoded.length; index++) {
-    packet.push(encoded.charCodeAt(index));
-  }
-  return runtimeEvalResult(true, packet);
-}
-export function __v8x_runtime_eval_json(source: string, globalObject: any): string {
-  return __v8xRuntimeEvalJson(source, globalObject);
-}
-`;
-    const providerSource = provider
-      .buildRuntimeEvalProviderSource()
-      .replace(
-        "export function __runtime_indirect_eval(",
-        "function __v8x_runtime_indirect_eval_carrier(",
-      );
-    const providerResult = await compiler.compile(
-      providerSource + providerBridge,
-      {
-      ...provider.RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
+  const providerInputs = [
+    recordFile(js2, "scripts/runtime-eval-provider.mjs", "provider-generator"),
+    recordFile(js2, "tests/dogfood/setup-acorn.mjs", "acorn-loader"),
+    recordFile(js2, acornPinPath, "acorn-pin"),
+    recordFile(
+      js2,
+      `tests/dogfood/${acornPin.tarball}`,
+      "pinned-acorn-tarball",
+    ),
+    ...[
+      "types.ts",
+      "opcodes.ts",
+      "encoder.ts",
+      "runtime-ops.ts",
+      "eval-environment.ts",
+      "emitter.ts",
+      "loop.ts",
+      "dynamic-function.ts",
+    ].map((name) =>
+      recordFile(js2, `src/interp/${name}`, "interpreter-source"),
+    ),
+  ];
+  const providerSourceRecord = recordInput(
+    "generated/runtime-eval-provider.ts",
+    Buffer.from(providerSource),
+    { role: "interpreter-provider-source" },
+  );
+  const providerGraphSha256 = inputSetDigest([
+    providerSourceRecord,
+    ...providerInputs,
+  ]);
+  const rawArtifacts = {
+    app: recordInput("deno-core.wasm", appBinary, { role: "app" }),
+    runtime_eval_provider: recordInput(
+      "runtime-eval-provider.wasm",
+      providerBinary,
+      { role: "runtime_eval_provider" },
+    ),
+  };
+  const contractPreimage = {
+    schema_version: 1,
+    revisions: {
+      v8x: v8xRef,
+      js2: EXPECTED_JS2_REF,
+      deno: EXPECTED_DENO_REF,
+    },
+    sources: lockSources.map(lockedInputRecord),
+    source_graph_sha256: sourceGraphSha256,
+    provider_graph_sha256: providerGraphSha256,
+    compile_options_sha256: computedCompileOptionsDigest,
+    wasmtime: {
+      version: WASMTIME_VERSION,
+      target: TARGET_EXPECTATION,
+      engine_config: ENGINE_CONFIG,
+    },
+    artifacts: {
+      app: lockedInputRecord(rawArtifacts.app),
+      runtime_eval_provider: lockedInputRecord(
+        rawArtifacts.runtime_eval_provider,
+      ),
+    },
+  };
+  const contractSha256 = sha256(canonicalJson(contractPreimage));
+  const provenance = {
+    schema_version: 1,
+    kind: "v8x-js2wasm-deno-poc-raw-inputs",
+    revisions: {
+      v8x: { ref: v8xRef, clean: true, detached: true },
+      js2: { ref: EXPECTED_JS2_REF, clean: true, detached: true },
+      deno: { ref: EXPECTED_DENO_REF, clean: true, detached: true },
+    },
+    sources: lockSources,
+    source_graph: {
+      entry: "/v8x-deno-poc/entry.ts",
+      sha256: sourceGraphSha256,
+      inputs: graphInputs,
+    },
+    compiler: {
+      js2_index: recordFile(js2, "src/index.ts", "compiler-entry"),
+      package_json: recordFile(js2, "package.json", "compiler-package"),
+      pnpm_lock: recordFile(js2, "pnpm-lock.yaml", "compiler-lock"),
+      runtime_eval_provider: {
+        kind: "interpreter",
+        direct_builder: "buildRuntimeEvalProviderSource",
+        source: providerSourceRecord,
+        inputs: providerInputs,
+        sha256: providerGraphSha256,
       },
-    );
-    const providerBinary = optimizeBinary(
-      wasmOpt,
-      checkedCompile(providerResult, "runtime-eval provider"),
-      "runtime-eval provider",
-    );
-    const providerModule = new WebAssembly.Module(providerBinary);
-    const providerImports = WebAssembly.Module.imports(providerModule);
-    if (providerImports.length !== 0) {
-      throw new Error(`runtime-eval provider has ${providerImports.length} imports, expected zero`);
-    }
-    mkdirSync(dirname(providerOutput), { recursive: true });
-    writeFileSync(providerOutput, providerBinary);
-  }
+    },
+    compile_options: {
+      canonicalization: CANONICALIZATION,
+      canonical_json: canonicalCompileOptions,
+      sha256: computedCompileOptionsDigest,
+    },
+    wasmtime: {
+      version: WASMTIME_VERSION,
+      target_expectation: TARGET_EXPECTATION,
+      engine_config: ENGINE_CONFIG,
+    },
+    artifacts: rawArtifacts,
+    contract: {
+      canonicalization: CANONICALIZATION,
+      sha256: contractSha256,
+    },
+  };
+  atomicWrite(provenanceOutput, `${JSON.stringify(provenance, null, 2)}\n`);
 
-  console.log(JSON.stringify({
-    denoRef: actualDenoRef,
-    artifact: output,
-    artifactBytes: appBinary.length,
-    fixtures,
-    provider: providerOutput,
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        provenance: provenanceOutput,
+        app: {
+          path: output,
+          bytes: appBinary.length,
+          sha256: sha256(appBinary),
+        },
+        runtime_eval_provider: {
+          path: providerOutput,
+          bytes: providerBinary.length,
+          sha256: sha256(providerBinary),
+        },
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 main().catch((error) => {

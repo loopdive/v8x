@@ -123,9 +123,19 @@ pub use js2wasm_spike::{
   js2wasm_verify_graph_binding_for_test, js2wasm_write_graph_binding_for_test,
 };
 
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(all(
+  feature = "js2wasm_runtime_compile",
+  not(feature = "js2wasm_deno_poc_replay"),
+))]
 #[doc(hidden)]
 pub use js2wasm_spike::js2wasm_bootstrap_raw_module_for_test;
+
+#[cfg(feature = "js2wasm_deno_poc")]
+#[doc(hidden)]
+pub use js2wasm_spike::{
+  js2wasm_precompile_deno_core_for_test,
+  js2wasm_precompile_runtime_eval_provider_for_test,
+};
 
 #[cfg(feature = "engine_js2wasm")]
 mod js2wasm;

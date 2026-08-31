@@ -11,7 +11,7 @@ Supported engines:
 
 - V8 14.9.207.2-rusty
 - JavaScriptCore / WebKit 625.1+ and System-framework path uses the OS's JSC.
-- QuickJS-ng 0.15.1 
+- QuickJS-ng 0.15.1
 
 ## Experimental js2wasm backend
 
@@ -113,37 +113,63 @@ application needs runtime-created source strings, set
 `V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE` to trusted caches created by the same
 Wasmtime build.
 
-The pinned Deno `Script::Run` transaction has an explicit artifact-backed
-acceptance test. Build its optimized standardized-EH module and exact source
-fixtures from a pristine `tools/deno/DENO_REF` checkout (the builder reads
-tracked sources with `git show`, so an applied integration patch cannot change
-the audited hashes). The builder uses O3 to reduce the one-time Wasmtime AOT
-cost; correctness does not depend on optimization:
+### Bounded Deno `hello_world` POC
+
+`tools/deno/run-js2wasm-poc.sh` is a non-ignored Linux x86_64 gate for one
+closed-world claim: the unmodified `deno_core` `hello_world` example at the
+pinned Deno commit executes its six enumerated inputs through a JS2-produced,
+Wasmtime-AOT application and interpreter provider. It is not evidence for the
+Deno CLI, arbitrary `Script::Run` input, snapshots, extensions, or general
+Deno compatibility.
+
+The runner requires clean detached worktrees: the current v8x commit is
+recorded exactly, JS2 is fixed at
+`7bdafea67cf263f923d8039058d99aa6a5720e02`, and Deno is fixed at
+`1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. It reads all Deno source through
+`git show <pinned-ref>:path`, including the raw Rust string literal in
+`libs/core/examples/hello_world.rs`; it does not use a checked-out fixture or
+handwritten copy. The graph includes pristine `mod.js`, and the exact usage
+literal is embedded and evaluated by the direct JS2 interpreter provider rather
+than recreating its print/sum sequence in the adapter.
+
+The CI gate uses Rust 1.95.0, matching the pinned Deno checkout's toolchain and
+satisfying the pinned Wasmtime 47.0.3 dependency graph.
 
 ```sh
-cd /path/to/js2
-node --max-old-space-size=3072 --experimental-wasm-exnref --import tsx \
-  /path/to/v8x/tools/js2wasm/build-deno-core-artifact.mjs \
-  --js2=/path/to/js2 \
-  --deno=/path/to/deno \
-  --wasm-opt=/path/to/js2/node_modules/.bin/wasm-opt \
-  --out=/tmp/deno-core.wasm \
-  --fixtures=/tmp/deno-core-fixtures \
-  --provider-out=/tmp/runtime-eval-provider.wasm
+tools/deno/run-js2wasm-poc.sh \
+  --v8x=/absolute/path/to/v8x \
+  --js2=/absolute/path/to/clean-detached-js2 \
+  --deno=/absolute/path/to/clean-detached-deno \
+  --out-dir=/absolute/path/to/an-empty-output-directory
 ```
 
-Then run the non-ignored opt-in gate. The development profile precompiles the
-raw modules with the embedded Wasmtime; a release/`deno compile` pipeline sets
-the corresponding `*_AOT_MODULE` variables to trusted precompiled artifacts.
+The trusted packaging phase may invoke Node, JS2, and the runtime-compilation
+feature. It writes `raw-inputs.json`, raw `deno-core.wasm` and
+`runtime-eval-provider.wasm`, then same-host native artifacts, a strict
+per-artifact `.attestation.json` sidecar, and a strict `poc-lock.json`. Each
+sidecar binds its role, Wasmtime 47.0.3 target and engine configuration, raw
+Wasm SHA-256, and AOT SHA-256; the lock commits the canonical sidecar digest.
+That raw provenance binds clean revisions, source byte lengths
+and SHA-256s, compiler/interpreter inputs, canonical compile options, raw Wasm
+hashes, and the Wasmtime 47.0.3 Linux x86_64 engine configuration. A canonical
+raw contract digest commits the complete source graph, generated adapter,
+direct interpreter provider graph, raw artifacts, compiler options, revisions,
+target, and engine flags before native precompilation. The final replay contract
+adds both native AOT digests and is embedded into the Deno build, so a modified
+lock plus replacement artifacts cannot pass as the packaged proof.
 
-```sh
-V8X_JS2WASM_DENO_CORE_WASM=/tmp/deno-core.wasm \
-V8X_JS2WASM_DENO_CORE_FIXTURES=/tmp/deno-core-fixtures \
-V8X_JS2WASM_RUNTIME_EVAL_WASM=/tmp/runtime-eval-provider.wasm \
-cargo test --no-default-features --features js2wasm_deno_poc \
-  --test js2wasm_spike routes_exact_deno_core_scripts_through_public_script_run
-```
-
+The replay phase moves only `poc-lock.json`, `deno-core.cwasm`, and
+`runtime-eval-provider.cwasm` into a fresh directory. It modifies only Deno's
+workspace `v8` dependency plus `Cargo.lock` to select
+`js2wasm_deno_poc_replay`; the lock change is a committed patch with an exact
+post-apply SHA-256, so CI never re-resolves the graph against a changing
+registry. It then builds the genuine Deno example and starts it with `env -i`.
+The process receives only the manifest and two AOT paths: no raw Wasm, Node,
+JS2 compiler, runtime-compilation feature, or QuickJS feature is present.
+It requires exit status zero, byte-for-byte stdout matching
+[`tools/deno/js2wasm-poc-expected.stdout`](tools/deno/js2wasm-poc-expected.stdout),
+and empty stderr. The manifest also binds both native artifacts and the complete
+build contract; tamper and configuration controls run in the same CI job.
 
 Swap the engine under Deno without touching `deno_core`:
 
@@ -160,9 +186,9 @@ v8 = { package = "v8x", version = "0.155.0", features = ["jsc"] }
 `v8x` vendors the real `v8` crate's Rust source and implements the `v8__*` C ABI
 on the chosen engine, so the swap is a drop-in — `deno_core` compiles unchanged.
 
-| engine | deno size | engine size |
-| --- | --- | --- |
-| Deno V8 14.9 | 78.7 MB | ~40 MB static |
-| Deno JSC | 80.7 MB | ~48 MB static |
-| Deno system JSC | 54.2 MB | 0 |
-| Deno quickjs-ng | 56.1 MB | ~1 MB static |
+| engine          | deno size | engine size   |
+| --------------- | --------- | ------------- |
+| Deno V8 14.9    | 78.7 MB   | ~40 MB static |
+| Deno JSC        | 80.7 MB   | ~48 MB static |
+| Deno system JSC | 54.2 MB   | 0             |
+| Deno quickjs-ng | 56.1 MB   | ~1 MB static  |

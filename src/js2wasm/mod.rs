@@ -36,6 +36,8 @@ use crate::{
   StackTrace, String as V8String, TypedArray, Uint8Array, Uint16Array, Uint32,
   Uint32Array, UnboundModuleScript, Value,
 };
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -4462,15 +4464,29 @@ const DENO_CORE_PRELINKED_SCRIPTS: [(&str, u64); 4] = [
   ("ext:core/02_timers.js", 0xcbd2_6ee0_c68d_cb66),
   ("ext:core/01_core.js", 0xd2f9_d9c6_2c03_7a70),
 ];
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const DENO_CORE_REPLAY_SHA256: [&str; 4] = [
+  "5a2dfbdc4bb81412575d035901a11788001c7e0110e3f736d16289891af44a52",
+  "33984000be930f3b02a2d1149ac0319724e8d95891623c8cc74699da4ce97287",
+  "305596528c679be30d0ac61fa049ec0f1777c287054d119ff4b341575afac7f9",
+  "6e67972322cc5385a2b642a4f7e941fccb6f992c9de662a5111d11fd0aaf1a3a",
+];
 // The pinned Deno integration patch skips globals that the compatibility shim
 // has already installed. The compiled artifact is still built from the
 // pristine DENO_REF source, so accept this one audited host-side variant while
 // keeping every other bootstrap script hash-exact.
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const PATCHED_DENO_CORE_01_CORE_HASH: u64 = 0x9a86_06e5_0118_e568;
 const DENO_CORE_MODULE_SPECIFIER: &str = "ext:core/mod.js";
 const DENO_CORE_MODULE_HASH: u64 = 0xcb8e_ac50_51e4_21a4;
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const DENO_CORE_MODULE_SHA256: &str =
+  "6850db621a5325d8737ad87d2d24cbc35b7010d5e5f36c88dc53c16610cc40e5";
 const DENO_CORE_USAGE_SPECIFIER: &str = "<usage>";
 const DENO_CORE_USAGE_HASH: u64 = 0xd9c8_b2cb_5b20_c3bc;
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+const DENO_CORE_USAGE_SHA256: &str =
+  "33bf6b9698833319ad98c0cf88f2fb4dd7634859816ec784aa8902b3eeba1804";
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
   let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -4479,6 +4495,22 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
   }
   hash
+}
+
+#[cfg(feature = "js2wasm_deno_poc_replay")]
+fn sha256_hex(bytes: &[u8]) -> String {
+  format!("{:x}", Sha256::digest(bytes))
+}
+
+fn is_prelinked_deno_module_source(source: &str) -> bool {
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  {
+    sha256_hex(source.as_bytes()) == DENO_CORE_MODULE_SHA256
+  }
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    fnv1a64(source.as_bytes()) == DENO_CORE_MODULE_HASH
+  }
 }
 
 fn named_property<T>(object: *const T, name: &str) -> Option<*const Value> {
@@ -4801,14 +4833,30 @@ fn run_prelinked_deno_core_script(
   else {
     return Ok(false);
   };
-  let actual_hash = fnv1a64(state.source.as_bytes());
-  let is_patched_01_core = state.specifier == "ext:core/01_core.js"
-    && actual_hash == PATCHED_DENO_CORE_01_CORE_HASH;
-  if actual_hash != *expected_hash && !is_patched_01_core {
-    return Err(format!(
-      "prelinked script {:?} has FNV-1a hash {actual_hash:#018x}, expected {expected_hash:#018x}",
-      state.specifier,
-    ));
+
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  {
+    let actual_sha256 = sha256_hex(state.source.as_bytes());
+    let expected_sha256 = DENO_CORE_REPLAY_SHA256[phase];
+    if actual_sha256 != expected_sha256 {
+      return Err(format!(
+        "closed-world Deno replay source {:?} has SHA-256 {actual_sha256}, expected {expected_sha256}",
+        state.specifier,
+      ));
+    }
+  }
+
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    let actual_hash = fnv1a64(state.source.as_bytes());
+    let is_patched_01_core = state.specifier == "ext:core/01_core.js"
+      && actual_hash == PATCHED_DENO_CORE_01_CORE_HASH;
+    if actual_hash != *expected_hash && !is_patched_01_core {
+      return Err(format!(
+        "prelinked script {:?} has FNV-1a hash {actual_hash:#018x}, expected {expected_hash:#018x}",
+        state.specifier,
+      ));
+    }
   }
   let current_phase = match unsafe { heap_value(context) } {
     Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
@@ -4852,10 +4900,13 @@ fn run_prelinked_deno_core_script(
       .ok_or_else(|| "prelinked Deno op handles disappeared".to_string())?;
     with_deno_core_runtime(context, "wrapper initialization", |runtime| {
       runtime.bind_deno_ops(print, sum)?;
-      // Older three/four-wrapper artifacts expose only the legacy bootstrap
-      // probe. The staged artifact advances an explicit state machine here so
-      // the later module evaluation re-enters this exact Wasmtime instance.
-      let _ = runtime.advance_deno_core_wrappers()?;
+      #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+      {
+        // Older three/four-wrapper artifacts expose only the legacy bootstrap
+        // probe. The staged artifact advances an explicit state machine here so
+        // the later module evaluation re-enters this exact Wasmtime instance.
+        let _ = runtime.advance_deno_core_wrappers()?;
+      }
       Ok(())
     })?;
   }
@@ -4878,28 +4929,59 @@ fn run_prelinked_deno_usage_script(
   if state.specifier != DENO_CORE_USAGE_SPECIFIER {
     return Ok(false);
   }
-  let actual_hash = fnv1a64(state.source.as_bytes());
-  if actual_hash != DENO_CORE_USAGE_HASH {
-    return Err(format!(
-      "prelinked script {:?} has FNV-1a hash {actual_hash:#018x}, expected {DENO_CORE_USAGE_HASH:#018x}",
-      state.specifier,
-    ));
+
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  {
+    let actual_sha256 = sha256_hex(state.source.as_bytes());
+    if actual_sha256 != DENO_CORE_USAGE_SHA256 {
+      return Err(format!(
+        "closed-world Deno replay source {:?} has SHA-256 {actual_sha256}, expected {DENO_CORE_USAGE_SHA256}",
+        state.specifier,
+      ));
+    }
+    let phase = match unsafe { heap_value(context) } {
+      Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
+      _ => return Err("usage script has no live v8x context".to_string()),
+    };
+    if phase != DENO_CORE_PRELINKED_SCRIPTS.len() {
+      return Err(format!(
+        "closed-world Deno replay usage ran at bootstrap phase {}, expected {}",
+        phase,
+        DENO_CORE_PRELINKED_SCRIPTS.len(),
+      ));
+    }
+    // The verified AOT application embeds these same bytes and its
+    // __v8x_run_classic_script export evaluates them through the verified
+    // runtime-eval provider. Returning false deliberately continues into that
+    // ordinary Script::Run path instead of the legacy staged substitute.
+    return Ok(false);
   }
-  let phase = match unsafe { heap_value(context) } {
-    Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
-    _ => return Err("usage script has no live v8x context".to_string()),
-  };
-  if phase != DENO_CORE_PRELINKED_SCRIPTS.len() {
-    return Err(format!(
-      "prelinked Deno usage ran at bootstrap phase {}, expected {}",
-      phase,
-      DENO_CORE_PRELINKED_SCRIPTS.len(),
-    ));
+
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    let actual_hash = fnv1a64(state.source.as_bytes());
+    if actual_hash != DENO_CORE_USAGE_HASH {
+      return Err(format!(
+        "prelinked script {:?} has FNV-1a hash {actual_hash:#018x}, expected {DENO_CORE_USAGE_HASH:#018x}",
+        state.specifier,
+      ));
+    }
+    let phase = match unsafe { heap_value(context) } {
+      Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
+      _ => return Err("usage script has no live v8x context".to_string()),
+    };
+    if phase != DENO_CORE_PRELINKED_SCRIPTS.len() {
+      return Err(format!(
+        "prelinked Deno usage ran at bootstrap phase {}, expected {}",
+        phase,
+        DENO_CORE_PRELINKED_SCRIPTS.len(),
+      ));
+    }
+    with_deno_core_runtime(context, "usage evaluation", |runtime| {
+      runtime.advance_deno_core_usage()
+    })?;
+    Ok(true)
   }
-  with_deno_core_runtime(context, "usage evaluation", |runtime| {
-    runtime.advance_deno_core_usage()
-  })?;
-  Ok(true)
 }
 
 #[unsafe(no_mangle)]
@@ -5113,8 +5195,17 @@ pub extern "C" fn v8__ScriptCompiler__CompileModule(
     ptr::null()
   };
   let namespace = new_object(isolate);
-  let prelinked_deno_module = specifier == DENO_CORE_MODULE_SPECIFIER
-    && fnv1a64(source.as_bytes()) == DENO_CORE_MODULE_HASH;
+  let deno_core_module = specifier == DENO_CORE_MODULE_SPECIFIER;
+  let prelinked_deno_module =
+    deno_core_module && is_prelinked_deno_module_source(source);
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  if deno_core_module && !prelinked_deno_module {
+    eprintln!(
+      "v8x/js2wasm: closed-world Deno replay source {specifier:?} has SHA-256 {}, expected {DENO_CORE_MODULE_SHA256}",
+      sha256_hex(source.as_bytes()),
+    );
+    return ptr::null();
+  }
   allocate(
     isolate,
     HeapValue::Module(ModuleState {
@@ -5546,14 +5637,40 @@ fn evaluate_prelinked_deno_module(
   module: *const Module,
   context: *const Context,
 ) -> *const Value {
-  let result =
-    with_deno_core_runtime(context, "module evaluation", |runtime| {
-      runtime.advance_deno_core_module()
-    });
-  if let Err(error) = result {
-    eprintln!("v8x/js2wasm: {error}");
-    fail_module_evaluation(module, &error);
-    return ptr::null();
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
+  {
+    let phase = match unsafe { heap_value(context) } {
+      Some(HeapValue::Context(state)) => state.deno_core_bootstrap_phase,
+      _ => {
+        fail_module_evaluation(
+          module,
+          "closed-world Deno replay module has no live v8x context",
+        );
+        return ptr::null();
+      }
+    };
+    if phase != DENO_CORE_PRELINKED_SCRIPTS.len() {
+      let error = format!(
+        "closed-world Deno replay module evaluated at bootstrap phase {}, expected {}",
+        phase,
+        DENO_CORE_PRELINKED_SCRIPTS.len(),
+      );
+      fail_module_evaluation(module, &error);
+      return ptr::null();
+    }
+  }
+
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    let result =
+      with_deno_core_runtime(context, "module evaluation", |runtime| {
+        runtime.advance_deno_core_module()
+      });
+    if let Err(error) = result {
+      eprintln!("v8x/js2wasm: {error}");
+      fail_module_evaluation(module, &error);
+      return ptr::null();
+    }
   }
 
   let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
