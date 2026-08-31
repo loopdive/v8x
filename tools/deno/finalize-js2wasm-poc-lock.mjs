@@ -15,7 +15,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 const EXPECTED = Object.freeze({
   canonicalization:
     "UTF-8 recursively lexicographic object keys; array order preserved; no whitespace",
-  js2Ref: "9bda388e593cbf9631dc7c4f2c4016685d357587",
+  js2Ref: "c3c95708b18f49e01bb3827c422a304d57e001be",
   denoRef: "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44",
   wasmtime: "47.0.3",
   compileOptions:
@@ -74,6 +74,9 @@ const EXPECTED = Object.freeze({
     wasm_gc: true,
     wasm_tail_call: true,
     wasm_exceptions: true,
+    debug_symbols: false,
+    generate_address_map: false,
+    wasm_backtrace_details: "disable",
   }),
 });
 
@@ -297,7 +300,9 @@ function validateEngineConfig(config, label) {
     label,
   );
   for (const [name, expected] of Object.entries(EXPECTED.engineConfig)) {
-    if (config[name] !== expected) fail(`${label}.${name} must be true`);
+    if (config[name] !== expected) {
+      fail(`${label}.${name} must be ${JSON.stringify(expected)}`);
+    }
   }
   return { ...EXPECTED.engineConfig };
 }

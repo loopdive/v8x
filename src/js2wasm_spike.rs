@@ -42,11 +42,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "js2wasm_runtime_compile")]
 use std::time::{SystemTime, UNIX_EPOCH};
-use wasmtime::{
-  Caller, Config, Engine, Instance, InstancePre, Linker, Module, Store,
-};
 #[cfg(feature = "js2wasm_runtime_compile")]
 use wasmtime::OptLevel;
+use wasmtime::{
+  Caller, Config, Engine, Instance, InstancePre, Linker, Module, Store,
+  WasmBacktraceDetails,
+};
 
 #[cfg(feature = "js2wasm_runtime_compile")]
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -87,6 +88,8 @@ const RUNTIME_EVAL_PROVIDER_EXPORTS: &[&str] = &[
 ];
 #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const RUNTIME_EVAL_AOT_MODULE_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE";
+#[cfg(any(feature = "js2wasm_deno_poc", feature = "js2wasm_deno_poc_replay"))]
+const DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED: &str = "disable";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const DENO_POC_MANIFEST_ENV: &str = "V8X_JS2WASM_DENO_POC_MANIFEST";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -97,7 +100,7 @@ const DENO_POC_PROVIDER_AOT_MODULE_ENV: &str =
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const POC_EXPECTED_DENO_REF: &str = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
-const POC_EXPECTED_JS2_REF: &str = "9bda388e593cbf9631dc7c4f2c4016685d357587";
+const POC_EXPECTED_JS2_REF: &str = "c3c95708b18f49e01bb3827c422a304d57e001be";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const POC_EXPECTED_WASMTIME_VERSION: &str = "47.0.3";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -269,6 +272,9 @@ struct DenoPocEngineConfig {
   wasm_gc: bool,
   wasm_tail_call: bool,
   wasm_exceptions: bool,
+  debug_symbols: bool,
+  generate_address_map: bool,
+  wasm_backtrace_details: String,
 }
 
 #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -452,6 +458,9 @@ fn expected_poc_attestation_sha256(
       "wasm_gc": manifest.engine_config.wasm_gc,
       "wasm_tail_call": manifest.engine_config.wasm_tail_call,
       "wasm_exceptions": manifest.engine_config.wasm_exceptions,
+      "debug_symbols": manifest.engine_config.debug_symbols,
+      "generate_address_map": manifest.engine_config.generate_address_map,
+      "wasm_backtrace_details": manifest.engine_config.wasm_backtrace_details,
     },
     "raw_sha256": artifact.raw_sha256,
     "aot_sha256": artifact.aot_sha256,
@@ -479,6 +488,23 @@ fn validate_poc_engine_config(
         "Deno POC manifest engine_config.{name} must be true"
       ));
     }
+  }
+  for (name, enabled) in [
+    ("debug_symbols", engine_config.debug_symbols),
+    ("generate_address_map", engine_config.generate_address_map),
+  ] {
+    if enabled {
+      return Err(format!(
+        "Deno POC manifest engine_config.{name} must be false"
+      ));
+    }
+  }
+  if engine_config.wasm_backtrace_details
+    != DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED
+  {
+    return Err(format!(
+      "Deno POC manifest engine_config.wasm_backtrace_details must be {DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED:?}"
+    ));
   }
   Ok(())
 }
@@ -1347,7 +1373,10 @@ impl SharedDenoRuntime {
       .wasm_function_references(true)
       .wasm_gc(true)
       .wasm_tail_call(true)
-      .wasm_exceptions(true);
+      .wasm_exceptions(true)
+      .debug_symbols(false)
+      .generate_address_map(false)
+      .wasm_backtrace_details(WasmBacktraceDetails::Disable);
     // js2 can emit multi-megabyte functions for closed interpreter graphs.
     // Cranelift's default speed optimizations exhaust bounded packaging hosts;
     // unoptimized code preserves Wasm semantics and remains compatible with
@@ -2810,6 +2839,9 @@ fn persist_deno_poc_precompile_pair(
       "wasm_gc": true,
       "wasm_tail_call": true,
       "wasm_exceptions": true,
+      "debug_symbols": false,
+      "generate_address_map": false,
+      "wasm_backtrace_details": DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED,
     },
     "raw_sha256": bytes_digest(raw_wasm),
     "aot_sha256": bytes_digest(artifact),
@@ -3068,6 +3100,9 @@ mod deno_poc_replay_tests {
             "wasm_gc": true,
             "wasm_tail_call": true,
             "wasm_exceptions": true,
+            "debug_symbols": false,
+            "generate_address_map": false,
+            "wasm_backtrace_details": DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED,
           },
           "raw_sha256": raw_sha256,
           "aot_sha256": aot_sha256,
@@ -3085,7 +3120,7 @@ mod deno_poc_replay_tests {
       provider_aot_sha256,
     );
     let mut value: serde_json::Value = serde_json::from_str(&format!(
-      r#"{{"schema_version":1,"raw_contract_sha256":"{raw_contract_sha256}","deno_ref":"{POC_EXPECTED_DENO_REF}","js2_ref":"{POC_EXPECTED_JS2_REF}","v8x_ref":"{TEST_V8X_REF}","wasmtime_version":"{POC_EXPECTED_WASMTIME_VERSION}","target":{{"os":"{POC_EXPECTED_TARGET_OS}","arch":"{POC_EXPECTED_TARGET_ARCH}","triple":"{POC_EXPECTED_TARGET_TRIPLE}"}},"engine_config":{{"wasm_function_references":true,"wasm_gc":true,"wasm_tail_call":true,"wasm_exceptions":true}},"compile_options_sha256":"{POC_EXPECTED_COMPILE_OPTIONS_SHA256}","sources":[{}],"artifacts":{{"app":{{"role":"app","raw_path":"deno-core.wasm","raw_sha256":"{app_raw_sha256}","aot_sha256":"{app_aot_sha256}","attestation_sha256":"{app_attestation_sha256}"}},"runtime_eval_provider":{{"role":"runtime_eval_provider","raw_path":"runtime-eval-provider.wasm","raw_sha256":"{provider_raw_sha256}","aot_sha256":"{provider_aot_sha256}","attestation_sha256":"{provider_attestation_sha256}"}}}}}}"#,
+      r#"{{"schema_version":1,"raw_contract_sha256":"{raw_contract_sha256}","deno_ref":"{POC_EXPECTED_DENO_REF}","js2_ref":"{POC_EXPECTED_JS2_REF}","v8x_ref":"{TEST_V8X_REF}","wasmtime_version":"{POC_EXPECTED_WASMTIME_VERSION}","target":{{"os":"{POC_EXPECTED_TARGET_OS}","arch":"{POC_EXPECTED_TARGET_ARCH}","triple":"{POC_EXPECTED_TARGET_TRIPLE}"}},"engine_config":{{"wasm_function_references":true,"wasm_gc":true,"wasm_tail_call":true,"wasm_exceptions":true,"debug_symbols":false,"generate_address_map":false,"wasm_backtrace_details":"disable"}},"compile_options_sha256":"{POC_EXPECTED_COMPILE_OPTIONS_SHA256}","sources":[{}],"artifacts":{{"app":{{"role":"app","raw_path":"deno-core.wasm","raw_sha256":"{app_raw_sha256}","aot_sha256":"{app_aot_sha256}","attestation_sha256":"{app_attestation_sha256}"}},"runtime_eval_provider":{{"role":"runtime_eval_provider","raw_path":"runtime-eval-provider.wasm","raw_sha256":"{provider_raw_sha256}","aot_sha256":"{provider_aot_sha256}","attestation_sha256":"{provider_attestation_sha256}"}}}}}}"#,
       source_entries(),
     ))
     .expect("construct valid Deno POC replay lock");
@@ -3159,6 +3194,12 @@ mod deno_poc_replay_tests {
     assert_eq!(parsed.sources.len(), 6);
     assert!(is_lowercase_sha256(&parsed.contract_sha256));
     assert!(is_lowercase_sha256(&parsed.raw_contract_sha256));
+    assert!(!parsed.engine_config.debug_symbols);
+    assert!(!parsed.engine_config.generate_address_map);
+    assert_eq!(
+      parsed.engine_config.wasm_backtrace_details.as_str(),
+      DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED
+    );
     assert_eq!(parsed.artifacts.app.raw_path, "deno-core.wasm");
     assert!(is_lowercase_sha256(
       &parsed.artifacts.app.attestation_sha256
@@ -3365,6 +3406,63 @@ mod deno_poc_replay_tests {
       )
       .unwrap_err()
       .contains("engine_config.wasm_gc must be true")
+    );
+
+    let enabled_debug_symbols = relock_manifest(manifest.replacen(
+      "\"debug_symbols\":false",
+      "\"debug_symbols\":true",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &enabled_debug_symbols,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("engine_config.debug_symbols must be false")
+    );
+
+    let enabled_address_map = relock_manifest(manifest.replacen(
+      "\"generate_address_map\":false",
+      "\"generate_address_map\":true",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &enabled_address_map,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("engine_config.generate_address_map must be false")
+    );
+
+    let enabled_backtrace_details = relock_manifest(manifest.replacen(
+      "\"wasm_backtrace_details\":\"disable\"",
+      "\"wasm_backtrace_details\":\"enable\"",
+      1,
+    ));
+    assert!(
+      parse_test_manifest(
+        &enabled_backtrace_details,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("engine_config.wasm_backtrace_details must be \"disable\"")
+    );
+
+    let missing_debug_symbols =
+      manifest.replacen("\"debug_symbols\":false,", "", 1);
+    assert!(
+      parse_test_manifest(
+        &missing_debug_symbols,
+        Some(TEST_V8X_REF),
+        Some(&contract_sha256),
+      )
+      .unwrap_err()
+      .contains("missing field `debug_symbols`")
     );
 
     let unknown_engine_flag = manifest.replacen(

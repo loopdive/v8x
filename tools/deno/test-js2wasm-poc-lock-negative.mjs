@@ -49,6 +49,21 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function appAttestationOverride(paths, directory, name, mutate) {
+  const aotPath = join(directory, `${name}.cwasm`);
+  copyFileSync(paths.app_aot, aotPath);
+  const attestation = clone(
+    JSON.parse(readFileSync(paths.app_attestation, "utf8")),
+  );
+  mutate(attestation);
+  const attestationPath = `${aotPath}.attestation.json`;
+  writeFileSync(
+    attestationPath,
+    `${JSON.stringify(attestation, null, 2)}\n`,
+  );
+  return { app_aot: aotPath, app_attestation: attestationPath };
+}
+
 function expectRejected(
   paths,
   directory,
@@ -114,6 +129,62 @@ function main() {
     engine.wasmtime.engine_config.wasm_exceptions = false;
     expectRejected(paths, directory, engine, "engine-config", "must be true");
 
+    for (const [name, field, value, fragment] of [
+      ["engine-debug-symbols", "debug_symbols", true, "must be false"],
+      [
+        "engine-address-map",
+        "generate_address_map",
+        true,
+        "must be false",
+      ],
+      [
+        "engine-backtrace-details",
+        "wasm_backtrace_details",
+        "enable",
+        "must be \"disable\"",
+      ],
+    ]) {
+      const modifiedEngine = clone(provenance);
+      modifiedEngine.wasmtime.engine_config[field] = value;
+      expectRejected(paths, directory, modifiedEngine, name, fragment);
+    }
+
+    const missingEngineConfig = clone(provenance);
+    delete missingEngineConfig.wasmtime.engine_config.debug_symbols;
+    expectRejected(
+      paths,
+      directory,
+      missingEngineConfig,
+      "missing-engine-config",
+      "unexpected field inventory",
+    );
+
+    for (const [name, field, value, fragment] of [
+      ["attestation-debug-symbols", "debug_symbols", true, "must be false"],
+      [
+        "attestation-address-map",
+        "generate_address_map",
+        true,
+        "must be false",
+      ],
+      [
+        "attestation-backtrace-details",
+        "wasm_backtrace_details",
+        "enable",
+        "must be \"disable\"",
+      ],
+    ]) {
+      const overrides = appAttestationOverride(
+        paths,
+        directory,
+        name,
+        (attestation) => {
+          attestation.engine_config[field] = value;
+        },
+      );
+      expectRejected(paths, directory, provenance, name, fragment, overrides);
+    }
+
     const contract = clone(provenance);
     contract.contract.sha256 = "0".repeat(64);
     expectRejected(paths, directory, contract, "contract", "contract digest");
@@ -127,7 +198,10 @@ function main() {
       provenance,
       "swapped-aot",
       "aot_sha256 does not bind",
-      { app_aot: swappedAot },
+      {
+        app_aot: swappedAot,
+        app_attestation: `${swappedAot}.attestation.json`,
+      },
     );
 
     const tamperedAttestation = clone(
