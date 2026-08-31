@@ -273,10 +273,13 @@ POC_CONTRACT_SHA256="$("$NODE_BIN" -e '
 # loudly rather than being matched loosely.
 V8X_POC_PATH="$V8X_DIR" perl -0pi -e '
   $old = q{v8 = { version = "149.4.0", default-features = false, features = ["simdutf"] }};
-  $new = q{v8 = { package = "v8x", path = "} . $ENV{V8X_POC_PATH} . q{", default-features = false, features = ["simdutf", "js2wasm_deno_poc_replay"] }};
+  $new = q|v8 = { package = "v8x", path = "| . $ENV{V8X_POC_PATH} . q|", default-features = false, features = ["simdutf", "js2wasm_deno_poc_replay"] }|;
   $count = s/\Q$old\E/$new/;
   die "expected exactly one pinned Deno v8 dependency line, replaced $count\n" unless $count == 1;
 ' "$DENO_DIR/Cargo.toml"
+EXPECTED_V8_DEPENDENCY="v8 = { package = \"v8x\", path = \"$V8X_DIR\", default-features = false, features = [\"simdutf\", \"js2wasm_deno_poc_replay\"] }"
+grep -Fqx "$EXPECTED_V8_DEPENDENCY" "$DENO_DIR/Cargo.toml" || \
+  fail "Deno v8 dependency did not resolve to the exact v8x POC checkout"
 
 # Deno's lock predates Wasmtime 47. Apply the reviewed lock delta generated
 # from this exact Deno revision instead of consulting today's registry resolver.
