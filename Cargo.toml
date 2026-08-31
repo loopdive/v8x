@@ -68,6 +68,21 @@ path = "src/lib.rs"
 default = ["engine_jsc", "vendor_jsc"]
 engine_jsc = []
 engine_quickjs = []
+# Engine-free, ahead-of-time module backend. This first vertical slice owns
+# handles in Rust and evaluates linked TypeScript graphs through js2wasm.
+engine_js2wasm = ["dep:serde_json", "dep:sha2", "dep:wasmtime"]
+# General-purpose runtime profile. It invokes a shipped js2wasm compiler on
+# cache misses and uses Cranelift to produce target-native cached artifacts.
+# Packaged applications use `engine_js2wasm` alone and therefore ship neither
+# compiler nor Cranelift.
+engine_js2wasm_runtime = ["js2wasm_runtime_compile"]
+# Compatibility name retained for the original spike and its scripts.
+js2wasm_runtime_compile = ["engine_js2wasm", "wasmtime/cranelift"]
+# Unix-only diagnostic link completion for unchanged deno_core probes. Every
+# otherwise-unresolved v8/inspector/shared-pointer entry is a weak, fail-loud
+# abort stub; MSVC has no implementation and this must never be enabled in a
+# production runtime.
+js2wasm_diagnostic_abi = ["engine_js2wasm"]
 # Short aliases (README-facing).
 jsc = ["engine_jsc", "vendor_jsc"]
 # System JavaScriptCore.framework (tiny binary, no vendored WebKit). Apple's
@@ -87,6 +102,17 @@ link_quickjs = []
 # Build JavaScriptCore from the vendored WebKit (JSCOnly port) and link that
 # instead of the system framework. Same C API, so jsc_sys.rs is unchanged.
 vendor_jsc = []
+# Compatibility alias for the initial source-compiling spike name.
+js2wasm_spike = ["js2wasm_runtime_compile"]
+# Explicit, artifact-backed Deno Script::Run acceptance test. Keeping this as
+# an opt-in feature makes the external pinned compiler input non-vacuous: the
+# test is either built with its required artifact environment or not built.
+js2wasm_deno_poc = ["js2wasm_runtime_compile"]
+# Strict, compiler-free replay of the pinned Deno proof-of-concept. The
+# replay implementation accepts only a locked manifest plus verified Wasmtime
+# precompiled artifacts. Keep this separate from the development compiler
+# profile so Cargo cannot silently pull Cranelift into the replay binary.
+js2wasm_deno_poc_replay = ["engine_js2wasm", "js2wasm_diagnostic_abi", "dep:serde"]
 
 # v8-crate feature flags Deno toggles; inert here.
 use_custom_libcxx = []
@@ -100,9 +126,13 @@ bitflags = "2.5"
 icu_collator = { version = "2.2.1", optional = true }
 icu_locale = { version = "2.2.0", optional = true }
 paste = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+sha2 = { version = "0.10", optional = true }
 temporal_capi = { version = "0.2.3", features = ["zoneinfo64"] }
 temporal_rs = { version = "0.2.3", default-features = false }
 timezone_provider = { version = "0.2.3", features = ["zoneinfo64"] }
+wasmtime = { version = "=47.0.3", optional = true, default-features = false, features = ["gc", "gc-drc", "runtime", "std"] }
 
 [build-dependencies]
 cc = "1.0"
@@ -121,12 +151,22 @@ bytes = "1"
 # (tests/harness/run.mjs) runs these via `cargo test --test rv8_*` per backend
 # and ratchets the pass set against status/baselines/<backend>/rusty_v8.txt.
 #
-# Excluded on purpose: test_ui (trybuild, needs deno crate fixtures),
-# test_simdutf (feature-gated). They are not part of the tracked suite.
+# Excluded on purpose: test_ui (trybuild, needs deno crate fixtures).
+# test_simdutf is registered separately and runs when `simdutf` is enabled.
 # -----------------------------------------------------------------------------
 [[test]]
 name = "rv8_test_api"
 path = "vendor/rusty_v8/tests/test_api.rs"
+
+[[test]]
+name = "js2wasm_spike"
+path = "tests/js2wasm_spike.rs"
+required-features = ["engine_js2wasm"]
+
+[[test]]
+name = "rv8_test_simdutf"
+path = "vendor/rusty_v8/tests/test_simdutf.rs"
+required-features = ["simdutf"]
 
 [[test]]
 name = "rv8_test_api_flags"

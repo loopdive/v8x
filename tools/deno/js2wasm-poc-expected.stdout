@@ -1,0 +1,6 @@
+The sum of
+1,2,3
+is
+6
+Exception:
+TypeError: serde_v8 error: invalid type; expected: array, got: Number

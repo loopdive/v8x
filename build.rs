@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Emit `$OUT_DIR/bc_embed.rs` defining `EMBEDDED_BC`. When `V82JSC_BC_BLOB`
@@ -70,8 +71,133 @@ fn emit_quickjs_cache_tag(manifest_dir: &Path) {
   println!("cargo:rustc-env=V82JSC_QUICKJS_CACHE_TAG={hash:016x}");
 }
 
+/// Build the diagnostic-only weak ABI completion layer used by the unchanged
+/// deno_core probe. These functions deliberately have no return path: reaching
+/// one prints the exact unresolved ABI symbol and aborts. A real strong
+/// implementation with the same name always wins over the weak definition.
+fn build_js2wasm_diagnostic_abi(manifest_dir: &Path) {
+  const EXPECTED_SYMBOLS: usize = 282;
+
+  let manifest = manifest_dir.join("src/js2wasm/diagnostic_abi_symbols.txt");
+  println!("cargo:rerun-if-changed={}", manifest.display());
+  let contents = std::fs::read_to_string(&manifest).unwrap_or_else(|err| {
+    panic!(
+      "failed to read js2wasm diagnostic ABI manifest {}: {err}",
+      manifest.display()
+    )
+  });
+
+  let mut symbols = Vec::new();
+  for (index, raw) in contents.lines().enumerate() {
+    let symbol = raw.trim();
+    if symbol.is_empty() || symbol.starts_with('#') {
+      continue;
+    }
+    assert!(
+      (symbol.starts_with("cppgc__")
+        || symbol.starts_with("v8__")
+        || symbol.starts_with("v8_inspector__")
+        || symbol.starts_with("std__shared_ptr__v8__"))
+        && symbol
+          .bytes()
+          .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+      "invalid diagnostic ABI symbol at {}:{}: {symbol:?}",
+      manifest.display(),
+      index + 1
+    );
+    if let Some(previous) = symbols.last() {
+      assert!(
+        previous < &symbol,
+        "diagnostic ABI manifest must be strictly sorted and unique: \
+         {previous:?} then {symbol:?}"
+      );
+    }
+    symbols.push(symbol);
+  }
+  assert_eq!(
+    symbols.len(),
+    EXPECTED_SYMBOLS,
+    "diagnostic ABI manifest size changed; regenerate it from the pinned \
+     deno hello_world nm inventory and review the delta"
+  );
+
+  let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+  let source_path = out_dir.join("js2wasm_diagnostic_abi.c");
+  let mut source = String::from(
+    r#"/* Generated from src/js2wasm/diagnostic_abi_symbols.txt. */
+#include <stdio.h>
+#include <stdlib.h>
+
+#if defined(_MSC_VER)
+#error "js2wasm_diagnostic_abi requires compiler weak-definition support"
+#else
+#define V8X_DIAGNOSTIC_WEAK \
+  __attribute__((weak, visibility("default"), noreturn, noinline))
+#define V8X_DIAGNOSTIC_NORETURN __attribute__((noreturn, noinline))
+#endif
+
+static V8X_DIAGNOSTIC_NORETURN void
+v8x_js2wasm_abort_unresolved_abi(const char *symbol) {
+  fprintf(stderr,
+          "v8x/js2wasm diagnostic ABI reached unresolved symbol: %s\n",
+          symbol);
+  fflush(stderr);
+  abort();
+}
+
+#define V8X_DIAGNOSTIC_STUB(symbol) \
+  V8X_DIAGNOSTIC_WEAK void symbol(void) { \
+    v8x_js2wasm_abort_unresolved_abi(#symbol); \
+  }
+
+"#,
+  );
+  for symbol in &symbols {
+    writeln!(source, "V8X_DIAGNOSTIC_STUB({symbol})")
+      .expect("writing generated diagnostic ABI source cannot fail");
+  }
+  source.push_str("\n#undef V8X_DIAGNOSTIC_STUB\n");
+  std::fs::write(&source_path, source).unwrap_or_else(|err| {
+    panic!(
+      "failed to write generated diagnostic ABI source {}: {err}",
+      source_path.display()
+    )
+  });
+
+  let mut build = cc::Build::new();
+  build.file(&source_path);
+  build.flag_if_supported("-fno-lto");
+  build.compile("v8x_js2wasm_diagnostic_abi");
+}
+
 fn main() {
+  if env::var_os("CARGO_FEATURE_JS2WASM_DENO_POC_REPLAY").is_some()
+    && [
+      "CARGO_FEATURE_JS2WASM_RUNTIME_COMPILE",
+      "CARGO_FEATURE_ENGINE_QUICKJS",
+      "CARGO_FEATURE_LINK_QUICKJS",
+      "CARGO_FEATURE_ENGINE_JSC",
+      "CARGO_FEATURE_VENDOR_JSC",
+      "CARGO_FEATURE_SYSTEM_JSC",
+    ]
+    .iter()
+    .any(|name| env::var_os(name).is_some())
+  {
+    panic!(
+      "`js2wasm_deno_poc_replay` is compiler-free and cannot be combined with \
+       `js2wasm_runtime_compile`, QuickJS, or JSC backend features"
+    );
+  }
+
   let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+  let target = env::var("TARGET").expect("Cargo did not provide TARGET");
+  println!("cargo:rustc-env=V8X_BUILD_TARGET_TRIPLE={target}");
+
+  // The strict Deno replay bakes the exact v8x revision into the crate and
+  // its final, AOT-inclusive contract digest into the crate. Make incremental
+  // Cargo builds notice when the orchestrator changes either replay lock pin.
+  println!("cargo:rerun-if-env-changed=V8X_JS2WASM_POC_V8X_REF");
+  println!("cargo:rerun-if-env-changed=V8X_JS2WASM_POC_CONTRACT_SHA256");
 
   // Init the pinned rusty_v8 submodule + apply our 2 patches BEFORE compile:
   // src/lib.rs `#[path]`-includes its modules, so the vendored Rust API surface
@@ -94,17 +220,16 @@ fn main() {
   // (c_int on MSVC, c_uint elsewhere).
   let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
   let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-  let gen_file = if env::var("CARGO_CFG_TARGET_VENDOR").as_deref()
-    == Ok("apple")
-  {
-    "gen/src_binding_debug_aarch64-apple-darwin.rs"
-  } else if target_os == "windows" && target_env == "msvc" {
-    "gen/src_binding_release_x86_64-pc-windows-msvc.rs"
-  } else {
-    // Itanium mangling without the Apple underscore: linux-gnu/musl, the BSDs,
-    // android, windows-gnu.
-    "gen/src_binding_debug_x86_64-unknown-linux-gnu.rs"
-  };
+  let gen_file =
+    if env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+      "gen/src_binding_debug_aarch64-apple-darwin.rs"
+    } else if target_os == "windows" && target_env == "msvc" {
+      "gen/src_binding_release_x86_64-pc-windows-msvc.rs"
+    } else {
+      // Itanium mangling without the Apple underscore: linux-gnu/musl, the BSDs,
+      // android, windows-gnu.
+      "gen/src_binding_debug_x86_64-unknown-linux-gnu.rs"
+    };
   let binding_path = manifest_dir.join(gen_file);
   println!(
     "cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={}",
@@ -114,11 +239,14 @@ fn main() {
 
   emit_bc_embed();
 
+  if env::var_os("CARGO_FEATURE_JS2WASM_DIAGNOSTIC_ABI").is_some() {
+    build_js2wasm_diagnostic_abi(&manifest_dir);
+  }
+
   // --- JSC backend: generate full FFI bindings from the SDK header. ---
   // `src/jsc_sys.rs` `include!`s the output, so the complete JavaScriptCore
   // C API is available without hand-written externs.
-  if env::var_os("CARGO_FEATURE_ENGINE_JSC").is_some() && target_os != "macos"
-  {
+  if env::var_os("CARGO_FEATURE_ENGINE_JSC").is_some() && target_os != "macos" {
     panic!(
       "the JSC backends (features `jsc`/`engine_jsc`/`system_jsc`) are \
        macOS-only; build with `--no-default-features --features quickjs` \
@@ -370,11 +498,10 @@ fn apply_patch_series(root: &Path, sub: &str, prefix: &str) {
     // Already absolute (root is CARGO_MANIFEST_DIR). Deliberately NOT
     // canonicalize(): on Windows that yields a \\?\-prefixed path git rejects.
     let patch_str = patch.to_str().unwrap();
-    let applied = run_git(
-      &sub_dir,
-      &["apply", "--reverse", "--check", patch_str],
-    ) || run_git(&sub_dir, &["apply", patch_str])
-      || patch_fallback(root, sub, &patch);
+    let applied =
+      run_git(&sub_dir, &["apply", "--reverse", "--check", patch_str])
+        || run_git(&sub_dir, &["apply", patch_str])
+        || patch_fallback(root, sub, &patch);
     assert!(applied, "failed to apply patches/{name} onto {sub}");
     std::fs::write(&stamp, format!("{checksum}\n")).unwrap();
   }
@@ -435,10 +562,7 @@ fn patch_fallback(root: &Path, sub: &str, patch: &Path) -> bool {
   let out = String::from_utf8_lossy(&dry.stdout).into_owned()
     + &String::from_utf8_lossy(&dry.stderr);
   if out.contains("previously applied") {
-    println!(
-      "cargo:warning={} may already be applied",
-      patch.display()
-    );
+    println!("cargo:warning={} may already be applied", patch.display());
     return true;
   }
   false

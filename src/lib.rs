@@ -110,6 +110,36 @@ mod script;
 #[cfg(feature = "engine_jsc")]
 mod jsc;
 
+#[cfg(any(feature = "js2wasm_spike", feature = "engine_js2wasm"))]
+mod js2wasm_spike;
+
+#[cfg(feature = "engine_js2wasm")]
+#[doc(hidden)]
+pub use js2wasm_spike::{Js2WasmRuntimeStats, js2wasm_runtime_stats};
+
+#[cfg(feature = "engine_js2wasm")]
+#[doc(hidden)]
+pub use js2wasm_spike::{
+  js2wasm_verify_graph_binding_for_test, js2wasm_write_graph_binding_for_test,
+};
+
+#[cfg(all(
+  feature = "js2wasm_runtime_compile",
+  not(feature = "js2wasm_deno_poc_replay"),
+))]
+#[doc(hidden)]
+pub use js2wasm_spike::js2wasm_bootstrap_raw_module_for_test;
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub use js2wasm_spike::{
+  js2wasm_precompile_deno_core_for_test,
+  js2wasm_precompile_runtime_eval_provider_for_test,
+};
+
+#[cfg(feature = "engine_js2wasm")]
+mod js2wasm;
+
 #[cfg(feature = "engine_quickjs")]
 mod quickjs;
 
@@ -287,6 +317,8 @@ pub const TYPED_ARRAY_MAX_SIZE_IN_HEAP: usize =
 /// The engine backend this build of the shim runs on.
 pub const V8X_ENGINE: &str = if cfg!(feature = "engine_quickjs") {
   "quickjs"
+} else if cfg!(feature = "engine_js2wasm") {
+  "js2wasm"
 } else if cfg!(feature = "vendor_jsc") {
   "jsc"
 } else {

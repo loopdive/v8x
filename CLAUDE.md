@@ -9,9 +9,11 @@ The crate is literally named `v8` (version `149.4.0`) so it drops into Deno via
 | `jsc` | `engine_jsc,vendor_jsc` | WebKit JSCOnly built from source (shippable) | macOS |
 | `sys-jsc` | `system_jsc` | Apple's `JavaScriptCore.framework` | macOS |
 | `quickjs` | `quickjs` | vendored quickjs-ng, static | any |
+| `js2wasm` | `engine_js2wasm,js2wasm_diagnostic_abi` | js2wasm AOT modules on Wasmtime | any |
 
-Backend implementation lives in **`src/jsc/`** and **`src/quickjs/`** — these
-define the ~570 `v8__*` C-ABI symbols the vendored rusty_v8 Rust surface calls.
+Backend implementation lives in **`src/jsc/`**, **`src/quickjs/`**, and
+**`src/js2wasm/`**. These define the `v8__*` C-ABI symbols the vendored rusty_v8
+Rust surface calls.
 
 ## Your job
 
@@ -90,6 +92,19 @@ perl -0pi -e 's/"engine_jsc", "vendor_jsc"/"quickjs"/g' ../deno/Cargo.toml   # e
 
 # runs `cargo nextest run -p deno_core` against our shim (no full deno binary):
 node tests/harness/run.mjs deno_core quickjs --deno-dir=../deno
+
+# For js2wasm, select the fail-loud diagnostic ABI and advance only the shared
+# lockfile packages whose pinned versions predate Wasmtime 47's minimums:
+perl -0pi -e 's/"quickjs"/"engine_js2wasm", "js2wasm_diagnostic_abi"/g' ../deno/Cargo.toml
+(cd ../deno && cargo update \
+  -p async-trait \
+  -p bitflags@2.9.3 \
+  -p target-lexicon \
+  -p libm \
+  -p indexmap \
+  -p bumpalo \
+  -p anyhow)
+node tests/harness/run.mjs deno_core js2wasm --deno-dir=../deno
 ```
 
 On macOS (`jsc`/`sys-jsc`) the runner auto-codesigns test binaries with
