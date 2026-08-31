@@ -25,7 +25,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "00d0cc0352bd456e81fdfcf66f5a2e5f86cb0deb";
+const EXPECTED_JS2_REF = "4024b398c547c26850063b44752c82c2d7c906b3";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
@@ -450,6 +450,67 @@ function checkedCompile(result, label) {
   return Buffer.from(result.binary);
 }
 
+function readWasmVarUint32(binary, offset, label) {
+  let value = 0;
+  let shift = 0;
+  for (let index = 0; index < 5; index += 1) {
+    if (offset >= binary.length) fail(`${label} has a truncated varuint32`);
+    const byte = binary[offset];
+    offset += 1;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [value >>> 0, offset];
+    shift += 7;
+  }
+  fail(`${label} has an invalid varuint32`);
+}
+
+function definedLinearMemoryCount(binary, label) {
+  if (
+    binary.length < 8 ||
+    !binary.subarray(0, 8).equals(
+      Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]),
+    )
+  ) {
+    fail(`${label} is not a WebAssembly v1 binary`);
+  }
+  let offset = 8;
+  let memories = 0;
+  while (offset < binary.length) {
+    const sectionId = binary[offset];
+    offset += 1;
+    const [sectionSize, payloadOffset] = readWasmVarUint32(
+      binary,
+      offset,
+      `${label} section size`,
+    );
+    const sectionEnd = payloadOffset + sectionSize;
+    if (sectionEnd > binary.length) fail(`${label} has a truncated section`);
+    if (sectionId === 5) {
+      const [count] = readWasmVarUint32(
+        binary,
+        payloadOffset,
+        `${label} memory count`,
+      );
+      memories += count;
+    }
+    offset = sectionEnd;
+  }
+  return memories;
+}
+
+function assertNoLinearMemories(binary, module, label) {
+  const imported = WebAssembly.Module.imports(module).filter(
+    (entry) => entry.kind === "memory",
+  ).length;
+  const defined = definedLinearMemoryCount(binary, label);
+  if (imported !== 0 || defined !== 0) {
+    fail(
+      `${label} declares ${imported} imported and ${defined} defined linear memories; ` +
+        "the POC heap limiter is valid only for GC-only artifacts",
+    );
+  }
+}
+
 const RAW_MODULE_BOOTSTRAP_CHECK = String.raw`
 const fs = require("node:fs");
 const binary = fs.readFileSync(0);
@@ -486,7 +547,11 @@ function assertRawModuleInitializesWithStubImports(appBinary, profile) {
   try {
     output = execFileSync(
       process.execPath,
-      ["--experimental-wasm-exnref", "--eval", RAW_MODULE_BOOTSTRAP_CHECK],
+      [
+        "--experimental-wasm-exnref",
+        "--eval",
+        RAW_MODULE_BOOTSTRAP_CHECK,
+      ],
       {
         input: appBinary,
         encoding: "utf8",
@@ -563,6 +628,47 @@ function assertRuntimeEvalProviderCanaries(providerModule) {
         `runtime-eval interpreter provider ${name} returned ${actual}, expected ${expected}`,
       );
     }
+  }
+}
+
+function assertApplicationLinksRuntimeEvalProvider(appModule, providerModule) {
+  const provider = new WebAssembly.Instance(providerModule, {});
+  const imports = Object.create(null);
+  for (const entry of WebAssembly.Module.imports(appModule)) {
+    let moduleImports = imports[entry.module];
+    if (moduleImports === undefined) {
+      moduleImports = Object.create(null);
+      imports[entry.module] = moduleImports;
+    }
+    if (
+      entry.module === "js2wasm:runtime-eval" ||
+      entry.module === "v8x:runtime-eval-json"
+    ) {
+      const implementation = provider.exports[entry.name];
+      if (typeof implementation !== "function") {
+        fail(
+          `runtime-eval provider is missing application import ${entry.module}::${entry.name}`,
+        );
+      }
+      moduleImports[entry.name] = implementation;
+    } else {
+      if (entry.kind !== "function") {
+        fail(
+          `raw application has unsupported non-function import ${entry.module}::${entry.name} (${entry.kind})`,
+        );
+      }
+      moduleImports[entry.name] = () => 0;
+    }
+  }
+  const instance = new WebAssembly.Instance(appModule, imports);
+  const moduleInit = instance.exports.__module_init;
+  if (typeof moduleInit !== "function") {
+    fail("application does not export __module_init after provider linking");
+  }
+  moduleInit();
+  const bootstrapProbe = instance.exports.__v8x_probe_deno_core_bootstrap;
+  if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== 42) {
+    fail("application bootstrap probe failed with optimized provider linked");
   }
 }
 
@@ -891,6 +997,11 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   );
   const appBinary = checkedCompile(app, `Deno ${profile} application`);
   const appModule = new WebAssembly.Module(appBinary);
+  assertNoLinearMemories(
+    appBinary,
+    appModule,
+    `Deno ${profile} application`,
+  );
   // Regression guard for the exact raw graph: this must not depend on a
   // Wasmtime store or a runtime-eval provider just to initialize Deno core.
   // Run it in a child so compilation state cannot affect raw boot behavior.
@@ -948,6 +1059,11 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
     "runtime-eval interpreter provider",
   );
   const providerModule = new WebAssembly.Module(providerBinary);
+  assertNoLinearMemories(
+    providerBinary,
+    providerModule,
+    "runtime-eval interpreter provider",
+  );
   const providerImports = WebAssembly.Module.imports(providerModule);
   if (providerImports.length !== 0) {
     fail(
@@ -955,6 +1071,7 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
     );
   }
   assertRuntimeEvalProviderCanaries(providerModule);
+  assertApplicationLinksRuntimeEvalProvider(appModule, providerModule);
   atomicWrite(providerOutput, providerBinary);
 
   const acornPinPath = "tests/dogfood/acorn-pin.json";

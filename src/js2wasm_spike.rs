@@ -45,8 +45,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "js2wasm_runtime_compile")]
 use wasmtime::OptLevel;
 use wasmtime::{
-  Caller, Config, Engine, Instance, InstancePre, Linker, Module, Store,
-  WasmBacktraceDetails,
+  Caller, Config, Engine, Instance, InstancePre, Linker, Module,
+  ResourceLimiter, Store, WasmBacktraceDetails,
 };
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -100,7 +100,7 @@ const DENO_POC_PROVIDER_AOT_MODULE_ENV: &str =
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const POC_EXPECTED_DENO_REF: &str = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
-const POC_EXPECTED_JS2_REF: &str = "00d0cc0352bd456e81fdfcf66f5a2e5f86cb0deb";
+const POC_EXPECTED_JS2_REF: &str = "4024b398c547c26850063b44752c82c2d7c906b3";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const POC_EXPECTED_WASMTIME_VERSION: &str = "47.0.3";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -938,6 +938,7 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  heap_isolate: usize,
   cwd: Vec<u16>,
   cwd_op_calls: u64,
   script: Vec<u16>,
@@ -948,6 +949,35 @@ struct DenoHostState {
   pending_sum: Option<PendingSum>,
   pending_print: Option<PendingPrint>,
   last_error: Option<DenoBridgeError>,
+}
+
+impl ResourceLimiter for DenoHostState {
+  fn memory_growing(
+    &mut self,
+    current: usize,
+    desired: usize,
+    _maximum: Option<usize>,
+  ) -> wasmtime::Result<bool> {
+    if self.heap_isolate == 0 {
+      return Ok(true);
+    }
+    let isolate = self.heap_isolate as *mut crate::RealIsolate;
+    let decision =
+      crate::js2wasm::handle_js2wasm_heap_pressure(isolate, current, desired);
+    if decision.terminating {
+      return Err(wasmtime::format_err!("execution terminated"));
+    }
+    Ok(decision.allowed)
+  }
+
+  fn table_growing(
+    &mut self,
+    _current: usize,
+    _desired: usize,
+    _maximum: Option<usize>,
+  ) -> wasmtime::Result<bool> {
+    Ok(true)
+  }
 }
 
 pub(crate) enum DenoScriptResult {
@@ -1984,8 +2014,8 @@ pub fn js2wasm_bootstrap_raw_module_for_test(
   };
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve test working directory: {error}"))?;
-  DenoRuntime::instantiate(shared, &prepared, cwd.clone())?;
-  DenoRuntime::instantiate(shared, &prepared, cwd)?;
+  DenoRuntime::instantiate(shared, &prepared, cwd.clone(), 0)?;
+  DenoRuntime::instantiate(shared, &prepared, cwd, 0)?;
   Ok(())
 }
 
@@ -2048,8 +2078,9 @@ fn take_pending_wasm_exception_summary<T>(store: &mut Store<T>) -> String {
 /// Instantiate the prelinked core-bootstrap transaction used by the
 /// experimental classic-script bridge. Production uses a trusted artifact;
 /// development builds may precompile the exact raw module in-process.
-pub(crate) fn deno_core_bootstrap_runtime_from_env()
--> Result<DenoRuntime, String> {
+pub(crate) fn deno_core_bootstrap_runtime_from_env(
+  heap_isolate: usize,
+) -> Result<DenoRuntime, String> {
   let shared = shared_runtime()?;
 
   #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -2089,7 +2120,7 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env()
   let cwd = std::env::current_dir().map_err(|error| {
     format!("resolve Deno bootstrap working directory: {error}")
   })?;
-  DenoRuntime::instantiate(shared, &prepared, cwd)
+  DenoRuntime::instantiate(shared, &prepared, cwd, heap_isolate)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -2130,11 +2161,13 @@ impl DenoRuntime {
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
     cwd: PathBuf,
+    heap_isolate: usize,
   ) -> Result<Self, String> {
     let cwd = cwd.to_string_lossy().encode_utf16().collect();
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        heap_isolate,
         cwd,
         cwd_op_calls: 0,
         script: Vec::new(),
@@ -2147,6 +2180,7 @@ impl DenoRuntime {
         last_error: None,
       },
     );
+    store.limiter(|state| state);
     let (instance, runtime_eval_provider) = match prepared {
       PreparedModule::Prelinked(instance_pre) => {
         let instance = instance_pre
@@ -2228,6 +2262,13 @@ impl DenoRuntime {
         "Deno op Function handles were rebound to different values".to_string(),
       ),
     }
+  }
+
+  pub(crate) fn configure_heap_limit(
+    &mut self,
+    isolate: *mut crate::RealIsolate,
+  ) {
+    self.store.data_mut().heap_isolate = isolate as usize;
   }
 
   pub(crate) fn bind_test_fn(
@@ -2640,6 +2681,7 @@ impl DenoRuntime {
 pub(crate) fn compile_and_instantiate(
   entry: &str,
   modules: &[SourceModule],
+  heap_isolate: usize,
 ) -> Result<DenoRuntime, String> {
   if modules.is_empty() {
     return Err("js2wasm module graph is empty".to_string());
@@ -2666,7 +2708,7 @@ pub(crate) fn compile_and_instantiate(
   };
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve Deno.cwd() host value: {error}"))?;
-  DenoRuntime::instantiate(shared, &prepared, cwd)
+  DenoRuntime::instantiate(shared, &prepared, cwd, heap_isolate)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]

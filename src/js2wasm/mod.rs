@@ -19,7 +19,8 @@ use crate::module::{
 };
 #[cfg(not(target_os = "windows"))]
 use crate::module::{
-  ResolveModuleCallbackRet, SyntheticModuleEvaluationStepsRet,
+  ResolveModuleCallbackRet, ResolveSourceCallbackRet,
+  SyntheticModuleEvaluationStepsRet,
 };
 use crate::script::ScriptOrigin;
 use crate::script_compiler::{
@@ -31,10 +32,11 @@ use crate::{
   Allocator, Array, ArrayBuffer, ArrayBufferView, BackingStore,
   BackingStoreDeleterCallback, BigInt, BigInt64Array, BigUint64Array, Boolean,
   Context, Data, External, FixedArray, Int32, Int32Array, Integer,
-  KeyConversionMode, Message, Module, Number, Object, Platform, Primitive,
-  Promise, PromiseResolver, PromiseState, PropertyFilter, RealIsolate, Script,
-  StackTrace, String as V8String, TypedArray, Uint8Array, Uint16Array, Uint32,
-  Uint32Array, UnboundModuleScript, Value,
+  KeyConversionMode, Location, Message, Module, ModuleRequest, Number, Object,
+  Platform, Primitive, PrimitiveArray, Promise, PromiseResolver, PromiseState,
+  PropertyFilter, RealIsolate, Script, StackTrace, String as V8String,
+  TypedArray, Uint8Array, Uint16Array, Uint32, Uint32Array,
+  UnboundModuleScript, Value,
 };
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 use sha2::{Digest, Sha256};
@@ -61,7 +63,7 @@ struct ModuleState {
   status: u8,
   source: String,
   specifier: String,
-  imports: Vec<String>,
+  imports: Vec<StaticImport>,
   dependencies: Vec<*const Module>,
   runtime: Option<crate::js2wasm_spike::DenoRuntime>,
   synthetic: Option<SyntheticModuleState>,
@@ -71,6 +73,35 @@ struct ModuleState {
   module_requests: *const FixedArray,
   namespace: *const Object,
   prelinked_deno_module: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaticImportPhase {
+  Evaluation,
+  Source,
+  Defer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImportAttribute {
+  key: String,
+  value: String,
+  source_offset: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StaticImport {
+  specifier: String,
+  source_offset: i32,
+  attributes: Vec<ImportAttribute>,
+  phase: StaticImportPhase,
+}
+
+struct ModuleRequestState {
+  specifier: *const V8String,
+  source_offset: int,
+  import_attributes: *const FixedArray,
+  phase: StaticImportPhase,
 }
 
 struct SyntheticModuleState {
@@ -256,6 +287,8 @@ enum HeapValue {
   ObjectTemplate(ObjectTemplateState),
   FunctionTemplate(FunctionTemplateState),
   FixedArray(Vec<*const Data>),
+  PrimitiveArray(Vec<*const Primitive>),
+  ModuleRequest(ModuleRequestState),
   UnboundModuleScript(UnboundModuleScriptState),
   Promise(PromiseStateData),
   PromiseResolver(PromiseResolverState),
@@ -321,6 +354,38 @@ struct IsolateState {
   error_prototype: *const Object,
   symbol_registry: Vec<(String, *const crate::Symbol)>,
   iterator_symbol: *const crate::Symbol,
+  near_heap_limit: NearHeapLimitState,
+}
+
+#[derive(Clone, Copy)]
+struct NearHeapLimitCallbackState {
+  callback: crate::isolate::NearHeapLimitCallback,
+  data: *mut c_void,
+}
+
+struct NearHeapLimitState {
+  callbacks: Vec<NearHeapLimitCallbackState>,
+  initial_heap_limit: usize,
+  current_heap_limit: usize,
+  // Wasmtime's resource limiter reports the live GC backing-heap capacity as
+  // `current`. Keep its high-water mark so removing a callback cannot restore
+  // a V8 limit below memory that Wasmtime already has committed.
+  highest_gc_heap_capacity: usize,
+  dispatching: bool,
+}
+
+/// Result of handling a Wasmtime GC-heap growth request for a js2wasm isolate.
+///
+/// The runtime owns the actual allocation boundary, while this module owns V8
+/// callback registration and termination state. Keep the decision small and
+/// copyable so the Wasmtime resource limiter can act on it without retaining a
+/// borrow into the isolate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Js2WasmHeapPressureDecision {
+  pub(crate) allowed: bool,
+  pub(crate) terminating: bool,
+  pub(crate) callback_invoked: bool,
+  pub(crate) current_limit: usize,
 }
 
 // rusty_v8's raw TryCatch is an inline `[MaybeUninit<usize>; 6]`. Keep all
@@ -474,6 +539,11 @@ fn with_deno_core_runtime<T>(
   let mut runtime = runtime.try_borrow_mut().map_err(|_| {
     format!("prelinked Deno core runtime re-entered during {operation}")
   })?;
+  // Every path into the shared Wasmtime instance must enforce the active
+  // isolate's ResourceConstraints. Keeping this at the common borrow boundary
+  // covers classic scripts, source-text modules, prelinked bootstrap stages,
+  // and callbacks that re-enter the runtime.
+  runtime.configure_heap_limit(current_isolate());
   callback(&mut runtime)
 }
 
@@ -613,6 +683,139 @@ fn property_on_chain<T>(
     };
   }
   None
+}
+
+#[cfg(test)]
+mod heap_limit_tests {
+  use super::*;
+
+  static FIRST_NEAR_LIMIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+  static SECOND_NEAR_LIMIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+  unsafe extern "C" fn first_near_heap_limit(
+    _data: *mut c_void,
+    _current_heap_limit: usize,
+    _initial_heap_limit: usize,
+  ) -> usize {
+    FIRST_NEAR_LIMIT_CALLS.fetch_add(1, Ordering::SeqCst);
+    128
+  }
+
+  unsafe extern "C" fn second_near_heap_limit(
+    _data: *mut c_void,
+    current_heap_limit: usize,
+    initial_heap_limit: usize,
+  ) -> usize {
+    assert_eq!(32, initial_heap_limit);
+    SECOND_NEAR_LIMIT_CALLS.fetch_add(1, Ordering::SeqCst);
+    current_heap_limit * 2
+  }
+
+  #[test]
+  fn removing_one_near_heap_limit_callback_preserves_the_next_callback() {
+    FIRST_NEAR_LIMIT_CALLS.store(0, Ordering::SeqCst);
+    SECOND_NEAR_LIMIT_CALLS.store(0, Ordering::SeqCst);
+    let isolate = v8__Isolate__New(ptr::null());
+    unsafe {
+      let state = isolate_state(isolate);
+      state.near_heap_limit.initial_heap_limit = 32;
+      state.near_heap_limit.current_heap_limit = 64;
+    }
+
+    v8__Isolate__AddNearHeapLimitCallback(
+      isolate,
+      first_near_heap_limit,
+      ptr::null_mut(),
+    );
+    v8__Isolate__AddNearHeapLimitCallback(
+      isolate,
+      second_near_heap_limit,
+      ptr::null_mut(),
+    );
+    v8__Isolate__RemoveNearHeapLimitCallback(isolate, first_near_heap_limit, 0);
+
+    assert!(has_js2wasm_heap_limit(isolate));
+    let below_limit = handle_js2wasm_heap_pressure(isolate, 48, 64);
+    assert!(below_limit.allowed);
+    assert!(!below_limit.callback_invoked);
+    assert!(!below_limit.terminating);
+    assert_eq!(64, below_limit.current_limit);
+    assert_eq!(0, FIRST_NEAR_LIMIT_CALLS.load(Ordering::SeqCst));
+    assert_eq!(0, SECOND_NEAR_LIMIT_CALLS.load(Ordering::SeqCst));
+
+    let pressure = handle_js2wasm_heap_pressure(isolate, 64, 65);
+    assert!(pressure.allowed);
+    assert!(pressure.callback_invoked);
+    assert!(!pressure.terminating);
+    assert_eq!(128, pressure.current_limit);
+    assert_eq!(0, FIRST_NEAR_LIMIT_CALLS.load(Ordering::SeqCst));
+    assert_eq!(1, SECOND_NEAR_LIMIT_CALLS.load(Ordering::SeqCst));
+    assert_eq!(128, unsafe {
+      isolate_state(isolate).near_heap_limit.current_heap_limit
+    });
+
+    v8__Isolate__Dispose(isolate);
+  }
+
+  #[test]
+  fn finite_create_params_limit_gates_wasmtime_growth() {
+    let mut params = crate::isolate_create_params::raw::CreateParams::default();
+    params.constraints.configure_defaults_from_heap_size(16, 64);
+    let isolate = v8__Isolate__New(
+      std::ptr::addr_of!(params)
+        .cast::<crate::isolate_create_params::raw::CreateParams>()
+        .cast(),
+    );
+
+    assert!(has_js2wasm_heap_limit(isolate));
+    let within_limit = handle_js2wasm_heap_pressure(isolate, 32, 64);
+    assert!(within_limit.allowed);
+    assert!(!within_limit.callback_invoked);
+    assert_eq!(64, within_limit.current_limit);
+
+    let beyond_limit = handle_js2wasm_heap_pressure(isolate, 64, 65);
+    assert!(!beyond_limit.allowed);
+    assert!(!beyond_limit.callback_invoked);
+    assert_eq!(64, beyond_limit.current_limit);
+
+    v8__Isolate__Dispose(isolate);
+  }
+
+  #[test]
+  fn removing_near_heap_limit_callback_never_restores_below_gc_capacity() {
+    let mut params = crate::isolate_create_params::raw::CreateParams::default();
+    params.constraints.configure_defaults_from_heap_size(0, 256);
+    let isolate = v8__Isolate__New(
+      std::ptr::addr_of!(params)
+        .cast::<crate::isolate_create_params::raw::CreateParams>()
+        .cast(),
+    );
+
+    // The limiter approves `desired` immediately before Wasmtime commits the
+    // expansion. Conservatively retain that approved target: restoring below
+    // it could leave the nominal V8 limit smaller than the live GC backing
+    // heap between this callback and the next growth request.
+    let pressure = handle_js2wasm_heap_pressure(isolate, 192, 224);
+    assert!(pressure.allowed);
+    assert!(!pressure.callback_invoked);
+    assert_eq!(256, pressure.current_limit);
+
+    v8__Isolate__AddNearHeapLimitCallback(
+      isolate,
+      first_near_heap_limit,
+      ptr::null_mut(),
+    );
+    v8__Isolate__RemoveNearHeapLimitCallback(
+      isolate,
+      first_near_heap_limit,
+      64,
+    );
+    assert_eq!(224, unsafe {
+      isolate_state(isolate).near_heap_limit.current_heap_limit
+    });
+
+    v8__Isolate__Dispose(isolate);
+  }
 }
 
 fn is_valid_prototype(value: *const Value) -> bool {
@@ -946,6 +1149,8 @@ fn heap_to_json_value(
     | HeapValue::ObjectTemplate(_)
     | HeapValue::FunctionTemplate(_)
     | HeapValue::FixedArray(_)
+    | HeapValue::PrimitiveArray(_)
+    | HeapValue::ModuleRequest(_)
     | HeapValue::UnboundModuleScript(_)
     | HeapValue::Promise(_)
     | HeapValue::PromiseResolver(_)
@@ -1202,7 +1407,7 @@ pub extern "C" fn v8__Isolate__CreateParams__CONSTRUCT(
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__ResourceConstraints__ConfigureDefaultsFromHeapSize(
   constraints: *mut crate::isolate_create_params::raw::ResourceConstraints,
-  _initial_heap_size_in_bytes: usize,
+  initial_heap_size_in_bytes: usize,
   maximum_heap_size_in_bytes: usize,
 ) {
   if constraints.is_null() {
@@ -1214,11 +1419,16 @@ pub extern "C" fn v8__ResourceConstraints__ConfigureDefaultsFromHeapSize(
       0,
       size_of::<crate::isolate_create_params::raw::ResourceConstraints>(),
     );
-    // The second word is rusty_v8's max-old-generation limit field.
+    // ResourceConstraints is repr(C): code range, max-old, max-young,
+    // initial-old, initial-young, physical memory, stack limit.
     constraints
       .cast::<usize>()
       .add(1)
       .write(maximum_heap_size_in_bytes);
+    constraints
+      .cast::<usize>()
+      .add(3)
+      .write(initial_heap_size_in_bytes);
   }
 }
 
@@ -1444,8 +1654,137 @@ pub extern "C" fn std__shared_ptr__v8__BackingStore__use_count(
   }
 }
 
+fn configured_heap_limits(params: *const c_void) -> (usize, usize) {
+  if params.is_null() {
+    return (0, 0);
+  }
+  // `CreateParams` starts with a pointer-sized code event handler followed by
+  // its repr(C) `ResourceConstraints`. Keep this layout decoding next to the
+  // ABI constructor above rather than depending on raw's private fields.
+  let constraints = unsafe { params.cast::<usize>().add(1) };
+  let maximum = unsafe { constraints.add(1).read() };
+  let initial = unsafe { constraints.add(3).read() };
+  (initial, maximum)
+}
+
+fn same_near_heap_limit_callback(
+  left: crate::isolate::NearHeapLimitCallback,
+  right: crate::isolate::NearHeapLimitCallback,
+) -> bool {
+  std::ptr::fn_addr_eq(left, right)
+}
+
+pub(crate) fn has_js2wasm_heap_limit(isolate: *mut RealIsolate) -> bool {
+  !isolate.is_null()
+    && unsafe { isolate_state(isolate) }
+      .near_heap_limit
+      .current_heap_limit
+      != 0
+}
+
+/// Handle an actual Wasmtime GC-heap growth request.
+///
+/// Wasmtime 47's `runtime/store/gc.rs` passes GC heap backing-memory growth
+/// through the store's `StoreResourceLimiter`, so a finite V8 limit invokes
+/// its callback once that allocator asks to cross the limit. Ordinary script
+/// entry and allocations below the limit remain invisible to this path. Deno
+/// keeps one active near-heap callback, so dispatch the most recently
+/// registered callback after accounting for removals.
+pub(crate) fn handle_js2wasm_heap_pressure(
+  isolate: *mut RealIsolate,
+  current: usize,
+  desired: usize,
+) -> Js2WasmHeapPressureDecision {
+  if isolate.is_null() {
+    return Js2WasmHeapPressureDecision {
+      allowed: true,
+      terminating: false,
+      callback_invoked: false,
+      current_limit: 0,
+    };
+  }
+
+  let (callback, current_heap_limit, initial_heap_limit) = {
+    let state = unsafe { isolate_state(isolate) };
+    state.near_heap_limit.highest_gc_heap_capacity =
+      state.near_heap_limit.highest_gc_heap_capacity.max(current);
+    let current_heap_limit = state.near_heap_limit.current_heap_limit;
+    let terminating = state.terminating.load(Ordering::Acquire);
+    if terminating {
+      return Js2WasmHeapPressureDecision {
+        allowed: false,
+        terminating,
+        callback_invoked: false,
+        current_limit: current_heap_limit,
+      };
+    }
+    if current_heap_limit == 0 || desired <= current_heap_limit {
+      // The limiter runs immediately before Wasmtime commits the requested
+      // growth. Remember an allowed target as observed capacity so a later
+      // callback removal cannot restore a nominal limit below that heap.
+      state.near_heap_limit.highest_gc_heap_capacity =
+        state.near_heap_limit.highest_gc_heap_capacity.max(desired);
+      return Js2WasmHeapPressureDecision {
+        allowed: true,
+        terminating: false,
+        callback_invoked: false,
+        current_limit: current_heap_limit,
+      };
+    }
+
+    // A callback can re-enter V8, but it must not recursively run the same
+    // near-limit stack. Deny the nested allocation; the outer callback owns
+    // the limit update that decides whether its original allocation proceeds.
+    if state.near_heap_limit.dispatching {
+      return Js2WasmHeapPressureDecision {
+        allowed: false,
+        terminating,
+        callback_invoked: false,
+        current_limit: current_heap_limit,
+      };
+    }
+
+    state.near_heap_limit.dispatching = true;
+    (
+      state.near_heap_limit.callbacks.last().copied(),
+      current_heap_limit,
+      state.near_heap_limit.initial_heap_limit,
+    )
+  };
+
+  let replacement_limit = callback.map(|entry| unsafe {
+    (entry.callback)(entry.data, current_heap_limit, initial_heap_limit)
+  });
+
+  let state = unsafe { isolate_state(isolate) };
+  state.near_heap_limit.dispatching = false;
+  if let Some(replacement_limit) = replacement_limit
+    && replacement_limit != 0
+  {
+    state.near_heap_limit.current_heap_limit = replacement_limit;
+  }
+  let current_limit = state.near_heap_limit.current_heap_limit;
+  let terminating = state.terminating.load(Ordering::Acquire);
+  let allowed = !terminating && desired <= current_limit;
+  if allowed {
+    state.near_heap_limit.highest_gc_heap_capacity =
+      state.near_heap_limit.highest_gc_heap_capacity.max(desired);
+  }
+  Js2WasmHeapPressureDecision {
+    allowed,
+    terminating,
+    callback_invoked: callback.is_some(),
+    current_limit,
+  }
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn v8__Isolate__New(_params: *const c_void) -> *mut RealIsolate {
+pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
+  let (initial_heap_limit, maximum_heap_limit) = configured_heap_limits(params);
+  // The initial size controls startup capacity and is reported to near-limit
+  // callbacks; it is not the growth ceiling. V8 permits growth up to the
+  // configured maximum before dispatching those callbacks.
+  let current_heap_limit = maximum_heap_limit;
   Box::into_raw(Box::new(IsolateState {
     values: Vec::new(),
     contexts: Vec::new(),
@@ -1459,6 +1798,17 @@ pub extern "C" fn v8__Isolate__New(_params: *const c_void) -> *mut RealIsolate {
     error_prototype: ptr::null(),
     symbol_registry: Vec::new(),
     iterator_symbol: ptr::null(),
+    near_heap_limit: NearHeapLimitState {
+      callbacks: Vec::new(),
+      initial_heap_limit: if initial_heap_limit == 0 {
+        current_heap_limit
+      } else {
+        initial_heap_limit
+      },
+      current_heap_limit,
+      highest_gc_heap_capacity: 0,
+      dispatching: false,
+    },
   }))
   .cast()
 }
@@ -1510,18 +1860,39 @@ pub extern "C" fn v8__Isolate__HasPendingBackgroundTasks(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__AddNearHeapLimitCallback(
-  _isolate: *mut RealIsolate,
-  _callback: crate::isolate::NearHeapLimitCallback,
-  _data: *mut c_void,
+  isolate: *mut RealIsolate,
+  callback: crate::isolate::NearHeapLimitCallback,
+  data: *mut c_void,
 ) {
+  if isolate.is_null() {
+    return;
+  }
+  unsafe {
+    isolate_state(isolate)
+      .near_heap_limit
+      .callbacks
+      .push(NearHeapLimitCallbackState { callback, data });
+  }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__RemoveNearHeapLimitCallback(
-  _isolate: *mut RealIsolate,
-  _callback: crate::isolate::NearHeapLimitCallback,
-  _heap_limit: usize,
+  isolate: *mut RealIsolate,
+  callback: crate::isolate::NearHeapLimitCallback,
+  heap_limit: usize,
 ) {
+  if isolate.is_null() {
+    return;
+  }
+  let state = unsafe { isolate_state(isolate) };
+  state
+    .near_heap_limit
+    .callbacks
+    .retain(|entry| !same_near_heap_limit_callback(entry.callback, callback));
+  if heap_limit != 0 {
+    state.near_heap_limit.current_heap_limit =
+      heap_limit.max(state.near_heap_limit.highest_gc_heap_capacity);
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -1885,20 +2256,33 @@ pub extern "C" fn v8__TryCatch__DESTRUCT(this: *mut usize) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__TryCatch__HasCaught(this: *const usize) -> bool {
-  unsafe { try_catch_state(this) }
-    .is_some_and(|try_catch| !try_catch.exception.is_null())
+  unsafe { try_catch_state(this) }.is_some_and(|try_catch| {
+    !try_catch.exception.is_null()
+      || (!try_catch.isolate.is_null()
+        && unsafe { isolate_state(try_catch.isolate) }
+          .terminating
+          .load(Ordering::Acquire))
+  })
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn v8__TryCatch__CanContinue(_this: *const usize) -> bool {
-  // This backend does not yet implement execution termination, so all caught
-  // JavaScript exceptions remain continuable.
-  true
+pub extern "C" fn v8__TryCatch__CanContinue(this: *const usize) -> bool {
+  !unsafe { try_catch_state(this) }.is_some_and(|try_catch| {
+    !try_catch.isolate.is_null()
+      && unsafe { isolate_state(try_catch.isolate) }
+        .terminating
+        .load(Ordering::Acquire)
+  })
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn v8__TryCatch__HasTerminated(_this: *const usize) -> bool {
-  false
+pub extern "C" fn v8__TryCatch__HasTerminated(this: *const usize) -> bool {
+  unsafe { try_catch_state(this) }.is_some_and(|try_catch| {
+    !try_catch.isolate.is_null()
+      && unsafe { isolate_state(try_catch.isolate) }
+        .terminating
+        .load(Ordering::Acquire)
+  })
 }
 
 #[unsafe(no_mangle)]
@@ -1948,9 +2332,23 @@ pub extern "C" fn v8__TryCatch__Reset(this: *mut usize) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__TryCatch__Exception(this: *const usize) -> *const Value {
-  unsafe { try_catch_state(this) }
-    .map(|try_catch| try_catch.exception)
-    .unwrap_or(ptr::null())
+  let Some(try_catch) = (unsafe { try_catch_state(this) }) else {
+    return ptr::null();
+  };
+  if !try_catch.exception.is_null() {
+    return try_catch.exception;
+  }
+  if !try_catch.isolate.is_null()
+    && unsafe { isolate_state(try_catch.isolate) }
+      .terminating
+      .load(Ordering::Acquire)
+  {
+    // V8 has no JavaScript representation for a termination exception. Deno
+    // recognizes this undefined sentinel together with the terminating flag
+    // and turns it into `Error: execution terminated`.
+    return v8__Undefined(try_catch.isolate).cast();
+  }
+  ptr::null()
 }
 
 #[unsafe(no_mangle)]
@@ -2033,6 +2431,67 @@ pub extern "C" fn v8__WeakCallbackInfo__SetSecondPassCallback(
 pub extern "C" fn v8__Global__Reset(_value: *const Data) {
   // The isolate owns the allocation. Reset only releases the logical handle;
   // there is no moving collector or separate persistent cell to destroy.
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsValue(value: *const Data) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(
+      HeapValue::String(_)
+        | HeapValue::Object(_)
+        | HeapValue::Array(_)
+        | HeapValue::ArrayBuffer(_)
+        | HeapValue::TypedArray(_)
+        | HeapValue::Function(_)
+        | HeapValue::Promise(_)
+        | HeapValue::Symbol(_)
+        | HeapValue::Error { .. }
+        | HeapValue::External(_)
+        | HeapValue::Boolean(_)
+        | HeapValue::Number(_)
+        | HeapValue::BigInt(_)
+        | HeapValue::Null
+        | HeapValue::Undefined
+    )
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsPrimitive(value: *const Data) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(
+      HeapValue::String(_)
+        | HeapValue::Symbol(_)
+        | HeapValue::Boolean(_)
+        | HeapValue::Number(_)
+        | HeapValue::BigInt(_)
+        | HeapValue::Null
+        | HeapValue::Undefined
+    )
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsFunctionTemplate(value: *const Data) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(HeapValue::FunctionTemplate(_))
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsModule(value: *const Data) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::Module(_)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsModuleRequest(value: *const Data) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(HeapValue::ModuleRequest(_))
+  )
 }
 
 #[unsafe(no_mangle)]
@@ -5310,7 +5769,9 @@ fn run_prelinked_deno_core_script(
   }
 
   let runtime = if phase == 0 {
-    Some(crate::js2wasm_spike::deno_core_bootstrap_runtime_from_env()?)
+    Some(crate::js2wasm_spike::deno_core_bootstrap_runtime_from_env(
+      current_isolate() as usize,
+    )?)
   } else {
     None
   };
@@ -5540,6 +6001,19 @@ pub extern "C" fn v8__Script__Run(
   ) {
     Ok(result) => materialize_deno_script_result(&state.source, result),
     Err(error) => {
+      // A resource-limiter denial propagates out of Wasmtime as a host error.
+      // If a near-heap callback terminated this isolate, preserve V8's special
+      // termination path instead of materializing that transport error as an
+      // ordinary JavaScript exception. Deno recognizes the resulting
+      // terminating/undefined pair as `Error: execution terminated`.
+      let isolate = current_isolate();
+      if !isolate.is_null()
+        && unsafe { isolate_state(isolate) }
+          .terminating
+          .load(Ordering::Acquire)
+      {
+        return ptr::null();
+      }
       eprintln!("v8x/js2wasm: {error}");
       let message = new_string(current_isolate(), error);
       let exception = allocate_error(message, "Error");
@@ -5653,34 +6127,548 @@ pub extern "C" fn v8__ScriptCompiler__Source__GetCachedData<'a>(
   ptr::null()
 }
 
-fn quoted_specifier(text: &str) -> Option<String> {
-  let start = text.find(['\'', '"'])?;
-  let quote = text.as_bytes()[start];
-  let rest = &text[start + 1..];
-  let end = rest.as_bytes().iter().position(|byte| *byte == quote)?;
-  Some(rest[..end].to_string())
+fn is_js_identifier_continue(byte: u8) -> bool {
+  byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
-fn parse_static_imports(source: &str) -> Vec<String> {
-  let mut imports = Vec::new();
-  for statement in source.split(';') {
-    let statement = statement.trim();
-    let candidate = if let Some(rest) = statement.strip_prefix("import ") {
-      if rest.starts_with(['\'', '"']) {
-        Some(rest)
-      } else {
-        rest.rsplit_once(" from ").map(|(_, value)| value)
-      }
-    } else if statement.starts_with("export ") {
-      statement.rsplit_once(" from ").map(|(_, value)| value)
-    } else {
-      None
-    };
-    if let Some(specifier) = candidate.and_then(quoted_specifier) {
-      imports.push(specifier);
+fn keyword_at(source: &str, offset: usize, keyword: &str) -> bool {
+  let bytes = source.as_bytes();
+  let end = offset.saturating_add(keyword.len());
+  end <= bytes.len()
+    && bytes.get(offset..end) == Some(keyword.as_bytes())
+    && (offset == 0 || !is_js_identifier_continue(bytes[offset - 1]))
+    && (end == bytes.len() || !is_js_identifier_continue(bytes[end]))
+}
+
+fn skip_js_string(bytes: &[u8], start: usize) -> usize {
+  let quote = bytes[start];
+  let mut offset = start + 1;
+  while offset < bytes.len() {
+    match bytes[offset] {
+      b'\\' => offset = (offset + 2).min(bytes.len()),
+      byte if byte == quote => return offset + 1,
+      _ => offset += 1,
     }
   }
+  bytes.len()
+}
+
+fn skip_js_template(bytes: &[u8], start: usize) -> usize {
+  let mut offset = start + 1;
+  while offset < bytes.len() {
+    match bytes[offset] {
+      b'\\' => offset = (offset + 2).min(bytes.len()),
+      b'`' => return offset + 1,
+      b'$' if bytes.get(offset + 1) == Some(&b'{') => {
+        offset += 2;
+        let mut depth = 1usize;
+        while offset < bytes.len() && depth != 0 {
+          match bytes[offset] {
+            b'\'' | b'"' => offset = skip_js_string(bytes, offset),
+            b'`' => offset = skip_js_template(bytes, offset),
+            b'{' => {
+              depth += 1;
+              offset += 1;
+            }
+            b'}' => {
+              depth -= 1;
+              offset += 1;
+            }
+            b'\\' => offset = (offset + 2).min(bytes.len()),
+            _ => offset += 1,
+          }
+        }
+      }
+      _ => offset += 1,
+    }
+  }
+  bytes.len()
+}
+
+/// Skip a regular expression literal after the leading slash.
+///
+/// The caller has already used token context to distinguish this from a
+/// division operator. Character classes and escaped slashes do not terminate
+/// a literal, and flags are consumed with the literal so their bytes cannot
+/// affect the following token context.
+fn skip_js_regexp_literal(bytes: &[u8], start: usize) -> usize {
+  let mut offset = start + 1;
+  let mut in_character_class = false;
+  while offset < bytes.len() {
+    match bytes[offset] {
+      b'\\' => offset = (offset + 2).min(bytes.len()),
+      b'[' => {
+        in_character_class = true;
+        offset += 1;
+      }
+      b']' if in_character_class => {
+        in_character_class = false;
+        offset += 1;
+      }
+      b'/' if !in_character_class => {
+        offset += 1;
+        while bytes
+          .get(offset)
+          .is_some_and(|byte| is_js_identifier_continue(*byte))
+        {
+          offset += 1;
+        }
+        return offset;
+      }
+      b'\n' | b'\r' => return offset,
+      _ => offset += 1,
+    }
+  }
+  bytes.len()
+}
+
+fn skip_js_space_and_comments(source: &str, mut offset: usize) -> usize {
+  let bytes = source.as_bytes();
+  loop {
+    while bytes.get(offset).is_some_and(u8::is_ascii_whitespace) {
+      offset += 1;
+    }
+    if bytes.get(offset..offset + 2) == Some(b"//") {
+      offset += 2;
+      while offset < bytes.len() && bytes[offset] != b'\n' {
+        offset += 1;
+      }
+      continue;
+    }
+    if bytes.get(offset..offset + 2) == Some(b"/*") {
+      offset += 2;
+      while offset + 1 < bytes.len()
+        && bytes.get(offset..offset + 2) != Some(b"*/")
+      {
+        offset += 1;
+      }
+      offset = (offset + 2).min(bytes.len());
+      continue;
+    }
+    return offset;
+  }
+}
+
+fn decode_js_string_literal(contents: &str) -> Option<String> {
+  let mut output = String::with_capacity(contents.len());
+  let mut chars = contents.chars();
+  while let Some(character) = chars.next() {
+    if character != '\\' {
+      output.push(character);
+      continue;
+    }
+    let escaped = chars.next()?;
+    match escaped {
+      '\n' | '\r' => {
+        if escaped == '\r' && chars.clone().next() == Some('\n') {
+          chars.next();
+        }
+      }
+      '\'' | '"' | '\\' => output.push(escaped),
+      'b' => output.push('\u{0008}'),
+      'f' => output.push('\u{000c}'),
+      'n' => output.push('\n'),
+      'r' => output.push('\r'),
+      't' => output.push('\t'),
+      'v' => output.push('\u{000b}'),
+      '0' => output.push('\0'),
+      'x' => {
+        let digits = [chars.next()?, chars.next()?];
+        let value =
+          u32::from_str_radix(&digits.iter().collect::<String>(), 16).ok()?;
+        output.push(char::from_u32(value)?);
+      }
+      'u' => {
+        let value = if chars.clone().next() == Some('{') {
+          chars.next();
+          let mut digits = String::new();
+          loop {
+            let digit = chars.next()?;
+            if digit == '}' {
+              break;
+            }
+            digits.push(digit);
+          }
+          u32::from_str_radix(&digits, 16).ok()?
+        } else {
+          let digits =
+            [chars.next()?, chars.next()?, chars.next()?, chars.next()?];
+          let value =
+            u16::from_str_radix(&digits.iter().collect::<String>(), 16).ok()?;
+          match value {
+            0xD800..=0xDBFF => {
+              // ECMAScript string literals use UTF-16 code units. A high
+              // surrogate escape must be immediately paired with a low
+              // surrogate escape before Rust can represent it as a scalar.
+              let mut pair = chars.clone();
+              if pair.next() != Some('\\') || pair.next() != Some('u') {
+                return None;
+              }
+              let low_digits =
+                [pair.next()?, pair.next()?, pair.next()?, pair.next()?];
+              let low =
+                u16::from_str_radix(&low_digits.iter().collect::<String>(), 16)
+                  .ok()?;
+              if !(0xDC00..=0xDFFF).contains(&low) {
+                return None;
+              }
+              chars = pair;
+              0x1_0000
+                + ((u32::from(value) - 0xD800) << 10)
+                + (u32::from(low) - 0xDC00)
+            }
+            0xDC00..=0xDFFF => return None,
+            _ => u32::from(value),
+          }
+        };
+        output.push(char::from_u32(value)?);
+      }
+      other => output.push(other),
+    }
+  }
+  Some(output)
+}
+
+fn parse_quoted_js_string(
+  source: &str,
+  start: usize,
+) -> Option<(String, usize)> {
+  let bytes = source.as_bytes();
+  let quote = *bytes.get(start)?;
+  if !matches!(quote, b'\'' | b'"') {
+    return None;
+  }
+  let end = skip_js_string(bytes, start);
+  if end <= start + 1 || bytes.get(end - 1) != Some(&quote) {
+    return None;
+  }
+  Some((decode_js_string_literal(&source[start + 1..end - 1])?, end))
+}
+
+fn source_utf16_offset(source: &str, byte_offset: usize) -> i32 {
+  i32::try_from(
+    source[..byte_offset.min(source.len())]
+      .encode_utf16()
+      .count(),
+  )
+  .unwrap_or(i32::MAX)
+}
+
+fn find_from_specifier(source: &str, mut offset: usize) -> Option<usize> {
+  let bytes = source.as_bytes();
+  while offset < bytes.len() {
+    offset = skip_js_space_and_comments(source, offset);
+    if offset >= bytes.len() || bytes[offset] == b';' {
+      return None;
+    }
+    match bytes[offset] {
+      b'\'' | b'"' => offset = skip_js_string(bytes, offset),
+      b'`' => offset = skip_js_template(bytes, offset),
+      _ if keyword_at(source, offset, "from") => {
+        let literal = skip_js_space_and_comments(source, offset + 4);
+        if bytes
+          .get(literal)
+          .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+        {
+          return Some(literal);
+        }
+        offset += 4;
+      }
+      _ => offset += 1,
+    }
+  }
+  None
+}
+
+fn parse_import_attributes(
+  source: &str,
+  mut offset: usize,
+) -> (Vec<ImportAttribute>, usize) {
+  let bytes = source.as_bytes();
+  offset = skip_js_space_and_comments(source, offset);
+  let keyword_len = if keyword_at(source, offset, "with") {
+    4
+  } else if keyword_at(source, offset, "assert") {
+    6
+  } else {
+    return (Vec::new(), offset);
+  };
+  offset = skip_js_space_and_comments(source, offset + keyword_len);
+  if bytes.get(offset) != Some(&b'{') {
+    return (Vec::new(), offset);
+  }
+  offset += 1;
+  let mut attributes = Vec::new();
+  loop {
+    offset = skip_js_space_and_comments(source, offset);
+    if bytes.get(offset) == Some(&b'}') {
+      return (attributes, offset + 1);
+    }
+    if offset >= bytes.len() {
+      return (attributes, offset);
+    }
+
+    let key_offset;
+    let key;
+    if matches!(bytes[offset], b'\'' | b'"') {
+      key_offset = offset + 1;
+      let Some((parsed, end)) = parse_quoted_js_string(source, offset) else {
+        return (attributes, offset);
+      };
+      key = parsed;
+      offset = end;
+    } else {
+      key_offset = offset;
+      let start = offset;
+      while bytes
+        .get(offset)
+        .is_some_and(|byte| is_js_identifier_continue(*byte))
+      {
+        offset += 1;
+      }
+      if offset == start {
+        return (attributes, offset);
+      }
+      key = source[start..offset].to_string();
+    }
+
+    offset = skip_js_space_and_comments(source, offset);
+    if bytes.get(offset) != Some(&b':') {
+      return (attributes, offset);
+    }
+    offset = skip_js_space_and_comments(source, offset + 1);
+    let Some((value, end)) = parse_quoted_js_string(source, offset) else {
+      return (attributes, offset);
+    };
+    attributes.push(ImportAttribute {
+      key,
+      value,
+      source_offset: source_utf16_offset(source, key_offset),
+    });
+    offset = skip_js_space_and_comments(source, end);
+    match bytes.get(offset) {
+      Some(b',') => offset += 1,
+      Some(b'}') => return (attributes, offset + 1),
+      _ => return (attributes, offset),
+    }
+  }
+}
+
+fn parse_static_import_at(
+  source: &str,
+  keyword_offset: usize,
+  is_export: bool,
+) -> Option<(StaticImport, usize)> {
+  let bytes = source.as_bytes();
+  let keyword_len = if is_export { 6 } else { 6 };
+  let mut offset =
+    skip_js_space_and_comments(source, keyword_offset + keyword_len);
+  let mut phase = StaticImportPhase::Evaluation;
+  if !is_export && keyword_at(source, offset, "source") {
+    phase = StaticImportPhase::Source;
+    offset = skip_js_space_and_comments(source, offset + 6);
+  } else if !is_export && keyword_at(source, offset, "defer") {
+    phase = StaticImportPhase::Defer;
+    offset = skip_js_space_and_comments(source, offset + 5);
+  }
+  if !is_export && matches!(bytes.get(offset), Some(b'(' | b'.')) {
+    return None;
+  }
+  if is_export && !matches!(bytes.get(offset), Some(b'{' | b'*')) {
+    // Only export lists and export-star forms can carry a module specifier.
+    // In particular, do not scan an `export default <expression>` body for a
+    // token that happens to spell `from` (for example inside a regexp).
+    return None;
+  }
+
+  let specifier_offset = if !is_export
+    && bytes
+      .get(offset)
+      .is_some_and(|byte| matches!(byte, b'\'' | b'"'))
+  {
+    offset
+  } else {
+    find_from_specifier(source, offset)?
+  };
+  let (specifier, specifier_end) =
+    parse_quoted_js_string(source, specifier_offset)?;
+  let (attributes, end) = parse_import_attributes(source, specifier_end);
+  Some((
+    StaticImport {
+      specifier,
+      source_offset: source_utf16_offset(source, specifier_offset),
+      attributes,
+      phase,
+    },
+    end.max(specifier_end),
+  ))
+}
+
+fn parse_static_imports(source: &str) -> Vec<StaticImport> {
+  let bytes = source.as_bytes();
+  let mut imports = Vec::new();
+  let mut offset = 0usize;
+  // A slash is a regular-expression delimiter only where an expression may
+  // begin. Keeping that lexical state prevents regex contents from being
+  // examined as JavaScript tokens while still treating `value / divisor` as
+  // division.
+  let mut expression_expected = true;
+  let mut pending_control_paren = false;
+  let mut paren_stack = Vec::new();
+  let mut brace_stack = Vec::new();
+  let mut brace_starts_block = false;
+  while offset < bytes.len() {
+    offset = skip_js_space_and_comments(source, offset);
+    if offset >= bytes.len() {
+      break;
+    }
+    if brace_starts_block && bytes[offset] != b'{' {
+      brace_starts_block = false;
+    }
+    match bytes[offset] {
+      b'\'' | b'"' => {
+        offset = skip_js_string(bytes, offset);
+        expression_expected = false;
+        continue;
+      }
+      b'`' => {
+        offset = skip_js_template(bytes, offset);
+        expression_expected = false;
+        continue;
+      }
+      b'/' if expression_expected => {
+        offset = skip_js_regexp_literal(bytes, offset);
+        expression_expected = false;
+        continue;
+      }
+      _ => {}
+    }
+    if bytes
+      .get(offset)
+      .is_some_and(|byte| is_js_identifier_continue(*byte))
+    {
+      let identifier_start = offset;
+      while bytes
+        .get(offset)
+        .is_some_and(|byte| is_js_identifier_continue(*byte))
+      {
+        offset += 1;
+      }
+      let identifier = &source[identifier_start..offset];
+      let is_export = identifier == "export";
+      if matches!(identifier, "import" | "export")
+        && let Some((request, end)) =
+          parse_static_import_at(source, identifier_start, is_export)
+      {
+        imports.push(request);
+        offset = end;
+        expression_expected = false;
+        continue;
+      }
+
+      pending_control_paren = matches!(
+        identifier,
+        "catch" | "for" | "if" | "switch" | "while" | "with"
+      );
+      brace_starts_block =
+        matches!(identifier, "do" | "else" | "finally" | "try");
+      expression_expected = matches!(
+        identifier,
+        "await"
+          | "case"
+          | "delete"
+          | "do"
+          | "else"
+          | "in"
+          | "instanceof"
+          | "new"
+          | "of"
+          | "return"
+          | "throw"
+          | "typeof"
+          | "void"
+          | "yield"
+      );
+      continue;
+    }
+    match bytes[offset] {
+      b'(' => {
+        paren_stack.push(pending_control_paren);
+        pending_control_paren = false;
+        expression_expected = true;
+      }
+      b')' => {
+        let closed_control_paren = paren_stack.pop().unwrap_or(false);
+        expression_expected = closed_control_paren;
+        brace_starts_block = closed_control_paren;
+      }
+      b'{' => {
+        brace_stack.push(brace_starts_block);
+        brace_starts_block = false;
+        expression_expected = true;
+      }
+      b'[' | b',' | b';' | b':' | b'?' | b'=' | b'!' | b'~' | b'*' | b'%'
+      | b'&' | b'|' | b'^' | b'<' | b'>' => {
+        expression_expected = true;
+      }
+      b']' | b'.' => expression_expected = false,
+      b'}' => expression_expected = brace_stack.pop().unwrap_or(false),
+      b'+' | b'-' if bytes.get(offset + 1) == Some(&bytes[offset]) => {
+        expression_expected = false;
+        offset += 1;
+      }
+      b'/' => expression_expected = true,
+      _ => expression_expected = false,
+    }
+    offset += 1;
+  }
   imports
+}
+
+fn allocate_import_attributes(
+  isolate: *mut RealIsolate,
+  attributes: &[ImportAttribute],
+) -> *const FixedArray {
+  let mut elements = Vec::with_capacity(attributes.len() * 3);
+  for attribute in attributes {
+    let key = new_string(isolate, attribute.key.clone());
+    let value = new_string(isolate, attribute.value.clone());
+    let offset = allocate::<Int32>(
+      isolate,
+      HeapValue::Number(f64::from(attribute.source_offset)),
+    );
+    elements.extend([
+      key.cast::<Data>(),
+      value.cast::<Data>(),
+      offset.cast::<Data>(),
+    ]);
+  }
+  allocate::<FixedArray>(isolate, HeapValue::FixedArray(elements))
+}
+
+fn allocate_module_requests(
+  isolate: *mut RealIsolate,
+  imports: &[StaticImport],
+) -> *const FixedArray {
+  let requests = imports
+    .iter()
+    .map(|request| {
+      let specifier = new_string(isolate, request.specifier.clone());
+      let import_attributes =
+        allocate_import_attributes(isolate, &request.attributes);
+      allocate::<ModuleRequest>(
+        isolate,
+        HeapValue::ModuleRequest(ModuleRequestState {
+          specifier,
+          source_offset: request.source_offset,
+          import_attributes,
+          phase: request.phase,
+        }),
+      )
+      .cast::<Data>()
+    })
+    .collect();
+  allocate::<FixedArray>(isolate, HeapValue::FixedArray(requests))
 }
 
 #[unsafe(no_mangle)]
@@ -5710,15 +6698,7 @@ pub extern "C" fn v8__ScriptCompiler__CompileModule(
       source_mapping_url,
     }),
   );
-  // This first metadata slice intentionally handles the exact zero-import
-  // Deno bootstrap module. A non-empty request list needs real ModuleRequest
-  // objects rather than a silently empty array, so leave that later boundary
-  // fail-loud by returning a null requests handle.
-  let module_requests = if imports.is_empty() {
-    allocate::<FixedArray>(isolate, HeapValue::FixedArray(Vec::new()))
-  } else {
-    ptr::null()
-  };
+  let module_requests = allocate_module_requests(isolate, &imports);
   let namespace = new_object(isolate);
   let deno_core_module = specifier == DENO_CORE_MODULE_SPECIFIER;
   let prelinked_deno_module =
@@ -5860,6 +6840,86 @@ pub extern "C" fn v8__Module__GetModuleRequests(
     .unwrap_or(ptr::null())
 }
 
+fn source_offset_location(source: &str, offset: int) -> (int, int) {
+  let target = usize::try_from(offset).unwrap_or_default();
+  let mut consumed = 0usize;
+  let mut line = 0i32;
+  let mut column = 0i32;
+  let mut previous_was_carriage_return = false;
+  for character in source.chars() {
+    if consumed >= target {
+      break;
+    }
+    let width = character.len_utf16();
+    let consumed_width = width.min(target - consumed);
+    consumed += consumed_width;
+    if consumed_width != width {
+      column = column.saturating_add(consumed_width as i32);
+      break;
+    }
+    match character {
+      '\r' => {
+        line = line.saturating_add(1);
+        column = 0;
+        previous_was_carriage_return = true;
+      }
+      '\n' if previous_was_carriage_return => {
+        previous_was_carriage_return = false;
+      }
+      '\n' | '\u{2028}' | '\u{2029}' => {
+        line = line.saturating_add(1);
+        column = 0;
+        previous_was_carriage_return = false;
+      }
+      _ => {
+        column = column.saturating_add(width as i32);
+        previous_was_carriage_return = false;
+      }
+    }
+  }
+  (line, column)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__SourceOffsetToLocation(
+  module: *const Module,
+  offset: int,
+  out: *mut Location,
+) {
+  if out.is_null() {
+    return;
+  }
+  let location = unsafe { module_state(module) }
+    .map(|state| source_offset_location(&state.source, offset))
+    .unwrap_or((0, 0));
+  unsafe {
+    out.cast::<int>().write(location.0);
+    out.cast::<int>().add(1).write(location.1);
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Location__GetLineNumber(
+  location: *const Location,
+) -> int {
+  if location.is_null() {
+    0
+  } else {
+    unsafe { location.cast::<int>().read() }
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Location__GetColumnNumber(
+  location: *const Location,
+) -> int {
+  if location.is_null() {
+    0
+  } else {
+    unsafe { location.cast::<int>().add(1).read() }
+  }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__FixedArray__Length(array: *const FixedArray) -> int {
   match unsafe { heap_value(array) } {
@@ -5882,6 +6942,118 @@ pub extern "C" fn v8__FixedArray__Get(
     Some(HeapValue::FixedArray(elements)) => {
       elements.get(index).copied().unwrap_or(ptr::null())
     }
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__PrimitiveArray__New(
+  isolate: *mut RealIsolate,
+  length: int,
+) -> *const PrimitiveArray {
+  if isolate.is_null() || length < 0 {
+    return ptr::null();
+  }
+  let undefined = allocate::<Primitive>(isolate, HeapValue::Undefined);
+  allocate::<PrimitiveArray>(
+    isolate,
+    HeapValue::PrimitiveArray(vec![undefined; length as usize]),
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__PrimitiveArray__Length(
+  array: *const PrimitiveArray,
+) -> int {
+  match unsafe { heap_value(array) } {
+    Some(HeapValue::PrimitiveArray(elements)) => {
+      int::try_from(elements.len()).unwrap_or(int::MAX)
+    }
+    _ => 0,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__PrimitiveArray__Set(
+  array: *const PrimitiveArray,
+  _isolate: *mut RealIsolate,
+  index: int,
+  item: *const Primitive,
+) {
+  let Ok(index) = usize::try_from(index) else {
+    return;
+  };
+  let Some(HeapValue::PrimitiveArray(elements)) =
+    (unsafe { heap_value_mut(array) })
+  else {
+    return;
+  };
+  if let Some(slot) = elements.get_mut(index) {
+    *slot = item;
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__PrimitiveArray__Get(
+  array: *const PrimitiveArray,
+  isolate: *mut RealIsolate,
+  index: int,
+) -> *const Primitive {
+  let value = usize::try_from(index).ok().and_then(|index| {
+    match unsafe { heap_value(array) } {
+      Some(HeapValue::PrimitiveArray(elements)) => elements.get(index).copied(),
+      _ => None,
+    }
+  });
+  value.unwrap_or_else(|| {
+    if isolate.is_null() {
+      ptr::null()
+    } else {
+      allocate::<Primitive>(isolate, HeapValue::Undefined)
+    }
+  })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ModuleRequest__GetSpecifier(
+  request: *const ModuleRequest,
+) -> *const V8String {
+  match unsafe { heap_value(request) } {
+    Some(HeapValue::ModuleRequest(state)) => state.specifier,
+    _ => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ModuleRequest__GetPhase(
+  request: *const ModuleRequest,
+) -> ModuleImportPhase {
+  match unsafe { heap_value(request) } {
+    Some(HeapValue::ModuleRequest(state)) => match state.phase {
+      StaticImportPhase::Evaluation => ModuleImportPhase::kEvaluation,
+      StaticImportPhase::Source => ModuleImportPhase::kSource,
+      StaticImportPhase::Defer => ModuleImportPhase::kDefer,
+    },
+    _ => ModuleImportPhase::kEvaluation,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ModuleRequest__GetSourceOffset(
+  request: *const ModuleRequest,
+) -> int {
+  match unsafe { heap_value(request) } {
+    Some(HeapValue::ModuleRequest(state)) => state.source_offset,
+    _ => 0,
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ModuleRequest__GetImportAttributes(
+  request: *const ModuleRequest,
+) -> *const FixedArray {
+  match unsafe { heap_value(request) } {
+    Some(HeapValue::ModuleRequest(state)) => state.import_attributes,
     _ => ptr::null(),
   }
 }
@@ -5988,18 +7160,69 @@ pub extern "C" fn v8__Module__InstantiateModule(
   let isolate = current_isolate();
   let mut dependencies = Vec::with_capacity(imports.len());
 
-  for specifier in imports {
-    let specifier = new_string(isolate, specifier);
-    let attributes =
-      allocate::<FixedArray>(isolate, HeapValue::FixedArray(Vec::new()));
+  for request in imports {
+    let specifier = new_string(isolate, request.specifier);
+    let attributes = allocate_import_attributes(isolate, &request.attributes);
     let Some(context_local) = (unsafe { crate::Local::from_raw(context) })
     else {
+      fail_module_evaluation(
+        module,
+        "module instantiation has no live context",
+      );
       return MaybeBool::Nothing;
     };
     let specifier_local = unsafe { crate::Local::from_raw(specifier) }.unwrap();
     let attributes_local =
       unsafe { crate::Local::from_raw(attributes) }.unwrap();
     let module_local = unsafe { crate::Local::from_raw(module) }.unwrap();
+
+    if request.phase == StaticImportPhase::Source {
+      let Some(source_callback) = source_callback else {
+        fail_module_evaluation(
+          module,
+          "source-phase import has no resolver callback",
+        );
+        return MaybeBool::Nothing;
+      };
+      #[cfg(not(target_os = "windows"))]
+      let source = {
+        let returned = unsafe {
+          source_callback(
+            context_local,
+            specifier_local,
+            attributes_local,
+            module_local,
+          )
+        };
+        unsafe {
+          *(&returned as *const ResolveSourceCallbackRet
+            as *const *const Object)
+        }
+      };
+      #[cfg(target_os = "windows")]
+      let source = {
+        let mut source = ptr::null();
+        unsafe {
+          source_callback(
+            &mut source,
+            context_local,
+            specifier_local,
+            attributes_local,
+            module_local,
+          );
+        }
+        source
+      };
+      if source.is_null() {
+        fail_module_evaluation(
+          module,
+          "source-phase import resolver returned an empty value",
+        );
+        return MaybeBool::Nothing;
+      }
+      continue;
+    }
+
     #[cfg(not(target_os = "windows"))]
     let dependency = {
       let returned = unsafe {
@@ -6029,9 +7252,10 @@ pub extern "C" fn v8__Module__InstantiateModule(
       dependency
     };
     if dependency.is_null() {
-      if let Some(state) = unsafe { module_state(module) } {
-        state.status = STATUS_ERRORED;
-      }
+      fail_module_evaluation(
+        module,
+        "module resolver returned an empty dependency",
+      );
       return MaybeBool::Nothing;
     }
     if unsafe { module_state(dependency) }
@@ -6043,9 +7267,14 @@ pub extern "C" fn v8__Module__InstantiateModule(
         source_callback,
       ) != MaybeBool::JustTrue
     {
-      if let Some(state) = unsafe { module_state(module) } {
-        state.status = STATUS_ERRORED;
-      }
+      let dependency_exception = unsafe { module_state(dependency) }
+        .map(|state| state.exception)
+        .unwrap_or(ptr::null());
+      fail_module_evaluation_with_exception(
+        module,
+        dependency_exception,
+        "dependency module instantiation failed",
+      );
       return MaybeBool::Nothing;
     }
     dependencies.push(dependency);
@@ -6104,13 +7333,51 @@ fn mark_evaluated(module: *const Module, seen: &mut HashSet<usize>) {
   }
 }
 
-fn fail_module_evaluation(module: *const Module, message: &str) {
-  let message = new_string(current_isolate(), message.to_owned());
-  let exception = allocate_error(message, "Error");
+fn current_recorded_exception() -> *const Value {
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let state = unsafe { isolate_state(isolate) };
+  if let Some(try_catch) = unsafe { state.active_try_catch.as_ref() }
+    && !try_catch.exception.is_null()
+  {
+    return try_catch.exception;
+  }
+  state.pending_exception
+}
+
+fn fail_module_evaluation_with_exception(
+  module: *const Module,
+  exception: *const Value,
+  message: &str,
+) {
+  // Resolver/evaluation callbacks may already have scheduled the precise V8
+  // exception. Preserve that value ahead of an explicit dependency error or
+  // an internal fallback, then make sure the active TryCatch observes it as
+  // well as Module::GetException.
+  let recorded = current_recorded_exception();
+  let exception = if !recorded.is_null() {
+    recorded
+  } else if exception.is_null() {
+    let message = new_string(current_isolate(), message.to_owned());
+    allocate_error(message, "Error")
+  } else {
+    exception
+  };
   if let Some(state) = unsafe { module_state(module) } {
     state.status = STATUS_ERRORED;
     state.exception = exception;
   }
+  record_exception(current_isolate(), exception);
+}
+
+fn fail_module_evaluation(module: *const Module, message: &str) {
+  fail_module_evaluation_with_exception(
+    module,
+    current_recorded_exception(),
+    message,
+  );
 }
 
 fn evaluate_synthetic_module(
@@ -6226,7 +7493,10 @@ pub extern "C" fn v8__Module__Evaluate(
     return promise;
   }
   if state.status != STATUS_INSTANTIATED {
-    state.status = STATUS_ERRORED;
+    fail_module_evaluation(
+      module,
+      "module must be instantiated before evaluation",
+    );
     return ptr::null();
   }
   state.status = STATUS_EVALUATING;
@@ -6247,14 +7517,16 @@ pub extern "C" fn v8__Module__Evaluate(
   let mut sources = Vec::new();
   let runtime =
     match collect_graph(module, &mut seen, &mut sources).and_then(|()| {
-      crate::js2wasm_spike::compile_and_instantiate(&entry, &sources)
+      crate::js2wasm_spike::compile_and_instantiate(
+        &entry,
+        &sources,
+        current_isolate() as usize,
+      )
     }) {
       Ok(runtime) => runtime,
       Err(error) => {
         eprintln!("{error}");
-        if let Some(state) = unsafe { module_state(module) } {
-          state.status = STATUS_ERRORED;
-        }
+        fail_module_evaluation(module, &error);
         return ptr::null();
       }
     };
@@ -6290,4 +7562,246 @@ pub extern "C" fn v8__Module__IsGraphAsync(_module: *const Module) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Module__ScriptId(_module: *const Module) -> int {
   1
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn test_source_module(
+    isolate: *mut RealIsolate,
+    specifier: &str,
+    imports: Vec<StaticImport>,
+  ) -> *const Module {
+    allocate(
+      isolate,
+      HeapValue::Module(ModuleState {
+        status: STATUS_UNINSTANTIATED,
+        source: String::new(),
+        specifier: specifier.to_string(),
+        imports,
+        dependencies: Vec::new(),
+        runtime: None,
+        synthetic: None,
+        evaluation_result: ptr::null(),
+        exception: ptr::null(),
+        unbound_script: ptr::null(),
+        module_requests: ptr::null(),
+        namespace: new_object(isolate),
+        prelinked_deno_module: false,
+      }),
+    )
+  }
+
+  fn test_import(specifier: &str) -> StaticImport {
+    StaticImport {
+      specifier: specifier.to_string(),
+      source_offset: 0,
+      attributes: Vec::new(),
+      phase: StaticImportPhase::Evaluation,
+    }
+  }
+
+  #[test]
+  fn evaluating_an_uninstantiated_module_records_an_exception() {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    let module = test_source_module(isolate, "entry", Vec::new());
+    let mut try_catch = [0usize; 6];
+    v8__TryCatch__CONSTRUCT(try_catch.as_mut_ptr(), isolate);
+
+    assert!(v8__Module__Evaluate(module, ptr::null()).is_null());
+    assert_eq!(v8__Module__GetStatus(module), ModuleStatus::Errored);
+    let exception = v8__Module__GetException(module);
+    assert!(!exception.is_null());
+    assert!(v8__TryCatch__HasCaught(try_catch.as_ptr()));
+    assert_eq!(v8__TryCatch__Exception(try_catch.as_ptr()), exception);
+
+    v8__TryCatch__DESTRUCT(try_catch.as_mut_ptr());
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
+  }
+
+  #[cfg(not(target_os = "windows"))]
+  thread_local! {
+    static TEST_MODULE_RESOLUTION: RefCell<(*const Module, *const Module)> =
+      const { RefCell::new((ptr::null(), ptr::null())) };
+  }
+
+  #[cfg(not(target_os = "windows"))]
+  unsafe extern "C" fn resolve_nested_test_module(
+    _context: crate::Local<'_, Context>,
+    _specifier: crate::Local<'_, V8String>,
+    _attributes: crate::Local<'_, FixedArray>,
+    referrer: crate::Local<'_, Module>,
+  ) -> ResolveModuleCallbackRet {
+    let referrer = &*referrer as *const Module;
+    let resolved = TEST_MODULE_RESOLUTION.with(|resolution| {
+      let (parent, child) = *resolution.borrow();
+      if referrer == parent {
+        child
+      } else {
+        ptr::null()
+      }
+    });
+    // rusty_v8 intentionally keeps this ABI wrapper's field private. Its
+    // repr(C) representation is exactly the returned module pointer.
+    unsafe { std::mem::transmute(resolved) }
+  }
+
+  #[cfg(not(target_os = "windows"))]
+  #[test]
+  fn dependency_instantiation_failure_propagates_its_exception() {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    let context =
+      v8__Context__New(isolate, ptr::null(), ptr::null(), ptr::null_mut());
+    let parent =
+      test_source_module(isolate, "parent", vec![test_import("child")]);
+    let child =
+      test_source_module(isolate, "child", vec![test_import("missing")]);
+    TEST_MODULE_RESOLUTION.with(|resolution| {
+      *resolution.borrow_mut() = (parent, child);
+    });
+    let mut try_catch = [0usize; 6];
+    v8__TryCatch__CONSTRUCT(try_catch.as_mut_ptr(), isolate);
+
+    assert_eq!(
+      v8__Module__InstantiateModule(
+        parent,
+        context,
+        resolve_nested_test_module,
+        None,
+      ),
+      MaybeBool::Nothing
+    );
+    assert_eq!(v8__Module__GetStatus(child), ModuleStatus::Errored);
+    assert_eq!(v8__Module__GetStatus(parent), ModuleStatus::Errored);
+    let child_exception = v8__Module__GetException(child);
+    assert!(!child_exception.is_null());
+    assert_eq!(v8__Module__GetException(parent), child_exception);
+    assert!(v8__TryCatch__HasCaught(try_catch.as_ptr()));
+    assert_eq!(v8__TryCatch__Exception(try_catch.as_ptr()), child_exception);
+
+    v8__TryCatch__DESTRUCT(try_catch.as_mut_ptr());
+    TEST_MODULE_RESOLUTION.with(|resolution| {
+      *resolution.borrow_mut() = (ptr::null(), ptr::null());
+    });
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
+  }
+
+  #[test]
+  fn parses_static_module_requests_with_phases_and_attributes() {
+    let source = r#"
+      // import "ignored-comment";
+      const dynamic = import("ignored-dynamic");
+      const meta = import.meta;
+      import "./side-effect.js";
+      import { value } from "./dep.js" with { type: "json", mode: 'strict' };
+      export { other } from "./re-export.js";
+      import source bytes from "./asset.wasm";
+      import defer * as lazy from "./lazy.js";
+    "#;
+
+    let requests = parse_static_imports(source);
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].specifier, "./side-effect.js");
+    assert_eq!(requests[0].phase, StaticImportPhase::Evaluation);
+    assert_eq!(requests[1].specifier, "./dep.js");
+    assert_eq!(
+      requests[1].attributes,
+      vec![
+        ImportAttribute {
+          key: "type".to_string(),
+          value: "json".to_string(),
+          source_offset: source_utf16_offset(
+            source,
+            source.find("type:").unwrap()
+          ),
+        },
+        ImportAttribute {
+          key: "mode".to_string(),
+          value: "strict".to_string(),
+          source_offset: source_utf16_offset(
+            source,
+            source.find("mode:").unwrap()
+          ),
+        },
+      ]
+    );
+    assert_eq!(requests[2].specifier, "./re-export.js");
+    assert_eq!(requests[3].phase, StaticImportPhase::Source);
+    assert_eq!(requests[4].phase, StaticImportPhase::Defer);
+  }
+
+  #[test]
+  fn module_request_offsets_are_utf16_and_string_escapes_are_decoded() {
+    let source = "const emoji = '😀';\nimport './de\\u0070.js';";
+    let request = parse_static_imports(source).pop().unwrap();
+    assert_eq!(request.specifier, "./dep.js");
+    let quote = source.rfind('\'').unwrap() - "./de\\u0070.js".len() - 1;
+    assert_eq!(request.source_offset, source_utf16_offset(source, quote));
+    assert_eq!(
+      source_offset_location(source, request.source_offset),
+      (1, 7)
+    );
+  }
+
+  #[test]
+  fn ignores_import_text_in_regexps_without_confusing_division() {
+    let source = r#"
+      const matcher = /(?:^|\/)import\s+["'][^"']+["']/;
+      if (enabled) /import\s+["']also-ignored["']/;
+      import "./real-after-regexp.js";
+      const ratio = numerator / denominator;
+      import "./real-after-division.js";
+      export { value } from "./real-re-export.js";
+    "#;
+
+    let requests = parse_static_imports(source);
+    assert_eq!(
+      requests
+        .iter()
+        .map(|request| request.specifier.as_str())
+        .collect::<Vec<_>>(),
+      vec![
+        "./real-after-regexp.js",
+        "./real-after-division.js",
+        "./real-re-export.js",
+      ]
+    );
+  }
+
+  #[test]
+  fn does_not_manufacture_a_reexport_from_an_export_default_regexp() {
+    let requests = parse_static_imports(
+      r#"export default /from "phantom"/; import "./real.js";"#,
+    );
+
+    assert_eq!(
+      requests
+        .iter()
+        .map(|request| request.specifier.as_str())
+        .collect::<Vec<_>>(),
+      vec!["./real.js"],
+    );
+  }
+
+  #[test]
+  fn decodes_utf16_surrogate_pairs_in_module_specifiers() {
+    let source = "const prefix = '😀';\nimport \"./\\uD83D\\uDE00.js\";";
+    let request = parse_static_imports(source).pop().unwrap();
+    let quote = source.find("\"./\\uD83D\\uDE00.js\"").unwrap();
+
+    assert_eq!(request.specifier, "./😀.js");
+    assert_eq!(request.source_offset, source_utf16_offset(source, quote));
+    assert_eq!(
+      source_offset_location(source, request.source_offset),
+      (1, 7)
+    );
+    assert_eq!(decode_js_string_literal("\\uD83D"), None);
+    assert_eq!(decode_js_string_literal("\\uDE00"), None);
+    assert_eq!(decode_js_string_literal("\\uD83D\\u0041"), None);
+  }
 }
