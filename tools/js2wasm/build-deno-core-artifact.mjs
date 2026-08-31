@@ -195,11 +195,20 @@ function hostTestFn(): any {
   return JSON.parse(encoded);
 }
 
-function hostTypedArray(kind: string): any {
-  return function(values: any[]): any[] {
-    (globalThis as any).__v8xLastTypedArrayKind = kind;
-    return values;
-  };
+// Deno's 00_primordials discovers these constructors through dynamic global
+// reads. Keep the six concrete implementations reachable before that snapshot
+// without replacing their globals yet; 01_core also needs the native
+// Uint32Array/Uint8Array conversion-buffer behavior during its own init.
+const nativeTypedArrayWitnesses = [
+  new Uint8Array(0),
+  new Uint16Array(0),
+  new Uint32Array(0),
+  new Int32Array(0),
+  new BigUint64Array(0),
+  new BigInt64Array(0),
+];
+if (nativeTypedArrayWitnesses.length !== 6) {
+  throw new Error("v8x Deno POC could not initialize typed-array witnesses");
 }
 
 const extrasBinding = {
@@ -222,12 +231,6 @@ const core: any = {
 };
 (globalThis as any).Deno = { core };
 (globalThis as any).test_fn = hostTestFn;
-(globalThis as any).Uint8Array = hostTypedArray("Uint8Array");
-(globalThis as any).Uint16Array = hostTypedArray("Uint16Array");
-(globalThis as any).Uint32Array = hostTypedArray("Uint32Array");
-(globalThis as any).Int32Array = hostTypedArray("Int32Array");
-(globalThis as any).BigUint64Array = hostTypedArray("BigUint64Array");
-(globalThis as any).BigInt64Array = hostTypedArray("BigInt64Array");
 (globalThis as any).__timers = {
   createTimer: noop,
   cancelTimer: noop,
@@ -238,6 +241,26 @@ const core: any = {
   setReportException: noop,
   processTimers: noop,
 };
+`;
+
+// Deno's 01_core creates a Uint32Array plus a Uint8Array view during its
+// module initialization. Keep the POC's array-returning host shims in the
+// entry body after all core imports, so those internal conversion buffers use
+// native typed arrays while later POC calls still receive their host shims.
+const TYPED_ARRAY_SHIMS_AFTER_CORE = String.raw`
+function hostTypedArrayAfterCore(kind: string): any {
+  return function(values: any[]): any[] {
+    (globalThis as any).__v8xLastTypedArrayKind = kind;
+    return values;
+  };
+}
+
+(globalThis as any).Uint8Array = hostTypedArrayAfterCore("Uint8Array");
+(globalThis as any).Uint16Array = hostTypedArrayAfterCore("Uint16Array");
+(globalThis as any).Uint32Array = hostTypedArrayAfterCore("Uint32Array");
+(globalThis as any).Int32Array = hostTypedArrayAfterCore("Int32Array");
+(globalThis as any).BigUint64Array = hostTypedArrayAfterCore("BigUint64Array");
+(globalThis as any).BigInt64Array = hostTypedArrayAfterCore("BigInt64Array");
 `;
 
 function fail(message) {
@@ -427,6 +450,63 @@ function checkedCompile(result, label) {
   return Buffer.from(result.binary);
 }
 
+const RAW_MODULE_BOOTSTRAP_CHECK = String.raw`
+const fs = require("node:fs");
+const binary = fs.readFileSync(0);
+const appModule = new WebAssembly.Module(binary);
+const imports = Object.create(null);
+for (const entry of WebAssembly.Module.imports(appModule)) {
+  if (entry.kind !== "function") {
+    throw new Error(
+      "unsupported " + entry.kind + " import " + entry.module + "." + entry.name,
+    );
+  }
+  let moduleImports = imports[entry.module];
+  if (moduleImports === undefined) {
+    moduleImports = Object.create(null);
+    imports[entry.module] = moduleImports;
+  }
+  moduleImports[entry.name] = () => 0;
+}
+const instance = new WebAssembly.Instance(appModule, imports);
+const moduleInit = instance.exports.__module_init;
+if (typeof moduleInit !== "function") {
+  throw new Error("application does not export __module_init");
+}
+moduleInit();
+const bootstrapProbe = instance.exports.__v8x_probe_deno_core_bootstrap;
+if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== 42) {
+  throw new Error("application bootstrap probe failed after __module_init");
+}
+process.stdout.write("raw module bootstrap ok\n");
+`;
+
+function assertRawModuleInitializesWithStubImports(appBinary, profile) {
+  let output;
+  try {
+    output = execFileSync(
+      process.execPath,
+      ["--experimental-wasm-exnref", "--eval", RAW_MODULE_BOOTSTRAP_CHECK],
+      {
+        input: appBinary,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+  } catch (error) {
+    const stdout = error?.stdout?.toString() ?? "";
+    const stderr = error?.stderr?.toString() ?? "";
+    fail(
+      `Deno ${profile} application failed raw __module_init/bootstrap validation with stub imports:\n${stdout}${stderr}`,
+    );
+  }
+  if (output !== "raw module bootstrap ok\n") {
+    fail(
+      `Deno ${profile} application raw bootstrap validator returned unexpected output: ${JSON.stringify(output)}`,
+    );
+  }
+}
+
 function lockedInputRecord(record) {
   const locked = {
     path: record.path,
@@ -512,7 +592,13 @@ import "./core/00_primordials.js";
 import "./core/00_infra.js";
 import "./core/02_timers.js";
 import "./core/01_core.js";
-import * as coreModule from "./core/mod.js";
+import {
+  core as moduleCore,
+  internals as moduleInternals,
+  primordials as modulePrimordials,
+} from "./core/mod.js";
+
+${TYPED_ARRAY_SHIMS_AFTER_CORE}
 
 // Value-preserving embedding of the raw Rust literal extracted above. The
 // classic-script bridge accepts no alternative source: it first compares the
@@ -529,8 +615,13 @@ export function __v8x_probe_deno_core_bootstrap(): number {
   if (captured.core.print !== bootstrap.core.print) return 0;
   if (captured.core.ops.op_print !== bootstrap.core.ops.op_print) return 0;
   if (bootstrap.internals !== captured.internals || bootstrap.primordials !== captured.primordials) return 0;
-  if (coreModule.core !== bootstrap.core || coreModule.internals !== bootstrap.internals) return 0;
-  if (coreModule.primordials !== bootstrap.primordials) return 0;
+  if (moduleCore !== bootstrap.core || moduleInternals !== bootstrap.internals) return 0;
+  if (modulePrimordials !== bootstrap.primordials) return 0;
+  if (
+    modulePrimordials.Uint8Array === (globalThis as any).Uint8Array ||
+    modulePrimordials.Uint32Array === (globalThis as any).Uint32Array ||
+    modulePrimordials.BigInt64Array === (globalThis as any).BigInt64Array
+  ) return 0;
   const requiredCoreFunctions = [
     "setUpAsyncStub",
     "__eventLoopTick",
@@ -568,7 +659,13 @@ import "./core/00_primordials.js";
 import "./core/00_infra.js";
 import "./core/02_timers.js";
 import "./core/01_core.js";
-import * as coreModule from "./core/mod.js";
+import {
+  core as moduleCore,
+  internals as moduleInternals,
+  primordials as modulePrimordials,
+} from "./core/mod.js";
+
+${TYPED_ARRAY_SHIMS_AFTER_CORE}
 
 let stage = 0;
 let scriptResult = "";
@@ -669,8 +766,13 @@ export function __v8x_probe_deno_core_bootstrap(): number {
   if (captured.core.print !== bootstrap.core.print) return 0;
   if (captured.core.ops.op_print !== bootstrap.core.ops.op_print) return 0;
   if (bootstrap.internals !== captured.internals || bootstrap.primordials !== captured.primordials) return 0;
-  if (coreModule.core !== bootstrap.core || coreModule.internals !== bootstrap.internals) return 0;
-  if (coreModule.primordials !== bootstrap.primordials) return 0;
+  if (moduleCore !== bootstrap.core || moduleInternals !== bootstrap.internals) return 0;
+  if (modulePrimordials !== bootstrap.primordials) return 0;
+  if (
+    modulePrimordials.Uint8Array === (globalThis as any).Uint8Array ||
+    modulePrimordials.Uint32Array === (globalThis as any).Uint32Array ||
+    modulePrimordials.BigInt64Array === (globalThis as any).BigInt64Array
+  ) return 0;
   return 42;
 }
 export function __v8x_stage_deno_core_wrappers(): number {
@@ -730,6 +832,10 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   );
   const appBinary = checkedCompile(app, `Deno ${profile} application`);
   const appModule = new WebAssembly.Module(appBinary);
+  // Regression guard for the exact raw graph: this must not depend on a
+  // Wasmtime store or a runtime-eval provider just to initialize Deno core.
+  // Run it in a child so compilation state cannot affect raw boot behavior.
+  assertRawModuleInitializesWithStubImports(appBinary, profile);
   if (
     !WebAssembly.Module.imports(appModule).some(
       (entry) => entry.module === "js2wasm:runtime-eval",
