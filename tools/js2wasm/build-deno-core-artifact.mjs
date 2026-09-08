@@ -21,11 +21,12 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints } from "./context-value-bridge.mjs";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "16498efb481cb022ee5c4dcc9bb137b6d4c91a50";
+const EXPECTED_JS2_REF = "d8841e9e7f7ef502d51a6165788cd55c2e75a24a";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
@@ -964,9 +965,28 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
 }
 `;
 
+  // The core application owns the realm. Interpreter providers receive this
+  // exact object; later application graphs must import it from this instance.
+  files[`${appRoot}/entry.ts`] += `
+export function __v8x_context_global_this(): any { return globalThis; }
+export function __v8x_context_call(callable: any, receiver: any, args: any): any {
+  return callable.apply(receiver, args);
+}
+`;
+
+  if (profile === "runtime") {
+    // Root handles must exist before the host hook, which precedes all core
+    // imports. The host global becomes authoritative before core captures ops.
+    files[`${appRoot}/runtime-seed.ts`] = CONTEXT_VALUE_BRIDGE_SOURCE + RUNTIME_SEED +
+      "\ndeclare function __v8x_attach_context(): void;\n__v8x_attach_context();\n";
+    files[`${appRoot}/entry.ts`] += contextValueBridgeEntrypoints("./runtime-seed.ts");
+  } else {
+    files[`${appRoot}/entry.ts`] += CONTEXT_VALUE_BRIDGE_SOURCE;
+  }
+
   const graphInputs = [
     ...lockSources,
-    recordInput("generated/runtime-seed.ts", Buffer.from(RUNTIME_SEED), {
+    recordInput("generated/runtime-seed.ts", Buffer.from(files[`${appRoot}/runtime-seed.ts`]), {
       role: "abi-bridge",
     }),
     recordInput(
@@ -1020,6 +1040,9 @@ export function __v8x_script_result_utf16_code_unit(index: number): number {
   );
   const requiredAppExports = [
     "__v8x_probe_deno_core_bootstrap",
+    "__v8x_context_global_this",
+    "__v8x_context_call",
+    ...CONTEXT_VALUE_BRIDGE_EXPORTS,
     "__v8x_run_classic_script",
     "__v8x_script_result_utf16_length",
     "__v8x_script_result_utf16_code_unit",

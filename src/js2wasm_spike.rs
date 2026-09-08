@@ -4,7 +4,7 @@
 //! artifacts. `engine_js2wasm_runtime` adds the external compiler and a
 //! content-addressed native-artifact cache for graphs discovered after startup.
 //! Both profiles share one engine plus each precompiled module across isolates,
-//! and keep a private store/instance alive with each owning V8 module handle.
+//! and keep a private store per context, retained by its V8 module handles.
 //! The first Deno-shaped host seam is `Deno.cwd()`: the compiled TypeScript
 //! wrapper reconstructs its string from two direct UTF-16 imports, avoiding a
 //! JavaScript-host `externref` ABI or a WASI/component boundary.
@@ -28,6 +28,25 @@ compile_error!(
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+#[path = "js2wasm_realm_values.rs"]
+mod realm_values;
+use realm_values::CallerRealm;
+#[cfg(feature = "js2wasm_runtime_compile")]
+pub use realm_values::js2wasm_test_realm_values;
+#[cfg(feature = "js2wasm_runtime_compile")]
+pub(crate) use realm_values::{load_realm_for_test, bootstrap_context_for_test};
+pub(crate) use realm_values::{RealmAccess, RealmValue};
+static NEXT_REALM_ID: AtomicUsize = AtomicUsize::new(1);
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[path = "js2wasm_context_store_tests.rs"]
+mod context_store_tests;
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub use context_store_tests::{
+  failed_graph_initialization_preserves_primary_and_retains_graph as js2wasm_test_context_store_failure,
+  graphs_share_store_without_replacing_primary_instance as js2wasm_test_context_store,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -36,6 +55,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "js2wasm_runtime_compile")]
 use std::process::Command;
+use std::rc::Rc;
 #[cfg(feature = "js2wasm_runtime_compile")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,6 +92,9 @@ const DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT: &str =
   "__v8x_deno_test_fn_result_utf16_code_unit";
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
 const RUNTIME_EVAL_IMPORT_MODULE: &str = "js2wasm:runtime-eval";
+const CONTEXT_IMPORT_MODULE: &str = "v8x:context";
+const CONTEXT_IMPORTS: &[&str] =
+  &["__v8x_context_global_this", "__v8x_context_call"];
 const RUNTIME_EVAL_JSON_IMPORT_MODULE: &str = "v8x:runtime-eval-json";
 const RUNTIME_EVAL_IMPORTS: &[&str] = &[
   "__runtime_apply_interpreted",
@@ -219,6 +242,8 @@ const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
 ];
 
 const DENO_HOST_IMPORTS: &[&str] = &[
+  "__v8x_attach_context",
+  "__v8x_host_call",
   CWD_LENGTH_IMPORT,
   CWD_CODE_UNIT_IMPORT,
   DENO_SUM_BEGIN_IMPORT,
@@ -938,6 +963,9 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  realm_id: usize,
+  realm_instance: Option<Instance>,
+  realm_owner_identity: usize,
   heap_isolate: usize,
   cwd: Vec<u16>,
   cwd_op_calls: u64,
@@ -1416,6 +1444,39 @@ impl SharedDenoRuntime {
     let engine = Engine::new(&config)
       .map_err(|error| format!("configure embedded Wasmtime: {error}"))?;
     let mut linker = Linker::new(&engine);
+    linker.func_wrap(
+      DENO_IMPORT_MODULE,
+      "__v8x_attach_context",
+      |caller: Caller<'_, DenoHostState>| -> wasmtime::Result<()> {
+        let owner = crate::js2wasm::realm_objects::bootstrap_owner_for_attachment(
+          caller.data().realm_owner_identity,
+        ).map_err(wasmtime::Error::msg)?;
+        let mut access = CallerRealm::new(caller).map_err(wasmtime::Error::msg)?;
+        crate::js2wasm::realm_objects::attach_bootstrap_context(&mut access, &owner)
+          .map_err(wasmtime::Error::msg)
+      },
+    ).map_err(|error| format!("bind context attachment: {error:#}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        "__v8x_host_call",
+        |caller: Caller<'_, DenoHostState>,
+         id: f64,
+         receiver: f64,
+         args: f64|
+         -> wasmtime::Result<f64> {
+          let mut access =
+            CallerRealm::new(caller).map_err(wasmtime::Error::msg)?;
+          crate::js2wasm::realm_objects::invoke_host(
+            &mut access,
+            id,
+            receiver,
+            args,
+          )
+          .map_err(wasmtime::Error::msg)
+        },
+      )
+      .map_err(|e| format!("bind realm host callbacks: {e:#}"))?;
     linker
       .func_wrap(
         DENO_IMPORT_MODULE,
@@ -1733,12 +1794,15 @@ impl SharedDenoRuntime {
         && RUNTIME_EVAL_IMPORTS.contains(&import.name()))
         || (import.module() == RUNTIME_EVAL_JSON_IMPORT_MODULE
           && import.name() == "__v8x_runtime_eval_json");
-      needs_runtime_eval |= runtime_eval_import;
+      let context_import = import.module() == CONTEXT_IMPORT_MODULE
+        && CONTEXT_IMPORTS.contains(&import.name());
+      needs_runtime_eval |= runtime_eval_import || context_import;
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
         .any(|candidate| *candidate == (import.module(), import.name()));
       if !known_deno_import
         && !runtime_eval_import
+        && !context_import
         && !deferred_bootstrap_import
       {
         return Err(format!(
@@ -2080,7 +2144,8 @@ fn take_pending_wasm_exception_summary<T>(store: &mut Store<T>) -> String {
 /// development builds may precompile the exact raw module in-process.
 pub(crate) fn deno_core_bootstrap_runtime_from_env(
   heap_isolate: usize,
-) -> Result<DenoRuntime, String> {
+  publish: impl FnOnce(Rc<RefCell<DenoRuntime>>) -> Result<(), String>,
+) -> Result<Rc<RefCell<DenoRuntime>>, String> {
   let shared = shared_runtime()?;
 
   #[cfg(feature = "js2wasm_deno_poc_replay")]
@@ -2120,7 +2185,7 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env(
   let cwd = std::env::current_dir().map_err(|error| {
     format!("resolve Deno bootstrap working directory: {error}")
   })?;
-  DenoRuntime::instantiate(shared, &prepared, cwd, heap_isolate)
+  DenoRuntime::instantiate_published(shared, &prepared, cwd, heap_isolate, publish)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -2149,11 +2214,14 @@ fn persist_precompiled_deno_core_artifact(
   }
 }
 
-/// One private Wasmtime store and instance owned by a v8x module handle.
+/// One private Wasmtime store shared by modules in a v8x context.
 pub(crate) struct DenoRuntime {
+  realm_id: usize,
+  realm_instance: Instance,
   store: Store<DenoHostState>,
   instance: Instance,
   _runtime_eval_provider: Option<Instance>,
+  graph_instances: Vec<Instance>,
 }
 
 impl DenoRuntime {
@@ -2163,10 +2231,46 @@ impl DenoRuntime {
     cwd: PathBuf,
     heap_isolate: usize,
   ) -> Result<Self, String> {
+    let mut runtime =
+      Self::instantiate_deferred(shared, prepared, cwd, heap_isolate)?;
+    runtime.initialize_primary()?;
+    Ok(runtime)
+  }
+
+  fn instantiate_published(
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    cwd: PathBuf,
+    heap_isolate: usize,
+    publish: impl FnOnce(Rc<RefCell<Self>>) -> Result<(), String>,
+  ) -> Result<Rc<RefCell<Self>>, String> {
+    let runtime = Rc::new(RefCell::new(Self::instantiate_deferred(
+      shared,
+      prepared,
+      cwd,
+      heap_isolate,
+    )?));
+    // Publish before user top-level code can install values and then throw.
+    // No heap/context borrow is held across execution of that code.
+    runtime.borrow_mut().store.data_mut().realm_owner_identity = Rc::as_ptr(&runtime) as usize;
+    publish(runtime.clone())?;
+    runtime.borrow_mut().initialize_primary()?;
+    Ok(runtime)
+  }
+
+  fn instantiate_deferred(
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    cwd: PathBuf,
+    heap_isolate: usize,
+  ) -> Result<Self, String> {
     let cwd = cwd.to_string_lossy().encode_utf16().collect();
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        realm_id: 0,
+        realm_instance: None,
+        realm_owner_identity: 0,
         heap_isolate,
         cwd,
         cwd_op_calls: 0,
@@ -2181,21 +2285,86 @@ impl DenoRuntime {
       },
     );
     store.limiter(|state| state);
-    let (instance, runtime_eval_provider) = match prepared {
+    let mut runtime_eval_provider = None;
+    let instance = Self::instantiate_in_store(
+      shared,
+      prepared,
+      &mut store,
+      &mut runtime_eval_provider,
+      None,
+    )?;
+    shared.instantiations.fetch_add(1, Ordering::Relaxed);
+    let realm_id = NEXT_REALM_ID
+      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+        id.checked_add(1)
+      })
+      .map_err(|_| "Wasmtime realm identity space exhausted".to_string())?;
+    store.data_mut().realm_id = realm_id;
+    store.data_mut().realm_instance = Some(instance);
+    Ok(Self {
+      realm_id,
+      store,
+      instance,
+      realm_instance: instance,
+      _runtime_eval_provider: runtime_eval_provider,
+      graph_instances: Vec::new(),
+    })
+  }
+
+  fn initialize_primary(&mut self) -> Result<(), String> {
+    self.run_deferred_module_init()?;
+    self.verify_cwd_probe()?;
+    self.verify_deno_core_bootstrap_probe()?;
+    self.verify_runtime_eval_state_probe()
+  }
+
+  fn instantiate_in_store(
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    store: &mut Store<DenoHostState>,
+    existing_provider: &mut Option<Instance>,
+    context_instance: Option<Instance>,
+  ) -> Result<Instance, String> {
+    let result = match prepared {
       PreparedModule::Prelinked(instance_pre) => {
         let instance = instance_pre
-          .instantiate(&mut store)
+          .instantiate(&mut *store)
           .map_err(|error| format!("instantiate js2wasm artifact: {error}"))?;
-        (instance, None)
+        instance
       }
       PreparedModule::RuntimeEval(module) => {
-        let provider_module = shared.runtime_eval_provider()?;
-        let provider = shared
-          .linker
-          .instantiate(&mut store, &provider_module)
-          .map_err(|error| {
-            format!("instantiate js2wasm runtime-eval provider: {error:#}")
-          })?;
+        let provider = if let Some(provider) = *existing_provider {
+          provider
+        } else {
+          let provider_module = shared.runtime_eval_provider()?;
+          let provider = shared
+            .linker
+            .instantiate(&mut *store, &provider_module)
+            .map_err(|error| {
+              format!("instantiate js2wasm runtime-eval provider: {error:#}")
+            })?;
+          shared
+            .runtime_eval_instantiations
+            .fetch_add(1, Ordering::Relaxed);
+          // Retain the realm even if linking or instantiating the app fails.
+          *existing_provider = Some(provider);
+          provider
+        };
+        let realm = context_instance.unwrap_or(provider);
+        // Context imports must resolve to the retained core instance when
+        // bootstrapped. The interpreter receives that realm as an argument.
+        // Do
+        // not let the deferred-import trap fallback hide an outdated artifact.
+        for import in module.imports() {
+          if import.module() == CONTEXT_IMPORT_MODULE
+            && realm.get_func(&mut *store, import.name()).is_none()
+          {
+            return Err(format!(
+              "js2wasm realm provider is missing context export {}",
+              import.name(),
+            ));
+          }
+        }
         let mut linker = shared.linker.clone();
         linker.allow_shadowing(true);
         linker
@@ -2204,36 +2373,54 @@ impl DenoRuntime {
             format!("bind deferred js2wasm imports: {error:#}")
           })?;
         linker
-          .instance(&mut store, RUNTIME_EVAL_IMPORT_MODULE, provider)
+          .instance(&mut *store, RUNTIME_EVAL_IMPORT_MODULE, provider)
           .map_err(|error| {
             format!("bind js2wasm runtime-eval provider exports: {error:#}")
           })?;
         linker
-          .instance(&mut store, RUNTIME_EVAL_JSON_IMPORT_MODULE, provider)
+          .instance(&mut *store, RUNTIME_EVAL_JSON_IMPORT_MODULE, provider)
           .map_err(|error| {
             format!("bind js2wasm runtime-eval JSON export: {error:#}")
           })?;
+        linker
+          .instance(&mut *store, CONTEXT_IMPORT_MODULE, realm)
+          .map_err(|error| {
+            format!("bind js2wasm context provider exports: {error:#}")
+          })?;
         let instance =
-          linker.instantiate(&mut store, module).map_err(|error| {
+          linker.instantiate(&mut *store, module).map_err(|error| {
             format!("instantiate js2wasm artifact: {error:#}")
           })?;
-        shared
-          .runtime_eval_instantiations
-          .fetch_add(1, Ordering::Relaxed);
-        (instance, Some(provider))
+        instance
       }
     };
+    Ok(result)
+  }
+
+  fn instantiate_graph(
+    &mut self,
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+  ) -> Result<(), String> {
+    let instance = Self::instantiate_in_store(
+      shared,
+      prepared,
+      &mut self.store,
+      &mut self._runtime_eval_provider,
+      Some(self.realm_instance),
+    )?;
+    // Keep the graph alive even if initialization throws after publishing
+    // values. Restore the primary instance used by the Deno core bridge.
+    self.graph_instances.push(instance);
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
-    let mut runtime = Self {
-      store,
-      instance,
-      _runtime_eval_provider: runtime_eval_provider,
-    };
-    runtime.run_deferred_module_init()?;
-    runtime.verify_cwd_probe()?;
-    runtime.verify_deno_core_bootstrap_probe()?;
-    runtime.verify_runtime_eval_state_probe()?;
-    Ok(runtime)
+    let primary = std::mem::replace(&mut self.instance, instance);
+    let result = (|| {
+      self.run_deferred_module_init()?;
+      self.verify_cwd_probe()?;
+      self.verify_runtime_eval_state_probe()
+    })();
+    self.instance = primary;
+    result
   }
 
   pub(crate) fn bind_deno_ops(
@@ -2682,7 +2869,9 @@ pub(crate) fn compile_and_instantiate(
   entry: &str,
   modules: &[SourceModule],
   heap_isolate: usize,
-) -> Result<DenoRuntime, String> {
+  existing: Option<Rc<RefCell<DenoRuntime>>>,
+  publish: impl FnOnce(Rc<RefCell<DenoRuntime>>) -> Result<(), String>,
+) -> Result<Rc<RefCell<DenoRuntime>>, String> {
   if modules.is_empty() {
     return Err("js2wasm module graph is empty".to_string());
   }
@@ -2708,7 +2897,25 @@ pub(crate) fn compile_and_instantiate(
   };
   let cwd = std::env::current_dir()
     .map_err(|error| format!("resolve Deno.cwd() host value: {error}"))?;
-  DenoRuntime::instantiate(shared, &prepared, cwd, heap_isolate)
+  if let Some(runtime) = existing {
+    publish(runtime.clone())?;
+    {
+      let mut owner = runtime
+        .try_borrow_mut()
+        .map_err(|_| "js2wasm context is already executing".to_string())?;
+      owner.configure_heap_limit(heap_isolate as *mut crate::RealIsolate);
+      owner.instantiate_graph(shared, &prepared)?;
+    }
+    Ok(runtime)
+  } else {
+    DenoRuntime::instantiate_published(
+      shared,
+      &prepared,
+      cwd,
+      heap_isolate,
+      publish,
+    )
+  }
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]

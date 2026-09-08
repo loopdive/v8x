@@ -11,7 +11,7 @@
 
 = Callbacks and exceptions
 
-Every native callback crosses an engine C frame before it reaches Rust.
+JSC and QuickJS native callbacks cross an engine C frame before reaching Rust.
 The trampoline does five things, in order:
 
 + restore the thread-local isolate and context; many ABI functions receive
@@ -21,6 +21,13 @@ The trampoline does five things, in order:
 + call the Rust callback, catching panics so they never unwind through
   engine frames
 + translate the return-value slot back into an engine value
+
+The experimental js2wasm backend uses Wasmtime host imports instead of an
+engine C trampoline. Values stay rooted in their compiled realm, and Rust
+wrappers retain object identity. Synchronous nested callbacks use the active
+Wasmtime caller to access that realm. Ordinary host callbacks and built-in
+error transport are covered by focused tests; host construction, arbitrary
+exotic values and complete exception identity are not implemented.
 
 == Exceptions live in side state
 

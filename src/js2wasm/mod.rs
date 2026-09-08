@@ -9,6 +9,7 @@
 // These helpers are engine-independent despite living under the QuickJS
 // backend today. Reuse their real Rust implementation so deno_core's string
 // conversion path never needs an interpreter or a native simdutf library.
+pub(crate) mod realm_objects;
 #[path = "../quickjs/simdutf.rs"]
 mod simdutf;
 
@@ -65,7 +66,7 @@ struct ModuleState {
   specifier: String,
   imports: Vec<StaticImport>,
   dependencies: Vec<*const Module>,
-  runtime: Option<crate::js2wasm_spike::DenoRuntime>,
+  runtime: Option<Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>>,
   synthetic: Option<SyntheticModuleState>,
   evaluation_result: *const Value,
   exception: *const Value,
@@ -272,6 +273,7 @@ struct ContextState {
   embedder_data: Vec<*mut c_void>,
   deno_core_bootstrap: Option<Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>>,
   deno_core_bootstrap_phase: usize,
+  module_runtime: Option<Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>>,
 }
 
 enum HeapValue {
@@ -342,6 +344,8 @@ pub(crate) struct RawFunctionCallbackInfoParts {
 }
 
 struct IsolateState {
+  realm_objects: Vec<realm_objects::RealmObjectBinding>,
+  realm_callbacks: Vec<realm_objects::HostCallbackBinding>,
   values: Vec<*mut HeapValue>,
   contexts: Vec<*const Context>,
   data_slots: [*mut c_void; 4],
@@ -525,6 +529,22 @@ fn deno_core_runtime(
       .ok_or_else(|| "prelinked Deno core runtime disappeared".to_string()),
     _ => Err("prelinked Deno operation has no live context".to_string()),
   }
+}
+
+fn publish_deno_core_runtime(
+  context: *const Context,
+  runtime: Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
+) -> Result<(), String> {
+  let Some(HeapValue::Context(state)) = (unsafe { heap_value_mut(context) }) else {
+    return Err("Deno bootstrap has no live context".to_string());
+  };
+  if state.deno_core_bootstrap.is_some() || state.module_runtime.is_some() {
+    return Err("Deno bootstrap context already owns a runtime".to_string());
+  }
+  // The owner must be visible to synchronous host calls during module init.
+  // Keep it on failure: callbacks or values may already refer to this realm.
+  state.deno_core_bootstrap = Some(runtime);
+  Ok(())
 }
 
 fn with_deno_core_runtime<T>(
@@ -1786,6 +1806,8 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
   // configured maximum before dispatching those callbacks.
   let current_heap_limit = maximum_heap_limit;
   Box::into_raw(Box::new(IsolateState {
+    realm_objects: Vec::new(),
+    realm_callbacks: Vec::new(),
     values: Vec::new(),
     contexts: Vec::new(),
     data_slots: [ptr::null_mut(); 4],
@@ -2721,6 +2743,7 @@ pub extern "C" fn v8__Context__New(
       extras,
       embedder_data: vec![ptr::null_mut(); 4],
       deno_core_bootstrap: None,
+      module_runtime: None,
       deno_core_bootstrap_phase: 0,
     }),
   )
@@ -2882,6 +2905,15 @@ pub extern "C" fn v8__Array__New_with_elements(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Array__Length(array: *const Array) -> u32 {
+  if let Some(result) = realm_objects::length(array) {
+    return match result {
+      Ok(length) => length,
+      Err(error) => {
+        realm_objects::report(error);
+        0
+      }
+    };
+  }
   match unsafe { heap_value(array) } {
     Some(HeapValue::Array(state)) => {
       state.elements.len().try_into().unwrap_or(u32::MAX)
@@ -3120,6 +3152,15 @@ pub extern "C" fn v8__Object__Get(
   _context: *const Context,
   key: *const Value,
 ) -> *const Value {
+  if let Some(result) = realm_objects::get(object, key) {
+    return match result {
+      Ok(value) => value,
+      Err(error) => {
+        realm_objects::report(error);
+        ptr::null()
+      }
+    };
+  }
   property_on_chain(object, key.cast())
     .map(|property| property.value.cast())
     .unwrap_or_else(|| v8__Undefined(current_isolate()).cast())
@@ -3378,6 +3419,10 @@ pub extern "C" fn v8__Object__GetIndex(
   _context: *const Context,
   index: u32,
 ) -> *const Value {
+  if realm_objects::is_bound(object) {
+    let key = new_string(current_isolate(), index.to_string());
+    return v8__Object__Get(object, _context, key.cast());
+  }
   match unsafe { heap_value(object) } {
     Some(HeapValue::Array(state)) => state
       .elements
@@ -3400,6 +3445,15 @@ pub extern "C" fn v8__Object__Set(
   key: *const Value,
   value: *const Value,
 ) -> MaybeBool {
+  if let Some(result) = realm_objects::set(object, key, value) {
+    return match result {
+      Ok(()) => MaybeBool::JustTrue,
+      Err(error) => {
+        realm_objects::report(error);
+        MaybeBool::Nothing
+      }
+    };
+  }
   let Some(properties) = properties_mut(object) else {
     return MaybeBool::Nothing;
   };
@@ -3426,6 +3480,10 @@ pub extern "C" fn v8__Object__SetIndex(
   index: u32,
   value: *const Value,
 ) -> MaybeBool {
+  if realm_objects::is_bound(object) {
+    let key = new_string(current_isolate(), index.to_string());
+    return v8__Object__Set(object, _context, key.cast(), value);
+  }
   if let Some(HeapValue::TypedArray(state)) = unsafe { heap_value(object) } {
     let Some(HeapValue::Number(number)) = (unsafe { heap_value(value) }) else {
       return MaybeBool::Nothing;
@@ -3645,8 +3703,6 @@ fn invoke_function(
   else {
     return ptr::null();
   };
-  let callback = state.callback;
-  let data = state.data;
   let isolate = current_isolate();
   let undefined = v8__Undefined(isolate).cast();
   let receiver = if receiver.is_null() {
@@ -3667,6 +3723,34 @@ fn invoke_function(
       argument
     });
   }
+  if let Some(result) =
+    realm_objects::call(function, receiver, &args, is_construct)
+  {
+    return match result {
+      Ok(value) => value,
+      Err(error) => {
+        realm_objects::report(error);
+        ptr::null()
+      }
+    };
+  }
+  invoke_native_callback(function, receiver, &args, is_construct)
+}
+
+fn invoke_native_callback(
+  function: *const crate::Function,
+  receiver: *const Value,
+  args: &[*const Value],
+  is_construct: bool,
+) -> *const Value {
+  let Some(HeapValue::Function(state)) = (unsafe { heap_value(function) })
+  else {
+    return ptr::null();
+  };
+  let callback = state.callback;
+  let data = state.data;
+  let isolate = current_isolate();
+  let undefined = v8__Undefined(isolate).cast();
   let mut info = Box::new(CallbackInfoState {
     isolate,
     this: receiver,
@@ -3677,7 +3761,7 @@ fn invoke_function(
       undefined
     },
     is_construct,
-    args,
+    args: args.to_vec(),
     return_slot: Box::new(undefined),
   });
   let info_ptr = (&mut *info as *mut CallbackInfoState)
@@ -3840,6 +3924,9 @@ pub extern "C" fn v8__Function__NewInstance(
 ) -> *const Object {
   let receiver = new_object(current_isolate());
   let result = invoke_function(function, receiver.cast(), argc, argv, true);
+  if result.is_null() {
+    return ptr::null();
+  }
   if matches!(
     unsafe { heap_value(result) },
     Some(HeapValue::Object(_) | HeapValue::Function(_))
@@ -4453,6 +4540,14 @@ pub extern "C" fn v8__Boolean__Value(value: *const Boolean) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Value__IsTrue(value: *const Value) -> bool {
   matches!(unsafe { heap_value(value) }, Some(HeapValue::Boolean(true)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsFalse(value: *const Value) -> bool {
+  matches!(
+    unsafe { heap_value(value) },
+    Some(HeapValue::Boolean(false))
+  )
 }
 
 #[unsafe(no_mangle)]
@@ -5409,6 +5504,14 @@ fn is_prelinked_deno_module_source(source: &str) -> bool {
 }
 
 fn named_property<T>(object: *const T, name: &str) -> Option<*const Value> {
+  if realm_objects::is_bound(object.cast()) {
+    let key = new_string(current_isolate(), name.to_string());
+    return match realm_objects::get(object.cast(), key.cast())? {
+      Ok(value) if !matches!(unsafe { heap_value(value) }, Some(HeapValue::Undefined)) => Some(value),
+      Ok(_) => None,
+      Err(error) => { realm_objects::report(error); None }
+    };
+  }
   properties(object).and_then(|properties| {
     properties.iter().rev().find_map(|property| {
       (unsafe { string_value(property.key) } == Some(name))
@@ -5423,6 +5526,9 @@ fn set_named_property<T>(
   value: *const Value,
 ) -> Result<(), String> {
   let key = new_string(current_isolate(), name.to_string());
+  if let Some(result) = realm_objects::set(object.cast(), key.cast(), value) {
+    return result;
+  }
   let Some(properties) = properties_mut(object) else {
     return Err(format!("{name} receiver is not a Rust-owned v8x object"));
   };
@@ -5634,6 +5740,18 @@ fn install_prelinked_deno_core_callbacks(
     .ok_or_else(|| "Rust-owned global has no Deno object".to_string())?;
   let core = named_property(deno, "core")
     .ok_or_else(|| "Rust-owned Deno object has no core object".to_string())?;
+  if realm_objects::is_bound(global) {
+    // Attached runtimes expose the actual core functions. Do not overwrite
+    // frozen initialized core objects with legacy forwarding placeholders.
+    for name in PRELINKED_DENO_CORE_CALLBACKS {
+      let function = named_property(core, name)
+        .ok_or_else(|| format!("initialized Deno core is missing {name}"))?;
+      if !matches!(unsafe { heap_value(function) }, Some(HeapValue::Function(_))) {
+        return Err(format!("initialized Deno core {name} is not callable"));
+      }
+    }
+    return Ok(());
+  }
   for name in PRELINKED_DENO_CORE_CALLBACKS {
     let name_value = new_string(current_isolate(), (*name).to_string());
     let function = allocate_function(
@@ -5768,15 +5886,26 @@ fn run_prelinked_deno_core_script(
     ));
   }
 
-  let runtime = if phase == 0 {
-    Some(crate::js2wasm_spike::deno_core_bootstrap_runtime_from_env(
-      current_isolate() as usize,
-    )?)
-  } else {
-    None
-  };
+  if phase == 0 {
+    if let Some(HeapValue::Context(state)) = unsafe { heap_value(context) } {
+      if state.module_runtime.is_some() {
+        return Err(
+          "Deno core must bootstrap before ordinary modules".to_string(),
+        );
+      }
+      if state.deno_core_bootstrap.is_some() {
+        return Err(
+          "Deno core initialization already started; create a new context after a failed boot".to_string(),
+        );
+      }
+    }
+  }
   if phase == 0 {
     install_prelinked_deno_core_bridge(context)?;
+    crate::js2wasm_spike::deno_core_bootstrap_runtime_from_env(
+      current_isolate() as usize,
+      |runtime| publish_deno_core_runtime(context, runtime),
+    )?;
   }
   let final_wrapper = phase + 1 == DENO_CORE_PRELINKED_SCRIPTS.len();
   let deno_ops = if final_wrapper {
@@ -5784,14 +5913,6 @@ fn run_prelinked_deno_core_script(
   } else {
     None
   };
-  if let Some(runtime) = runtime {
-    let Some(HeapValue::Context(context_state)) =
-      (unsafe { heap_value_mut(context) })
-    else {
-      return Err("classic script context disappeared".to_string());
-    };
-    context_state.deno_core_bootstrap = Some(Rc::new(RefCell::new(runtime)));
-  }
   if final_wrapper {
     let (print, sum) = deno_ops
       .ok_or_else(|| "prelinked Deno op handles disappeared".to_string())?;
@@ -7515,12 +7636,37 @@ pub extern "C" fn v8__Module__Evaluate(
 
   let mut seen = HashSet::new();
   let mut sources = Vec::new();
+  let existing = match unsafe { heap_value(context) } {
+    Some(HeapValue::Context(state)) => state
+      .deno_core_bootstrap
+      .clone()
+      .or_else(|| state.module_runtime.clone()),
+    _ => {
+      fail_module_evaluation(module, "module has no live v8x context");
+      return ptr::null();
+    }
+  };
   let runtime =
     match collect_graph(module, &mut seen, &mut sources).and_then(|()| {
       crate::js2wasm_spike::compile_and_instantiate(
         &entry,
         &sources,
         current_isolate() as usize,
+        existing,
+        |runtime| {
+          let Some(HeapValue::Context(state)) =
+            (unsafe { heap_value_mut(context) })
+          else {
+            return Err(
+              "module context disappeared before initialization".to_string(),
+            );
+          };
+          state.module_runtime = Some(runtime.clone());
+          if let Some(state) = unsafe { module_state(module) } {
+            state.runtime = Some(runtime);
+          }
+          Ok(())
+        },
       )
     }) {
       Ok(runtime) => runtime,
@@ -7530,6 +7676,9 @@ pub extern "C" fn v8__Module__Evaluate(
         return ptr::null();
       }
     };
+  if let Some(HeapValue::Context(state)) = unsafe { heap_value_mut(context) } {
+    state.module_runtime = Some(runtime.clone());
+  }
   if let Some(state) = unsafe { module_state(module) } {
     state.runtime = Some(runtime);
   }

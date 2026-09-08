@@ -67,6 +67,12 @@ and preserves an ordinary `call; return` boundary instead of `return_call` for
 pass their eval canaries in Node and Wasmtime. Keep those canaries as production
 release gates.
 
+The runtime-profile Deno artifact publishes its context owner before module
+initialization and attaches host globals before core wrappers capture them.
+Focused multi-module tests cover host callbacks during initialization and
+retention of the original realm after a failed initializer. This is not yet
+verification of a complete Deno boot.
+
 == macOS note: JIT entitlements
 
 JavaScriptCore's JIT needs permission to allocate executable memory. Binaries

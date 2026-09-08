@@ -319,6 +319,7 @@ fn evaluate_graph_once() {
 
   let source = format!(
     "import {{ add }} from {DEPENDENCY:?};\n\
+     if ((globalThis as any).greeting !== 'Grüße') throw new Error('context global not shared with Wasm');\n\
      import {{ Deno }} from {DENO:?};\n\
      const answer: number = add(20, 22);\n\
      if (answer !== 42) throw new Error('wrong result');\n\
@@ -1203,6 +1204,27 @@ fn links_runtime_eval_provider_with_shared_realm_state() {
 
 #[test]
 #[cfg(feature = "js2wasm_runtime_compile")]
+fn context_store_preserves_graphs_and_primary_instance() {
+  v8::js2wasm_test_context_store();
+}
+
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn context_store_preserves_primary_after_initialization_error() {
+  v8::js2wasm_test_context_store_failure();
+}
+
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[ignore = "requires V8X_JS2WASM_CONTEXT_VALUES_WASM from test-context-value-bridge.mjs"]
+fn transfers_context_values_through_embedded_wasmtime() {
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("compiled context value fixture");
+  v8::js2wasm_test_realm_values(Path::new(&path)).unwrap();
+}
+
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn precompiles_exact_deno_core_artifact() {
   let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM").expect(
     "set V8X_JS2WASM_DENO_CORE_WASM to the raw pinned bootstrap module",
@@ -1487,4 +1509,409 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
 
   let after = v8::js2wasm_runtime_stats().unwrap();
   assert_eq!(after.instantiations - before.instantiations, 1);
+}
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[ignore = "requires V8X_JS2WASM_CONTEXT_VALUES_WASM from test-context-value-bridge.mjs"]
+fn public_objects_use_compiled_realm_and_preserve_identity() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("compiled context fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let global = context.global(scope);
+  let sample_key = v8::String::new(scope, "sample").unwrap();
+  let first = global.get(scope, sample_key.into()).unwrap();
+  let second = global.get(scope, sample_key.into()).unwrap();
+  assert!(first.strict_equals(second));
+  let sample = v8::Local::<v8::Object>::try_from(first).unwrap();
+  let answer_key = v8::String::new(scope, "answer").unwrap();
+  assert_eq!(
+    sample
+      .get(scope, answer_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let number = v8::Number::new(scope, 99.0);
+  assert_eq!(
+    sample.set(scope, answer_key.into(), number.into()),
+    Some(true)
+  );
+  assert_eq!(
+    sample
+      .get(scope, answer_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(99.0)
+  );
+  let alias = v8::String::new(scope, "alias").unwrap();
+  assert_eq!(global.set(scope, alias.into(), sample.into()), Some(true));
+  assert!(
+    global
+      .get(scope, alias.into())
+      .unwrap()
+      .strict_equals(first)
+  );
+  let greeting = v8::String::new(scope, "greeting").unwrap();
+  let text = v8::String::new(scope, "Grüße 😀").unwrap();
+  assert_eq!(global.set(scope, greeting.into(), text.into()), Some(true));
+  assert_eq!(
+    global
+      .get(scope, greeting.into())
+      .unwrap()
+      .to_rust_string_lossy(scope),
+    "Grüße 😀"
+  );
+  let values_key = v8::String::new(scope, "values").unwrap();
+  let values_value = global.get(scope, values_key.into()).unwrap();
+  assert!(values_value.is_array());
+  assert!(
+    global
+      .get(scope, values_key.into())
+      .unwrap()
+      .strict_equals(values_value)
+  );
+  let values = v8::Local::<v8::Array>::try_from(values_value).unwrap();
+  assert_eq!(values.length(), 3);
+  assert_eq!(
+    values.get_index(scope, 0).unwrap().number_value(scope),
+    Some(1.0)
+  );
+  assert!(values.get_index(scope, 1).unwrap().is_true());
+  assert!(values.get_index(scope, 2).unwrap().is_null());
+  let false_value = v8::Boolean::new(scope, false);
+  assert_eq!(values.set_index(scope, 1, false_value.into()), Some(true));
+  assert!(values.get_index(scope, 1).unwrap().is_false());
+  let null_value = v8::null(scope);
+  assert_eq!(values.set_index(scope, 2, null_value.into()), Some(true));
+  assert!(values.get_index(scope, 2).unwrap().is_null());
+  let nine = v8::Number::new(scope, 9.0);
+  assert_eq!(values.set_index(scope, 4, nine.into()), Some(true));
+  assert_eq!(values.length(), 5);
+  assert!(values.get_index(scope, 3).unwrap().is_undefined());
+  assert_eq!(
+    values.get_index(scope, 4).unwrap().number_value(scope),
+    Some(9.0)
+  );
+  let identity_key = v8::String::new(scope, "identity").unwrap();
+  let callable_value = global.get(scope, identity_key.into()).unwrap();
+  assert!(callable_value.is_function());
+  assert!(
+    global
+      .get(scope, identity_key.into())
+      .unwrap()
+      .strict_equals(callable_value)
+  );
+  let callable = v8::Local::<v8::Function>::try_from(callable_value).unwrap();
+  assert!(
+    callable
+      .call(scope, global.into(), &[sample.into()])
+      .unwrap()
+      .strict_equals(first)
+  );
+  let receiver_key = v8::String::new(scope, "useReceiver").unwrap();
+  let method = v8::Local::<v8::Function>::try_from(
+    global.get(scope, receiver_key.into()).unwrap(),
+  )
+  .unwrap();
+  let delta = v8::Number::new(scope, 1.0);
+  assert_eq!(
+    method
+      .call(scope, sample.into(), &[delta.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(100.0)
+  );
+  let throw_key = v8::String::new(scope, "throwFromRealm").unwrap();
+  let throwing = v8::Local::<v8::Function>::try_from(
+    global.get(scope, throw_key.into()).unwrap(),
+  )
+  .unwrap();
+  {
+    v8::tc_scope!(let caught, scope);
+    assert!(throwing.call(caught, global.into(), &[]).is_none());
+    assert!(caught.has_caught());
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    assert!(callable.new_instance(caught, &[]).is_none());
+    assert!(caught.has_caught());
+  }
+}
+
+#[test]
+fn is_false_recognizes_only_the_boolean_value() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  assert!(v8::Boolean::new(scope, false).is_false());
+  assert!(!v8::Boolean::new(scope, true).is_false());
+  assert!(!v8::Number::new(scope, 0.0).is_false());
+  assert!(!v8::null(scope).is_false());
+  assert!(!v8::undefined(scope).is_false());
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+fn transfers_host_graph_without_losing_identity_or_descriptors() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("compiled context fixture");
+  let global = context.global(scope);
+  let template = v8::ObjectTemplate::new(scope);
+  let fixed = v8::String::new(scope, "fixed").unwrap();
+  let nine = v8::Number::new(scope, 9.0);
+  template.set_with_attr(
+    fixed.into(),
+    nine.into(),
+    v8::PropertyAttribute::READ_ONLY
+      | v8::PropertyAttribute::DONT_ENUM
+      | v8::PropertyAttribute::DONT_DELETE,
+  );
+  let proto_key = v8::String::new(scope, "__proto__").unwrap();
+  let eleven = v8::Number::new(scope, 11.0);
+  template.set(proto_key.into(), eleven.into());
+  let root = template.new_instance(scope).unwrap();
+  let child = v8::Object::new(scope);
+  let answer = v8::String::new(scope, "answer").unwrap();
+  let seven = v8::Number::new(scope, 7.0);
+  assert_eq!(child.set(scope, answer.into(), seven.into()), Some(true));
+  for (key, value) in [("self", root), ("left", child), ("right", child)] {
+    let key = v8::String::new(scope, key).unwrap();
+    assert_eq!(root.set(scope, key.into(), value.into()), Some(true));
+  }
+  let list = v8::Array::new_with_elements(scope, &[child.into(), root.into()]);
+  let list_key = v8::String::new(scope, "list").unwrap();
+  assert_eq!(root.set(scope, list_key.into(), list.into()), Some(true));
+  let root_key = v8::String::new(scope, "hostRoot").unwrap();
+  let global_key = v8::String::new(scope, "hostGlobal").unwrap();
+  assert_eq!(global.set(scope, root_key.into(), root.into()), Some(true));
+  assert_eq!(root.set(scope, global_key.into(), global.into()), Some(true));
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  assert!(global.get(scope, root_key.into()).unwrap().strict_equals(root.into()));
+  assert!(root.get(scope, global_key.into()).unwrap().strict_equals(global.into()));
+  let inspect_key = v8::String::new(scope, "inspectHost").unwrap();
+  let inspect = v8::Local::<v8::Function>::try_from(
+    global.get(scope, inspect_key.into()).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(
+    inspect
+      .call(scope, global.into(), &[root.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(1.0)
+  );
+  assert_eq!(
+    child.get(scope, answer.into()).unwrap().number_value(scope),
+    Some(23.0)
+  );
+  assert!(
+    list
+      .get_index(scope, 0)
+      .unwrap()
+      .strict_equals(child.into())
+  );
+  assert!(list.get_index(scope, 1).unwrap().strict_equals(root.into()));
+  let self_key = v8::String::new(scope, "self").unwrap();
+  assert!(
+    root
+      .get(scope, self_key.into())
+      .unwrap()
+      .strict_equals(root.into())
+  );
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+fn rejected_host_graph_can_be_repaired_and_retried() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("compiled context fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let global = context.global(scope);
+  let root = v8::Object::new(scope);
+  let child = v8::Object::new(scope);
+  let nested = v8::String::new(scope, "nested").unwrap();
+  let callback_key = v8::String::new(scope, "callback").unwrap();
+  let callback = v8::Symbol::new(scope, None);
+  assert_eq!(root.set(scope, nested.into(), child.into()), Some(true));
+  assert_eq!(
+    child.set(scope, callback_key.into(), callback.into()),
+    Some(true)
+  );
+  let key = v8::String::new(scope, "host").unwrap();
+  {
+    v8::tc_scope!(let caught, scope);
+    assert_eq!(global.set(caught, key.into(), root.into()), None);
+    assert!(caught.has_caught());
+  }
+  assert!(global.get(scope, key.into()).unwrap().is_undefined());
+  // A preflight failure must not publish bindings for either object. Repair
+  // their ordinary Rust storage and prove the retried transfer sees it.
+  let replacement = v8::Number::new(scope, 31.0);
+  assert_eq!(
+    child.set(scope, callback_key.into(), replacement.into()),
+    Some(true)
+  );
+  assert_eq!(global.set(scope, key.into(), root.into()), Some(true));
+  assert!(
+    global
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(root.into())
+  );
+  let rebound_child =
+    v8::Local::<v8::Object>::try_from(root.get(scope, nested.into()).unwrap())
+      .unwrap();
+  assert!(rebound_child.strict_equals(child.into()));
+  assert_eq!(
+    rebound_child
+      .get(scope, callback_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(31.0)
+  );
+}
+
+unsafe extern "C" fn realm_host_leaf(info: *const v8::FunctionCallbackInfo) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let value = args.get(0).number_value(scope).unwrap();
+  let mut result = parts.return_value;
+  result.set_double(value + 1.0);
+}
+
+unsafe extern "C" fn realm_host_mutate(info: *const v8::FunctionCallbackInfo) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let object = v8::Local::<v8::Object>::try_from(args.get(0)).unwrap();
+  assert!(args.this().strict_equals(object.into()));
+  let array = v8::Local::<v8::Array>::try_from(args.get(1)).unwrap();
+  let sum: f64 = (0..array.length())
+    .map(|i| {
+      array
+        .get_index(scope, i)
+        .unwrap()
+        .number_value(scope)
+        .unwrap()
+    })
+    .sum();
+  let key = v8::String::new(scope, "value").unwrap();
+  let old = object
+    .get(scope, key.into())
+    .unwrap()
+    .number_value(scope)
+    .unwrap();
+  let intermediate = v8::Number::new(scope, old + sum);
+  let nested = v8::Local::<v8::Function>::try_from(args.get(2)).unwrap();
+  let updated = nested
+    .call(scope, object.into(), &[intermediate.into()])
+    .unwrap();
+  assert_eq!(object.set(scope, key.into(), updated), Some(true));
+  let mut result = parts.return_value;
+  result.set(object.into());
+}
+
+unsafe extern "C" fn realm_host_throw(info: *const v8::FunctionCallbackInfo) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let message = v8::String::new(scope, "host failure").unwrap();
+  let error = v8::Exception::type_error(scope, message);
+  scope.throw_exception(error);
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+fn calls_rust_from_wasm_with_nested_reentry_and_caught_exceptions() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("compiled fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "exerciseHost").unwrap();
+  let exercise =
+    v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap())
+      .unwrap();
+  let host = v8::Function::new_raw(scope, realm_host_mutate).unwrap();
+  let leaf = v8::Function::new_raw(scope, realm_host_leaf).unwrap();
+  assert_eq!(
+    exercise
+      .call(scope, global.into(), &[host.into(), leaf.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(1.0)
+  );
+  let key = v8::String::new(scope, "exerciseThrow").unwrap();
+  let exercise =
+    v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap())
+      .unwrap();
+  let host = v8::Function::new_raw(scope, realm_host_throw).unwrap();
+  assert_eq!(
+    exercise
+      .call(scope, global.into(), &[host.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(1.0)
+  );
+}
+
+#[test]
+#[ignore = "requires compiled bootstrap context bridge fixture"]
+fn attaches_host_context_during_bootstrap_and_retains_failed_owner() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let path = std::env::var_os("V8X_JS2WASM_BOOTSTRAP_CONTEXT_WASM")
+    .expect("compiled bootstrap fixture");
+  for fail in [false, true] {
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let global = context.global(scope);
+    let number_key = v8::String::new(scope, "hostNumber").unwrap();
+    let number = v8::Number::new(scope, 42.0);
+    assert_eq!(global.set(scope, number_key.into(), number.into()), Some(true));
+    let callback_key = v8::String::new(scope, "hostCallback").unwrap();
+    let callback = v8::Function::new_raw(scope, realm_host_leaf).unwrap();
+    assert_eq!(global.set(scope, callback_key.into(), callback.into()), Some(true));
+    let fail_key = v8::String::new(scope, "bootFail").unwrap();
+    let should_fail = v8::Boolean::new(scope, fail);
+    assert_eq!(global.set(scope, fail_key.into(), should_fail.into()), Some(true));
+    let result = v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path));
+    if fail {
+      assert!(result.unwrap_err().contains("__module_init"));
+    } else {
+      result.unwrap();
+    }
+    let key = v8::String::new(scope, "initializedFromHost").unwrap();
+    assert_eq!(global.get(scope, key.into()).unwrap().number_value(scope), Some(43.0));
+    let error = v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path)).unwrap_err();
+    assert!(error.contains("already owns a runtime"), "{error}");
+    assert_eq!(global.get(scope, key.into()).unwrap().number_value(scope), Some(43.0));
+  }
 }
