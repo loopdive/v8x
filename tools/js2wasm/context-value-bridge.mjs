@@ -40,6 +40,29 @@ export function __v8x_value_error(name: number, message: number): number {
   if (kind === "RangeError") return __v8xKeepValue(new RangeError(text));
   return __v8xKeepValue(new Error(text));
 }
+export function __v8x_value_symbol_create(kind: number, text: number): number {
+  const description = __v8xValueAt(text);
+  if (kind === 2) return __v8xKeepValue(Symbol.iterator);
+  if (kind === 1) {
+    if (typeof description !== "string") throw new TypeError("expected Symbol registry key");
+    return __v8xKeepValue(Symbol.for(description));
+  }
+  if (kind !== 0 || (description !== undefined && typeof description !== "string"))
+    throw new TypeError("invalid Symbol construction");
+  return __v8xKeepValue(description === undefined ? Symbol() : Symbol(description));
+}
+export function __v8x_value_symbol_kind(id: number): number {
+  const value = __v8xValueAt(id);
+  if (typeof value !== "symbol") throw new TypeError("expected Symbol handle");
+  if (value === Symbol.iterator) return 2;
+  return Symbol.keyFor(value) === undefined ? 0 : 1;
+}
+export function __v8x_value_symbol_text(id: number): number {
+  const value = __v8xValueAt(id);
+  if (typeof value !== "symbol") throw new TypeError("expected Symbol handle");
+  const key = Symbol.keyFor(value);
+  return __v8xKeepValue(key === undefined ? value.description : key);
+}
 export function __v8x_value_global(): number { return 1; }
 export function __v8x_value_kind(id: number): number {
   const value = __v8xValueAt(id);
@@ -145,6 +168,9 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_global",
   "__v8x_value_host_function",
   "__v8x_value_error",
+  "__v8x_value_symbol_create",
+  "__v8x_value_symbol_kind",
+  "__v8x_value_symbol_text",
   "__v8x_value_kind",
   "__v8x_value_null",
   "__v8x_value_boolean",

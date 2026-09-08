@@ -1853,7 +1853,8 @@ fn rejected_host_graph_can_be_repaired_and_retried() {
   let child = v8::Object::new(scope);
   let nested = v8::String::new(scope, "nested").unwrap();
   let callback_key = v8::String::new(scope, "callback").unwrap();
-  let callback = v8::Symbol::new(scope, None);
+  // Symbols now transfer; a native External still must fail preflight.
+  let callback = v8::External::new(scope, std::ptr::null_mut());
   assert_eq!(root.set(scope, nested.into(), child.into()), Some(true));
   assert_eq!(
     child.set(scope, callback_key.into(), callback.into()),
@@ -2634,4 +2635,105 @@ fn native_errors_expose_realm_constructor_and_preserve_identity() {
   }
   assert_eq!(depth, 2);
   assert!(current.is_null());
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn native_errors_accept_registered_symbol_property_keys() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("context fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let message = v8::String::new(scope, "symbol key").unwrap();
+  let error = v8::Exception::error(scope, message);
+  let object = v8::Local::<v8::Object>::try_from(error).unwrap();
+  let name = v8::String::new(scope, "errorAdditionalPropertyKeys").unwrap();
+  let symbol = v8::Symbol::for_key(scope, name);
+  let absent = object
+    .get(scope, symbol.into())
+    .expect("missing symbol is undefined, not a conversion error");
+  assert!(absent.is_undefined());
+  let number = v8::Number::new(scope, 42.0);
+  assert_eq!(object.set(scope, symbol.into(), number.into()), Some(true));
+  let same_symbol = v8::Symbol::for_key(scope, name);
+  assert_eq!(
+    object
+      .get(scope, same_symbol.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+}
+
+#[test]
+#[ignore = "requires compiled Symbol context fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn symbols_preserve_registry_freshness_and_descriptions_across_realms() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("context fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let global = context.global(scope);
+  macro_rules! get {
+    ($name:expr) => {{
+      let key = v8::String::new(scope, $name).unwrap();
+      global.get(scope, key.into()).unwrap()
+    }};
+  }
+  let registered = get!("registeredSymbol");
+  let key = v8::String::new(scope, "errorAdditionalPropertyKeys").unwrap();
+  let native = v8::Symbol::for_key(scope, key);
+  assert!(registered.strict_equals(native.into()));
+  assert!(registered.strict_equals(get!("registeredSymbol")));
+  let first = get!("freshSymbolA");
+  let second = get!("freshSymbolB");
+  assert!(first.is_symbol() && second.is_symbol());
+  assert!(!first.strict_equals(second));
+  assert!(first.strict_equals(get!("freshSymbolA")));
+  let absent = v8::Local::<v8::Symbol>::try_from(get!("absentSymbol")).unwrap();
+  assert!(absent.description(scope).is_undefined());
+  let empty = v8::Local::<v8::Symbol>::try_from(get!("emptySymbol")).unwrap();
+  assert_eq!(
+    empty
+      .description(scope)
+      .to_string(scope)
+      .unwrap()
+      .to_rust_string_lossy(scope),
+    ""
+  );
+  assert!(!absent.strict_equals(empty.into()));
+  let iterator = get!("iteratorSymbol");
+  let native_iterator = v8::Symbol::get_iterator(scope);
+  assert!(iterator.strict_equals(native_iterator.into()));
+  let identity = v8::Local::<v8::Function>::try_from(get!("identity")).unwrap();
+  let description = v8::String::new(scope, "same").unwrap();
+  let native_fresh = v8::Symbol::new(scope, Some(description));
+  let returned = identity
+    .call(scope, global.into(), &[native_fresh.into()])
+    .unwrap();
+  assert!(returned.strict_equals(native_fresh.into()));
+  assert!(!returned.strict_equals(first));
+  let error_message = v8::String::new(scope, "properties").unwrap();
+  let error = v8::Exception::error(scope, error_message);
+  let object = v8::Local::<v8::Object>::try_from(error).unwrap();
+  let number = v8::Number::new(scope, 73.0);
+  assert_eq!(object.set(scope, native.into(), number.into()), Some(true));
+  let read =
+    v8::Local::<v8::Function>::try_from(get!("readErrorSymbol")).unwrap();
+  assert_eq!(
+    read
+      .call(scope, global.into(), &[error])
+      .unwrap()
+      .number_value(scope),
+    Some(73.0)
+  );
 }

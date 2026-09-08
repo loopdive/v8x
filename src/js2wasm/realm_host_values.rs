@@ -37,7 +37,8 @@ fn snapshot(
         | HeapValue::Null
         | HeapValue::Boolean(_)
         | HeapValue::Number(_)
-        | HeapValue::String(_),
+        | HeapValue::String(_)
+        | HeapValue::Symbol(_),
       ) => continue,
       Some(HeapValue::Object(state)) => {
         prototype = state.prototype;

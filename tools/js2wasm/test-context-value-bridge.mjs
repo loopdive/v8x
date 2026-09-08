@@ -25,6 +25,13 @@ Object.defineProperty(numericNameFunction, "name", { value: 17, configurable: tr
 (globalThis as any).exerciseSharedBuffer = function(host:any,view:any):number { view[0]=7; host(); return view[0]; };
 (globalThis as any).throwSharedBuffer = function(view:any):void { view[0]=11; throw new Error("buffer throw"); };
 (globalThis as any).identity = function (value: any): any { return value; };
+(globalThis as any).registeredSymbol = Symbol.for("errorAdditionalPropertyKeys");
+(globalThis as any).freshSymbolA = Symbol("same");
+(globalThis as any).freshSymbolB = Symbol("same");
+(globalThis as any).absentSymbol = Symbol();
+(globalThis as any).emptySymbol = Symbol("");
+(globalThis as any).iteratorSymbol = Symbol.iterator;
+(globalThis as any).readErrorSymbol = function(value:any):any { return value[Symbol.for("errorAdditionalPropertyKeys")]; };
 (globalThis as any).sample = { answer: 42 };
 (globalThis as any).values = [1, true, null];
 (globalThis as any).useReceiver = function (this: any, delta: any): any { return this.answer + delta; };

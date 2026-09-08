@@ -6,6 +6,8 @@ mod callback_access;
 mod host_callbacks;
 #[path = "realm_host_values.rs"]
 mod host_values;
+#[path = "realm_symbols.rs"]
+mod symbols;
 pub(super) use host_callbacks::HostCallbackBinding;
 pub(crate) use host_callbacks::invoke_host;
 
@@ -29,6 +31,9 @@ fn into_realm(
   owner: &Rc<RefCell<DenoRuntime>>,
   value: *const Value,
 ) -> Result<RealmValue, String> {
+  if matches!(unsafe { heap_value(value) }, Some(HeapValue::Symbol(_))) {
+    return symbols::into_realm(runtime, owner, value);
+  }
   if let Some(entry) = binding(value.cast()) {
     if !Rc::ptr_eq(owner, &entry.runtime) {
       return Err("cannot transfer an object between realms".to_string());
@@ -119,6 +124,7 @@ fn from_realm(
       })?;
       Ok(new_string(current_isolate(), text).cast())
     }
+    8 => symbols::from_realm(runtime, owner, value),
     kind @ (5 | 6 | 9) => {
       if let Some(entry) = unsafe { isolate_state(current_isolate()) }
         .realm_objects
