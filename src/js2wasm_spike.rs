@@ -33,6 +33,10 @@ use std::cell::RefCell;
 mod realm_values;
 #[path = "js2wasm_shared_buffers.rs"]
 mod shared_buffers;
+#[path = "js2wasm_graph_packages.rs"]
+mod graph_packages;
+#[cfg(feature = "js2wasm_runtime_compile")]
+pub fn js2wasm_test_graph_packages() { graph_packages::test_graph_packages_bind_entry_source_and_bytes(); }
 use realm_values::CallerRealm;
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub use realm_values::js2wasm_test_realm_values;
@@ -3010,11 +3014,8 @@ pub(crate) fn compile_and_instantiate(
     return Err("js2wasm module graph is empty".to_string());
   }
   let shared = shared_runtime()?;
-  let prepared = if let Some(artifact) =
-    std::env::var_os("V8X_JS2WASM_AOT_MODULE")
-  {
-    let artifact = Path::new(&artifact);
-    shared.precompiled_graph_file(artifact, entry, modules)?
+  let prepared = if let Some(artifact) = graph_packages::configured_input(entry, modules)? {
+    shared.precompiled_graph_file(&artifact, entry, modules)?
   } else {
     #[cfg(feature = "js2wasm_runtime_compile")]
     {
@@ -3024,7 +3025,7 @@ pub(crate) fn compile_and_instantiate(
     {
       let _ = (entry, modules);
       return Err(
-          "compiler-free engine_js2wasm builds require V8X_JS2WASM_AOT_MODULE to point to a trusted Wasmtime-precompiled artifact"
+          "compiler-free engine_js2wasm builds require V8X_JS2WASM_AOT_MODULE or V8X_JS2WASM_AOT_GRAPH_DIR to select trusted Wasmtime-precompiled artifacts"
             .to_string(),
         );
     }
@@ -3325,6 +3326,7 @@ fn runtime_compiled_graph(
     match shared.precompiled_graph_file(&artifact, entry, modules) {
       Ok(instance) => {
         shared.cache_hits.fetch_add(1, Ordering::Relaxed);
+        graph_packages::publish_cached_outputs(&artifact, entry, modules)?;
         return Ok(instance);
       }
       Err(error) => {
@@ -3341,9 +3343,7 @@ fn runtime_compiled_graph(
   let bytes = shared.precompile(&wasm)?;
   publish_graph_artifact(&artifact, &bytes, entry, modules)?;
 
-  if let Some(output) = std::env::var_os("V8X_JS2WASM_ARTIFACT_OUTPUT") {
-    publish_graph_artifact(Path::new(&output), &bytes, entry, modules)?;
-  }
+  graph_packages::publish_outputs(&bytes, entry, modules)?;
   shared.precompiled_graph_file(&artifact, entry, modules)
 }
 

@@ -15,6 +15,13 @@ if ((globalThis as any).hostNumber !== 42) throw new Error("host seed missing du
 if ((globalThis as any).bootFail) throw new Error("requested bootstrap failure");
 ` : "";
 const applicationSource = `
+const unnamedFunction:any = function():number { return 42; };
+Object.defineProperty(unnamedFunction, "name", { value: undefined, configurable: true });
+(globalThis as any).unnamedForHost = unnamedFunction;
+const numericNameFunction:any = function():number { return 43; };
+Object.defineProperty(numericNameFunction, "name", { value: 17, configurable: true });
+(globalThis as any).numericNameForHost = numericNameFunction;
+(globalThis as any).namedForHost = function namedCallback():number { return 44; };
 (globalThis as any).exerciseSharedBuffer = function(host:any,view:any):number { view[0]=7; host(); return view[0]; };
 (globalThis as any).throwSharedBuffer = function(view:any):void { view[0]=11; throw new Error("buffer throw"); };
 (globalThis as any).identity = function (value: any): any { return value; };

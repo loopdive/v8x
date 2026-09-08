@@ -73,6 +73,13 @@ Focused multi-module tests cover host callbacks during initialization and
 retention of the original realm after a failed initializer. This is not yet
 verification of a complete Deno boot.
 
+Separately evaluated extension and application graphs can be packaged with
+`V8X_JS2WASM_ARTIFACT_OUTPUT_DIR` during build-time execution. Compiler-free
+replay selects each exact graph from `V8X_JS2WASM_AOT_GRAPH_DIR`, verifying its
+source and native-code binding before loading. These graphs share the Deno
+context's store and realm. Only evaluated graphs are packaged; missing graphs
+fail without invoking a compiler.
+
 == macOS note: JIT entitlements
 
 JavaScriptCore's JIT needs permission to allocate executable memory. Binaries

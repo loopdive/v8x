@@ -32,8 +32,9 @@ implemented directly in Rust; the current vertical slice implements
 
 Within one process the backend shares one Wasmtime `Engine`, one host-function
 `Linker`, and one cached `Module`/`InstancePre` for each artifact. Every v8x
-module evaluation receives a separate `Store` and `Instance`, so its WasmGC
-heap, globals, permissions, and host state remain isolated.
+Deno context receives its own `Store`. Its core, extension graphs, and application
+graphs use separate instances within that store and share the context's realm
+object. Different Deno contexts retain isolated heaps, globals, and host state.
 
 For a compiler-free application, generate the artifact during packaging, then
 load it through `V8X_JS2WASM_AOT_MODULE`:
@@ -48,6 +49,17 @@ Generic AOT replay also requires the generated
 `<artifact>.graph-sha256` sidecar. v8x checks both its graph digest (the exact
 entry point, module specifiers, and source bytes) and its artifact digest before
 loading the artifact, so neither side can silently be replaced.
+
+For applications with separately evaluated extension and application graphs, set
+`V8X_JS2WASM_ARTIFACT_OUTPUT_DIR` during build-time execution with the runtime
+compiler feature enabled. Each evaluated graph is exported as
+`<graph-digest>.cwasm` with its binding sidecar, including cache hits. Replay with
+`engine_js2wasm` and `V8X_JS2WASM_AOT_GRAPH_DIR` pointing at that trusted directory.
+The directory and `V8X_JS2WASM_AOT_MODULE` are mutually exclusive. Missing or
+mismatched packages fail rather than invoking a compiler. The exact entry URL
+and source graph must match packaging, including the working directory when
+entry URLs are resolved relative to it. A directory packages only graphs that
+were evaluated during the build-time run; it does not prove source coverage.
 
 The runtime profile accepts either a standalone graph compiler through
 `V8X_JS2WASM_COMPILER`, or `V8X_JS2WASM_COMPILER_SCRIPT` with

@@ -132,6 +132,10 @@ pub use js2wasm_spike::js2wasm_bootstrap_raw_module_for_test;
 
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
+pub use js2wasm_spike::js2wasm_test_graph_packages;
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
 pub use js2wasm_spike::{
   js2wasm_precompile_deno_core_for_test,
   js2wasm_precompile_runtime_eval_provider_for_test,

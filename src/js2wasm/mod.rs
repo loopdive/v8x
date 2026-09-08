@@ -7,6 +7,7 @@
 #![allow(non_snake_case, unused)]
 
 mod retained_buffer;
+mod private;
 pub(crate) use retained_buffer::RetainedHostBuffer;
 
 // These helpers are engine-independent despite living under the QuickJS
@@ -302,6 +303,7 @@ enum HeapValue {
   Promise(PromiseStateData),
   PromiseResolver(PromiseResolverState),
   Symbol(SymbolState),
+  Private(*const V8String),
   Error { name: &'static str, message: String },
   External(*mut c_void),
   Boolean(bool),
@@ -365,6 +367,8 @@ struct IsolateState {
   pending_exception: *const Value,
   error_prototype: *const Object,
   symbol_registry: Vec<(String, *const crate::Symbol)>,
+  private_registry: Vec<(Option<String>, *const crate::Private)>,
+  private_properties: Vec<private::PrivateEntry>,
   iterator_symbol: *const crate::Symbol,
   near_heap_limit: NearHeapLimitState,
 }
@@ -1183,7 +1187,8 @@ fn heap_to_json_value(
     | HeapValue::UnboundModuleScript(_)
     | HeapValue::Promise(_)
     | HeapValue::PromiseResolver(_)
-    | HeapValue::Symbol(_) => None,
+    | HeapValue::Symbol(_)
+    | HeapValue::Private(_) => None,
   }
 }
 
@@ -1829,6 +1834,8 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     pending_exception: ptr::null(),
     error_prototype: ptr::null(),
     symbol_registry: Vec::new(),
+    private_registry: Vec::new(),
+    private_properties: Vec::new(),
     iterator_symbol: ptr::null(),
     near_heap_limit: NearHeapLimitState {
       callbacks: Vec::new(),
@@ -4863,6 +4870,11 @@ pub extern "C" fn v8__Value__IsUint32(value: *const Value) -> bool {
     }
     _ => false,
   }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsExternal(value: *const Value) -> bool {
+  matches!(unsafe { heap_value(value) }, Some(HeapValue::External(_)))
 }
 
 #[unsafe(no_mangle)]

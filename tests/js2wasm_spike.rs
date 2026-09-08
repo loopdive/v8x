@@ -1681,6 +1681,7 @@ fn is_false_recognizes_only_the_boolean_value() {
 
 #[test]
 #[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn transfers_explicit_prototypes_and_keeps_updates_live() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -1748,6 +1749,7 @@ fn transfers_explicit_prototypes_and_keeps_updates_live() {
 
 #[test]
 #[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn transfers_host_graph_without_losing_identity_or_descriptors() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -1836,6 +1838,7 @@ fn transfers_host_graph_without_losing_identity_or_descriptors() {
 
 #[test]
 #[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn rejected_host_graph_can_be_repaired_and_retried() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -1948,6 +1951,7 @@ unsafe extern "C" fn realm_host_throw(info: *const v8::FunctionCallbackInfo) {
 
 #[test]
 #[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn calls_rust_from_wasm_with_nested_reentry_and_caught_exceptions() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -1987,6 +1991,7 @@ fn calls_rust_from_wasm_with_nested_reentry_and_caught_exceptions() {
 
 #[test]
 #[ignore = "requires compiled bootstrap context bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn attaches_host_context_during_bootstrap_and_retains_failed_owner() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -2207,6 +2212,7 @@ fn microtasks_restore_captured_continuation_data() {
 
 #[test]
 #[ignore = "requires compiled staged-core fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn defers_core_until_native_ops_are_registered() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -2247,16 +2253,20 @@ fn defers_core_until_native_ops_are_registered() {
 
 #[test]
 #[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn shares_host_buffers_with_the_compiled_realm() {
   initialize();
   let deletion_count = AtomicUsize::new(0);
   let mut bytes = vec![0_u8; 16].into_boxed_slice();
   let backing = unsafe {
     v8::ArrayBuffer::new_backing_store_from_ptr(
-      bytes.as_mut_ptr().cast(), bytes.len(), count_backing_store_deletion,
+      bytes.as_mut_ptr().cast(),
+      bytes.len(),
+      count_backing_store_deletion,
       (&deletion_count as *const AtomicUsize).cast_mut().cast(),
     )
-  }.make_shared();
+  }
+  .make_shared();
   let mut isolate = v8::Isolate::new(Default::default());
   {
     v8::scope!(let scope, &mut isolate);
@@ -2266,7 +2276,10 @@ fn shares_host_buffers_with_the_compiled_realm() {
     v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
     let global = context.global(scope);
     let key = v8::String::new(scope, "identity").unwrap();
-    let identity = v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap()).unwrap();
+    let identity = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
     let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing);
     let u8_view = v8::Uint8Array::new(scope, buffer, 0, 16).unwrap();
     let u32_view = v8::Uint32Array::new(scope, buffer, 4, 2).unwrap();
@@ -2277,18 +2290,218 @@ fn shares_host_buffers_with_the_compiled_realm() {
     drop(backing);
     assert_eq!(deletion_count.load(Ordering::SeqCst), 0);
     bytes[4..8].copy_from_slice(&0x12345678_u32.to_le_bytes());
-    assert_eq!(u32_view.get_index(scope, 0).unwrap().number_value(scope), Some(0x12345678_u32 as f64));
+    assert_eq!(
+      u32_view.get_index(scope, 0).unwrap().number_value(scope),
+      Some(0x12345678_u32 as f64)
+    );
     let number = v8::Number::new(scope, 255.0);
     assert_eq!(u8_view.set_index(scope, 7, number.into()), Some(true));
     assert_eq!(bytes[7], 255);
-    assert_eq!(u32_view.get_index(scope, 0).unwrap().number_value(scope), Some(0xff345678_u32 as f64));
+    assert_eq!(
+      u32_view.get_index(scope, 0).unwrap().number_value(scope),
+      Some(0xff345678_u32 as f64)
+    );
     let key = v8::String::new(scope, "throwSharedBuffer").unwrap();
-    let thrower = v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap()).unwrap();
+    let thrower = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
     v8::tc_scope!(let scope, scope);
-    assert!(thrower.call(scope, global.into(), &[u8_view.into()]).is_none());
+    assert!(
+      thrower
+        .call(scope, global.into(), &[u8_view.into()])
+        .is_none()
+    );
     assert!(scope.has_caught());
     assert_eq!(bytes[0], 11);
   }
   drop(isolate);
   assert_eq!(deletion_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn private_keys_are_interned_and_hidden_from_public_properties() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let anonymous = v8::Private::new(scope, None);
+  assert!(anonymous.name(scope).is_undefined());
+  let name = v8::String::new(scope, "Deno#error").unwrap();
+  let private = v8::Private::new(scope, Some(name));
+  let api = v8::Private::for_api(scope, Some(name));
+  let other_name = v8::String::new(scope, "Deno#error").unwrap();
+  let same_api = v8::Private::for_api(scope, Some(other_name));
+  assert!(api == same_api);
+  assert!(api != private);
+  assert!(private.name(scope).strict_equals(name.into()));
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let object = v8::Object::new(scope);
+  let child = v8::Object::new(scope);
+  let sentinel = v8::Object::new(scope);
+  assert_eq!(object.has_private(scope, api), Some(false));
+  assert!(object.get_private(scope, api).unwrap().is_undefined());
+  assert_eq!(object.delete_private(scope, api), Some(true));
+  assert_eq!(object.set_private(scope, api, sentinel.into()), Some(true));
+  assert_eq!(object.has_private(scope, same_api), Some(true));
+  assert!(
+    object
+      .get_private(scope, same_api)
+      .unwrap()
+      .strict_equals(sentinel.into())
+  );
+  assert!(object.get(scope, name.into()).unwrap().is_undefined());
+  assert_eq!(
+    object
+      .get_own_property_names(scope, Default::default())
+      .unwrap()
+      .length(),
+    0
+  );
+  let public_value = v8::Number::new(scope, 42.0);
+  assert_eq!(
+    object.set(scope, name.into(), public_value.into()),
+    Some(true)
+  );
+  assert!(
+    object
+      .get_private(scope, api)
+      .unwrap()
+      .strict_equals(sentinel.into())
+  );
+  assert_eq!(child.set_prototype(scope, object.into()), Some(true));
+  assert_eq!(child.has_private(scope, api), Some(false));
+  assert!(child.get_private(scope, api).unwrap().is_undefined());
+  let undefined = v8::undefined(scope);
+  assert_eq!(object.set_private(scope, api, undefined.into()), Some(true));
+  assert_eq!(object.has_private(scope, api), Some(true));
+  assert_eq!(object.delete_private(scope, api), Some(true));
+  assert_eq!(object.has_private(scope, api), Some(false));
+  assert_eq!(
+    object.get(scope, name.into()).unwrap().number_value(scope),
+    Some(42.0)
+  );
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn private_keys_survive_compiled_realm_roundtrips() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM").unwrap();
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let global = context.global(scope);
+  let name = v8::String::new(scope, "sample").unwrap();
+  let object =
+    v8::Local::<v8::Object>::try_from(global.get(scope, name.into()).unwrap())
+      .unwrap();
+  let key_name = v8::String::new(scope, "Deno#originalError").unwrap();
+  let key = v8::Private::for_api(scope, Some(key_name));
+  let sentinel = v8::Object::new(scope);
+  assert_eq!(object.set_private(scope, key, sentinel.into()), Some(true));
+  assert!(object.get(scope, key_name.into()).unwrap().is_undefined());
+  let name = v8::String::new(scope, "identity").unwrap();
+  let identity = v8::Local::<v8::Function>::try_from(
+    global.get(scope, name.into()).unwrap(),
+  )
+  .unwrap();
+  let returned = identity
+    .call(scope, global.into(), &[object.into()])
+    .unwrap();
+  let returned = v8::Local::<v8::Object>::try_from(returned).unwrap();
+  assert!(returned.strict_equals(object.into()));
+  assert!(
+    returned
+      .get_private(scope, key)
+      .unwrap()
+      .strict_equals(sentinel.into())
+  );
+  assert_eq!(returned.delete_private(scope, key), Some(true));
+  assert_eq!(object.has_private(scope, key), Some(false));
+}
+
+#[test]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn graph_packages_bind_entry_source_and_bytes() {
+  v8::js2wasm_test_graph_packages();
+}
+
+#[test]
+#[ignore = "requires compiled function-name context fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn transfers_callable_values_with_non_string_name_properties() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_FUNCTION_NAMES_WASM")
+    .expect("function name fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let global = context.global(scope);
+  let name_key = v8::String::new(scope, "name").unwrap();
+  for (key, expected) in [
+    ("unnamedForHost", 42.0),
+    ("numericNameForHost", 43.0),
+    ("namedForHost", 44.0),
+  ] {
+    let key = v8::String::new(scope, key).unwrap();
+    let value = global
+      .get(scope, key.into())
+      .expect("function transfer must not require a string name");
+    let function = v8::Local::<v8::Function>::try_from(value).unwrap();
+    assert!(global.get(scope, key.into()).unwrap().strict_equals(value));
+    assert_eq!(
+      function
+        .call(scope, global.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected)
+    );
+    let name = function.get(scope, name_key.into()).unwrap();
+    if expected == 42.0 {
+      assert!(name.is_undefined());
+    } else if expected == 43.0 {
+      assert_eq!(name.number_value(scope), Some(17.0));
+    } else {
+      assert_eq!(
+        function.get_name(scope).to_rust_string_lossy(scope),
+        "namedCallback"
+      );
+    }
+  }
+}
+
+#[test]
+fn identifies_external_values_by_brand_not_pointer_contents() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let mut payload = 42_u8;
+  for pointer in [std::ptr::null_mut(), (&mut payload as *mut u8).cast()] {
+    let external = v8::External::new(scope, pointer);
+    let value: v8::Local<v8::Value> = external.into();
+    assert!(value.is_external());
+    assert_eq!(
+      v8::Local::<v8::External>::try_from(value).unwrap().value(),
+      pointer
+    );
+  }
+  let values: [v8::Local<v8::Value>; 6] = [
+    v8::undefined(scope).into(),
+    v8::null(scope).into(),
+    v8::Boolean::new(scope, false).into(),
+    v8::Number::new(scope, 42.0).into(),
+    v8::String::new(scope, "pointer").unwrap().into(),
+    v8::Object::new(scope).into(),
+  ];
+  for value in values {
+    assert!(!value.is_external());
+  }
 }

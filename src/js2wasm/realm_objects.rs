@@ -127,8 +127,15 @@ fn from_realm(
         let key =
           runtime.realm_string(&"name".encode_utf16().collect::<Vec<_>>())?;
         let name_value = runtime.realm_get(value, key)?;
-        let name = String::from_utf16(&runtime.realm_as_utf16(name_value)?)
-          .map_err(|_| "function name contains unpaired UTF-16".to_string())?;
+        // A configurable JS name property is not proof of callability.
+        // Keep non-string public names on the bound realm value; the native
+        // wrapper has no string display name to cache in that case.
+        let name = if runtime.realm_kind(name_value)? == 4 {
+          String::from_utf16(&runtime.realm_as_utf16(name_value)?)
+            .map_err(|_| "function name contains unpaired UTF-16".to_string())?
+        } else {
+          String::new()
+        };
         let name = new_string(current_isolate(), name);
         allocate_function(
           current_isolate(),

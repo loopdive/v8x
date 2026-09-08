@@ -29,6 +29,12 @@ Wasmtime caller to access that realm. Ordinary host callbacks and built-in
 error transport are covered by focused tests; host construction, arbitrary
 exotic values and complete exception identity are not implemented.
 
+A realm-backed callback can have an undefined or non-string JavaScript
+`name` property. Function conversion preserves that property and call identity
+in the realm; it uses an empty native wrapper display name when there is no
+string name to cache. Focused tests cover both cases and ordinary named
+functions.
+
 == Exceptions live in side state
 
 JSC records the pending exception and its context in `IsoState` on every
