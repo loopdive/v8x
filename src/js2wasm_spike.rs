@@ -1824,7 +1824,15 @@ impl SharedDenoRuntime {
       let known_deno_import = import.module() == DENO_IMPORT_MODULE
         && DENO_HOST_IMPORTS.contains(&import.name());
       let runtime_eval_import = (import.module() == RUNTIME_EVAL_IMPORT_MODULE
-        && RUNTIME_EVAL_IMPORTS.contains(&import.name()))
+        && match import.ty() {
+          wasmtime::ExternType::Func(_) => {
+            RUNTIME_EVAL_IMPORTS.contains(&import.name())
+          }
+          wasmtime::ExternType::Global(_) => {
+            CONTEXT_SYMBOL_GLOBALS.contains(&import.name())
+          }
+          _ => false,
+        })
         || (import.module() == RUNTIME_EVAL_JSON_IMPORT_MODULE
           && import.name() == "__v8x_runtime_eval_json");
       let context_import = import.module() == CONTEXT_IMPORT_MODULE

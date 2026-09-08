@@ -15,7 +15,7 @@ for (const [name, source, config] of [
   ["context", CONTEXT_VALUE_BRIDGE_SOURCE + `
     export function __v8x_context_global_this():any {return globalThis;}
     export function __v8x_context_call(f:any, receiver:any, args:any):any {return f.apply(receiver,args);}
-  `, { ...options, standaloneSymbolState: "export" }],
+  `, { ...options, standaloneSymbolState: { module: "js2wasm:runtime-eval", reexport: true }, link: ["js2wasm:runtime-eval"] }],
   ["unshared-context", CONTEXT_VALUE_BRIDGE_SOURCE + `
     export function __v8x_context_global_this():any {return globalThis;}
     export function __v8x_context_call(f:any, receiver:any, args:any):any {return f.apply(receiver,args);}
@@ -28,6 +28,14 @@ for (const [name, source, config] of [
       counter += delta;
       return counter;
     };
+  `, linked],
+  ["dynamic-eval", `
+    (globalThis as any).dynamicEvalInitialized=42;
+    (globalThis as any).evaluateDynamic=function(source:any):any {
+      if(source === "__call_control__") return true;
+      try { return (0,eval)(source); } catch(error) { return "caught: " + String(error); }
+    };
+    (globalThis as any).dynamicEvalType=typeof (globalThis as any).evaluateDynamic;
   `, linked],
   ["replacement", `
     (globalThis as any).linkedSymbolEqual=(globalThis as any).producerRegistered===Symbol.for("linked-key");

@@ -2835,3 +2835,173 @@ fn boolean_value_and_to_boolean_follow_native_truthiness() {
     assert_eq!(boolean.is_true(), expected, "ToBoolean case {index}");
   }
 }
+
+#[test]
+#[ignore = "requires independently compiled linked callback fixtures"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn separate_contexts_isolate_graph_state_but_share_native_symbol_registry() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let contexts = [
+    v8::Context::new(scope, Default::default()),
+    v8::Context::new(scope, Default::default()),
+  ];
+  let directory =
+    PathBuf::from(std::env::var_os("V8X_JS2WASM_LINKED_CALLBACK_DIR").unwrap());
+  let mut registered = Vec::new();
+  let mut fresh = Vec::new();
+  let mut callbacks = Vec::new();
+  for context in contexts {
+    let scope = &mut v8::ContextScope::new(scope, context);
+    v8::js2wasm_attach_realm_for_test(
+      &context,
+      &directory.join("context.wasm"),
+    )
+    .unwrap();
+    v8::js2wasm_attach_graph_for_test(
+      &context,
+      &directory.join("producer.wasm"),
+    )
+    .unwrap();
+    let global = context.global(scope);
+    let key = v8::String::new(scope, "producerRegistered").unwrap();
+    let value = global.get(scope, key.into()).unwrap();
+    assert!(value.is_symbol());
+    registered.push(v8::Global::new(scope, value));
+    let key = v8::String::new(scope, "producerFresh").unwrap();
+    let value = global.get(scope, key.into()).unwrap();
+    assert!(value.is_symbol());
+    fresh.push(v8::Global::new(scope, value));
+    let key = v8::String::new(scope, "deferredCallback").unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let two = v8::Number::new(scope, 2.0);
+    assert_eq!(
+      function
+        .call(scope, global.into(), &[two.into()])
+        .unwrap()
+        .number_value(scope),
+      Some(42.0)
+    );
+    callbacks.push(v8::Global::new(scope, function));
+  }
+  let a = v8::Local::new(scope, &registered[0]);
+  let b = v8::Local::new(scope, &registered[1]);
+  assert!(a.strict_equals(b), "Symbol.for is isolate-wide");
+  let a = v8::Local::new(scope, &fresh[0]);
+  let b = v8::Local::new(scope, &fresh[1]);
+  assert!(
+    !a.strict_equals(b),
+    "fresh Symbols must not alias across stores"
+  );
+  for (index, context) in contexts.into_iter().enumerate() {
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let global = context.global(scope);
+    if index == 0 {
+      v8::js2wasm_attach_graph_for_test(
+        &context,
+        &directory.join("replacement.wasm"),
+      )
+      .unwrap();
+    }
+    let key = v8::String::new(scope, "deferredCallback").unwrap();
+    let current = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let retained = v8::Local::new(scope, &callbacks[index]);
+    assert_eq!(current.strict_equals(retained.into()), index == 1);
+    let three = v8::Number::new(scope, 3.0);
+    assert_eq!(
+      retained
+        .call(scope, global.into(), &[three.into()])
+        .unwrap()
+        .number_value(scope),
+      Some(45.0)
+    );
+  }
+}
+
+#[test]
+#[ignore = "requires independently compiled linked callback fixtures"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn runtime_eval_preserves_context_symbol_identity() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let directory =
+    PathBuf::from(std::env::var_os("V8X_JS2WASM_LINKED_CALLBACK_DIR").unwrap());
+  for name in ["context", "producer", "dynamic-eval"] {
+    let path = directory.join(format!("{name}.wasm"));
+    if name == "context" {
+      v8::js2wasm_attach_realm_for_test(&context, &path).unwrap();
+    } else {
+      v8::js2wasm_attach_graph_for_test(&context, &path).unwrap();
+    }
+  }
+  let global = context.global(scope);
+  let marker = v8::String::new(scope, "dynamicEvalInitialized").unwrap();
+  assert_eq!(
+    global
+      .get(scope, marker.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0),
+    "eval graph publication marker"
+  );
+  let type_key = v8::String::new(scope, "dynamicEvalType").unwrap();
+  let type_value = global.get(scope, type_key.into()).unwrap();
+  assert_eq!(
+    type_value
+      .to_string(scope)
+      .unwrap()
+      .to_rust_string_lossy(scope),
+    "function",
+    "producer callable brand"
+  );
+  let key = v8::String::new(scope, "evaluateDynamic").unwrap();
+  let candidate = global.get(scope, key.into()).unwrap();
+  assert!(
+    candidate.is_function(),
+    "consumer callable brand: undefined={}, object={}",
+    candidate.is_undefined(),
+    candidate.is_object()
+  );
+  let evaluate =
+    v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap())
+      .unwrap();
+  // These sources arrive from the native host after compilation, not constants
+  // available to the compiler. First prove the evaluator is actually executing.
+  for source in [
+    "__call_control__",
+    "40 + 2 === 42",
+    "Symbol.for('linked-key') === producerRegistered",
+    "Symbol.keyFor(producerRegistered) === 'linked-key'",
+    "producerFresh.description === 'fresh'",
+    "Symbol('fresh') !== producerFresh",
+  ] {
+    v8::tc_scope!(let scope, scope);
+    let text = v8::String::new(scope, source).unwrap();
+    let value = evaluate
+      .call(scope, global.into(), &[text.into()])
+      .unwrap_or_else(|| {
+        let exception = scope.exception().expect("caught evaluation exception");
+        let message = exception
+          .to_string(scope)
+          .unwrap()
+          .to_rust_string_lossy(scope);
+        panic!("dynamic evaluation threw: {source}: {message}");
+      });
+    let description =
+      value.to_string(scope).unwrap().to_rust_string_lossy(scope);
+    assert!(
+      value.is_true(),
+      "dynamic evaluation result: {source}: {description}"
+    );
+  }
+}

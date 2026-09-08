@@ -28,7 +28,7 @@ import { stagedCoreSource } from "./staged-core.mjs";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "5b0751634ded1316b9a3baa7c77507e4fec13400";
+const EXPECTED_JS2_REF = "5086736c37bd96f34e6dd69fdee4ac1fad18dfcf";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
@@ -516,11 +516,14 @@ function assertNoLinearMemories(binary, module, label) {
 
 const RAW_MODULE_BOOTSTRAP_CHECK = String.raw`
 const fs = require("node:fs");
-const binary = fs.readFileSync(0);
-const appModule = new WebAssembly.Module(binary);
+const input = fs.readFileSync(0);
+const appLength = input.readUInt32LE(0);
+const appModule = new WebAssembly.Module(input.subarray(4, 4 + appLength));
+const providerBytes = input.subarray(4 + appLength);
+const provider = providerBytes.length ? new WebAssembly.Instance(new WebAssembly.Module(providerBytes), {}) : undefined;
 const imports = Object.create(null);
 for (const entry of WebAssembly.Module.imports(appModule)) {
-  if (entry.kind !== "function") {
+  if (entry.kind !== "function" && !(provider && entry.module === "js2wasm:runtime-eval" && entry.kind === "global")) {
     throw new Error(
       "unsupported " + entry.kind + " import " + entry.module + "." + entry.name,
     );
@@ -530,7 +533,12 @@ for (const entry of WebAssembly.Module.imports(appModule)) {
     moduleImports = Object.create(null);
     imports[entry.module] = moduleImports;
   }
-  moduleImports[entry.name] = () => 0;
+  if (provider && entry.module === "js2wasm:runtime-eval") {
+    const value = provider.exports[entry.name];
+    if (entry.kind === "global" ? !(value instanceof WebAssembly.Global) : typeof value !== "function")
+      throw new Error("missing provider export " + entry.name);
+    moduleImports[entry.name] = value;
+  } else moduleImports[entry.name] = () => 0;
 }
 const instance = new WebAssembly.Instance(appModule, imports);
 const moduleInit = instance.exports.__module_init;
@@ -550,18 +558,22 @@ if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== (phased ? 0 : 4
 process.stdout.write("raw module bootstrap ok\n");
 `;
 
-function assertRawModuleInitializesWithStubImports(appBinary, profile) {
+function assertRawModuleInitializesWithStubImports(appBinary, profile, providerBinary) {
+  const prefix = Buffer.alloc(4);
+  prefix.writeUInt32LE(appBinary.length);
+  const input = Buffer.concat([prefix, appBinary, ...(providerBinary ? [providerBinary] : [])]);
   let output;
   try {
     output = execFileSync(
       process.execPath,
       [
+        "--liftoff-only",
         "--experimental-wasm-exnref",
         "--eval",
         RAW_MODULE_BOOTSTRAP_CHECK,
       ],
       {
-        input: appBinary,
+        input,
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
       },
@@ -653,7 +665,7 @@ function assertApplicationLinksRuntimeEvalProvider(appModule, providerModule) {
       entry.module === "v8x:runtime-eval-json"
     ) {
       const implementation = provider.exports[entry.name];
-      if (typeof implementation !== "function") {
+      if (entry.kind === "global" ? !(implementation instanceof WebAssembly.Global) : typeof implementation !== "function") {
         fail(
           `runtime-eval provider is missing application import ${entry.module}::${entry.name}`,
         );
@@ -1011,7 +1023,11 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     ),
   ];
   const sourceGraphSha256 = inputSetDigest(graphInputs);
-  const appCompileOptions = profile === "runtime" ? { ...COMPILE_OPTIONS, standaloneSymbolState: "export" } : COMPILE_OPTIONS;
+  const appCompileOptions = profile === "runtime" ? {
+    ...COMPILE_OPTIONS,
+    standaloneSymbolState: { module: "js2wasm:runtime-eval", reexport: true },
+    link: ["js2wasm:runtime-eval"],
+  } : COMPILE_OPTIONS;
   const compileOptionsPreimage = profile === "poc" ? COMPILE_OPTIONS_PREIMAGE : {
     ...COMPILE_OPTIONS_PREIMAGE,
     entry: `${appRoot}/entry.ts`,
@@ -1039,10 +1055,9 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     appModule,
     `Deno ${profile} application`,
   );
-  // Regression guard for the exact raw graph: this must not depend on a
-  // Wasmtime store or a runtime-eval provider just to initialize Deno core.
-  // Run it in a child so compilation state cannot affect raw boot behavior.
-  assertRawModuleInitializesWithStubImports(appBinary, profile);
+  // The frozen POC is function-import-only. Runtime Symbol globals require
+  // the real provider; its isolated-child check runs after provider compilation.
+  if (profile === "poc") assertRawModuleInitializesWithStubImports(appBinary, profile);
   if (
     !WebAssembly.Module.imports(appModule).some(
       (entry) => entry.module === "js2wasm:runtime-eval",
@@ -1115,6 +1130,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     );
   }
   assertRuntimeEvalProviderCanaries(providerModule);
+  if (profile === "runtime") assertRawModuleInitializesWithStubImports(appBinary, profile, providerBinary);
   assertApplicationLinksRuntimeEvalProvider(appModule, providerModule);
   atomicWrite(providerOutput, providerBinary);
 
