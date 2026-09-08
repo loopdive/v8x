@@ -22,13 +22,16 @@ function __v8xKeepValue(value: any): number {
   __v8xValues.push(value);
   return __v8xValues.length - 1;
 }
+// Compiler-owned seam: identity in a single module, a canonical callable
+// adapter when the runtime-eval provider can observe the host closure.
+function __runtime_eval_wrap_aot_callable(value: any): any { return value; }
 export function __v8x_value_host_function(id: number): number {
-  return __v8xKeepValue(function(this: any, ...args: any[]): any {
+  return __v8xKeepValue(__runtime_eval_wrap_aot_callable(function(this: any, ...args: any[]): any {
     if (new.target) throw new TypeError("constructing a host callback is not implemented");
     const result = __v8x_host_call(id, __v8xKeepValue(this), __v8xKeepValue(args));
     if (result < 0) throw __v8xValueAt(-result - 1);
     return __v8xValueAt(result);
-  });
+  }));
 }
 export function __v8x_value_error(name: number, message: number): number {
   const kind = __v8xValueAt(name);

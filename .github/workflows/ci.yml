@@ -342,7 +342,7 @@ jobs:
         if: matrix.backend == 'js2wasm'
         run: |
           set -euo pipefail
-          js2_ref=1223c7fc7775374264dca8f0f4c247d19e397b08
+          js2_ref=e551d8afb3933a78374d80695ae3891db57247e1
           js2_dir="$RUNNER_TEMP/js2-deno-core"
           git init -q "$js2_dir"
           git -C "$js2_dir" remote add origin https://github.com/loopdive/js2
@@ -457,7 +457,7 @@ jobs:
             export V8X_JS2WASM_COMPILER_SCRIPT="$RUNNER_TEMP/js2-deno-core/examples/v8x-js2wasm-spike/compile-graph.ts"
             export V8X_JS2WASM_WORKDIR="$RUNNER_TEMP/js2-deno-core"
             export V8X_JS2WASM_CACHE_DIR="$RUNNER_TEMP/v8x-deno-core-js2wasm-cache"
-            export V8X_JS2WASM_COMPILER_ID="js2-1223c7fc7775374264dca8f0f4c247d19e397b08"
+            export V8X_JS2WASM_COMPILER_ID="js2-e551d8afb3933a78374d80695ae3891db57247e1"
           fi
           node tests/harness/run.mjs deno_core "${{ matrix.backend }}" $PR --deno-dir=../deno
       - name: Upload run results
@@ -502,7 +502,7 @@ jobs:
       - name: Check out pinned js2 compiler
         run: |
           set -euo pipefail
-          js2_ref=1223c7fc7775374264dca8f0f4c247d19e397b08
+          js2_ref=e551d8afb3933a78374d80695ae3891db57247e1
           js2_dir="$RUNNER_TEMP/js2-deno-poc"
           git init -q "$js2_dir"
           git -C "$js2_dir" remote add origin https://github.com/loopdive/js2
