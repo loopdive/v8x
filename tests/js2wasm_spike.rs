@@ -1681,6 +1681,73 @@ fn is_false_recognizes_only_the_boolean_value() {
 
 #[test]
 #[ignore = "requires compiled context value bridge fixture"]
+fn transfers_explicit_prototypes_and_keeps_updates_live() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("compiled context fixture");
+  let global = context.global(scope);
+  let prototype = v8::Object::new(scope);
+  let nil = v8::null(scope);
+  assert_eq!(prototype.set_prototype(scope, nil.into()), Some(true));
+  let answer = v8::String::new(scope, "answer").unwrap();
+  let number = v8::Number::new(scope, 73.0);
+  assert_eq!(
+    prototype.set(scope, answer.into(), number.into()),
+    Some(true)
+  );
+  let first = v8::Object::new(scope);
+  let second = v8::Object::new(scope);
+  for (name, object) in [("first", first), ("second", second)] {
+    assert_eq!(object.set_prototype(scope, prototype.into()), Some(true));
+    let key = v8::String::new(scope, name).unwrap();
+    assert_eq!(global.set(scope, key.into(), object.into()), Some(true));
+  }
+  // A property cycle is legal even though a prototype cycle is not.
+  let child = v8::String::new(scope, "child").unwrap();
+  assert_eq!(prototype.set(scope, child.into(), first.into()), Some(true));
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  for object in [first, second] {
+    assert!(
+      object
+        .get_prototype(scope)
+        .unwrap()
+        .strict_equals(prototype.into())
+    );
+    assert_eq!(
+      object
+        .get(scope, answer.into())
+        .unwrap()
+        .number_value(scope),
+      Some(73.0)
+    );
+  }
+  assert!(prototype.get_prototype(scope).unwrap().is_null());
+  assert!(
+    prototype
+      .get(scope, child.into())
+      .unwrap()
+      .strict_equals(first.into())
+  );
+  assert_eq!(prototype.set_prototype(scope, first.into()), Some(false));
+  assert!(prototype.get_prototype(scope).unwrap().is_null());
+  assert_eq!(first.set_prototype(scope, nil.into()), Some(true));
+  assert!(first.get_prototype(scope).unwrap().is_null());
+  assert!(first.get(scope, answer.into()).unwrap().is_undefined());
+  assert_eq!(
+    second
+      .get(scope, answer.into())
+      .unwrap()
+      .number_value(scope),
+    Some(73.0)
+  );
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
 fn transfers_host_graph_without_losing_identity_or_descriptors() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());

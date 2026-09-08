@@ -180,6 +180,32 @@ pub(crate) trait RealmAccess {
     Ok(units)
   }
 
+  fn realm_get_prototype(
+    &mut self,
+    object: RealmValue,
+  ) -> Result<RealmValue, String> {
+    let object = self.realm_check(object)?;
+    self.realm_handle("__v8x_value_get_prototype", &[object])
+  }
+
+  fn realm_set_prototype(
+    &mut self,
+    object: RealmValue,
+    prototype: RealmValue,
+  ) -> Result<bool, String> {
+    let object = self.realm_check(object)?;
+    let prototype = self.realm_check(prototype)?;
+    match self.realm_raw(
+      "__v8x_value_set_prototype",
+      &[object, prototype],
+      true,
+    )? {
+      0.0 => Ok(false),
+      1.0 => Ok(true),
+      _ => Err("invalid prototype update result".into()),
+    }
+  }
+
   fn realm_get(
     &mut self,
     object: RealmValue,

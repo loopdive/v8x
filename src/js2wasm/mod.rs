@@ -3244,6 +3244,12 @@ pub extern "C" fn v8__Object__GetOwnPropertyNames(
 pub extern "C" fn v8__Object__GetPrototype(
   object: *const Object,
 ) -> *const Value {
+  if let Some(result) = realm_objects::get_prototype(object) {
+    return result.unwrap_or_else(|error| {
+      realm_objects::report(error);
+      ptr::null()
+    });
+  }
   match unsafe { heap_value(object) } {
     Some(HeapValue::Object(state)) => state
       .prototype
@@ -3263,6 +3269,16 @@ pub extern "C" fn v8__Object__SetPrototype(
 ) -> MaybeBool {
   if prototype.is_null() || !is_valid_prototype(prototype) {
     return MaybeBool::Nothing;
+  }
+  if let Some(result) = realm_objects::set_prototype(object, prototype) {
+    return match result {
+      Ok(true) => MaybeBool::JustTrue,
+      Ok(false) => MaybeBool::JustFalse,
+      Err(error) => {
+        realm_objects::report(error);
+        MaybeBool::Nothing
+      }
+    };
   }
   if prototype_would_cycle(object, prototype) {
     return MaybeBool::JustFalse;

@@ -5,6 +5,7 @@ struct Node {
   host: *const Object,
   array_len: Option<usize>,
   callback: bool,
+  prototype: Option<*const Value>,
   properties: Vec<(String, *const Value, u32)>,
 }
 
@@ -29,6 +30,7 @@ fn snapshot(
       continue;
     }
     let mut callback = false;
+    let mut prototype = None;
     let (array_len, properties) = match unsafe { heap_value(value) } {
       Some(
         HeapValue::Undefined
@@ -38,11 +40,12 @@ fn snapshot(
         | HeapValue::String(_),
       ) => continue,
       Some(HeapValue::Object(state)) => {
-        if state.prototype.is_some() {
-          return Err(
-            "host object with an explicit prototype cannot yet enter the realm"
-              .to_string(),
-          );
+        prototype = state.prototype;
+        if let Some(value) = prototype {
+          if !is_valid_prototype(value) {
+            return Err("invalid host prototype".into());
+          }
+          pending.push(value);
         }
         // Internal fields remain private to this exact Rust wrapper. Adoption
         // publishes its identity without copying native pointers into Wasm.
@@ -62,6 +65,7 @@ fn snapshot(
           host: value.cast(),
           array_len: Some(state.elements.len()),
           callback: false,
+          prototype: None,
           properties,
         });
         (Some(state.elements.len()), state.properties.clone())
@@ -87,6 +91,7 @@ fn snapshot(
         host: value.cast(),
         array_len,
         callback,
+        prototype,
         properties: entries,
       });
     }
@@ -129,6 +134,15 @@ pub(super) fn transfer_into(
   }
   for node in &nodes {
     let object = handles[&(node.host as usize)];
+    if let Some(prototype) = node.prototype {
+      let prototype = match handles.get(&(prototype as usize)) {
+        Some(value) => *value,
+        None => into_realm(runtime, owner, prototype)?,
+      };
+      if !runtime.realm_set_prototype(object, prototype)? {
+        return Err("compiled realm rejected host prototype".into());
+      }
+    }
     if let Some(length) = node.array_len {
       let key =
         runtime.realm_string(&"length".encode_utf16().collect::<Vec<_>>())?;

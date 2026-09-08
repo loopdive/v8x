@@ -77,3 +77,7 @@ checks do not establish complete Deno bootstrap or compiled-Promise support.
 Native js2wasm functions retain the length supplied by Function and
 FunctionTemplate builders. The property is included when a host callback
 enters the compiled realm. A bootstrap fixture checks its value after transfer.
+
+Host object graph adoption preserves explicit null and object prototypes,
+including shared identity and property cycles. Prototype reads and writes on
+adopted objects use the compiled realm; rejected prototype cycles return false.

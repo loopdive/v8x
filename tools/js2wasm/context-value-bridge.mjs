@@ -70,6 +70,12 @@ export function __v8x_value_as_number(id: number): number {
 }
 export function __v8x_value_object(): number { return __v8xKeepValue({}); }
 export function __v8x_value_array(): number { return __v8xKeepValue([]); }
+export function __v8x_value_get_prototype(owner: number): number {
+  return __v8xKeepValue(Object.getPrototypeOf(__v8xValueAt(owner)));
+}
+export function __v8x_value_set_prototype(owner: number, prototype: number): number {
+  return Reflect.setPrototypeOf(__v8xValueAt(owner), __v8xValueAt(prototype)) ? 1 : 0;
+}
 export function __v8x_value_get(owner: number, key: number): number {
   return __v8xKeepValue(__v8xValueAt(owner)[__v8xValueAt(key)]);
 }
@@ -117,6 +123,8 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_as_number",
   "__v8x_value_object",
   "__v8x_value_array",
+  "__v8x_value_get_prototype",
+  "__v8x_value_set_prototype",
   "__v8x_value_get",
   "__v8x_value_set",
   "__v8x_value_define_data",

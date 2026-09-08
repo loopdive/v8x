@@ -15,7 +15,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 const EXPECTED = Object.freeze({
   canonicalization:
     "UTF-8 recursively lexicographic object keys; array order preserved; no whitespace",
-  js2Ref: "2cb538dec286690b2a79d41352ad7550c71b3237",
+  js2Ref: "a1d57eed58cb672c76e2afd3caf603f1eb7a42a4",
   denoRef: "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44",
   wasmtime: "47.0.3",
   compileOptions:

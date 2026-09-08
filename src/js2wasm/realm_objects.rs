@@ -154,6 +154,27 @@ pub(super) fn length(array: *const Array) -> Option<Result<u32, String>> {
   }))
 }
 
+pub(super) fn get_prototype(
+  object: *const Object,
+) -> Option<Result<*const Value, String>> {
+  let entry = binding(object)?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let value = runtime.realm_get_prototype(entry.value)?;
+    from_realm(runtime, &entry.runtime, value)
+  }))
+}
+
+pub(super) fn set_prototype(
+  object: *const Object,
+  prototype: *const Value,
+) -> Option<Result<bool, String>> {
+  let entry = binding(object)?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let prototype = into_realm(runtime, &entry.runtime, prototype)?;
+    runtime.realm_set_prototype(entry.value, prototype)
+  }))
+}
+
 pub(super) fn get(
   object: *const Object,
   key: *const Value,
