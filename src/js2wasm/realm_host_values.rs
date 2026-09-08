@@ -38,9 +38,14 @@ fn snapshot(
         | HeapValue::String(_),
       ) => continue,
       Some(HeapValue::Object(state)) => {
-        if state.prototype.is_some() || !state.internal_fields.is_empty() {
-          return Err("host object with an explicit prototype or internal fields cannot yet enter the realm".to_string());
+        if state.prototype.is_some() {
+          return Err(
+            "host object with an explicit prototype cannot yet enter the realm"
+              .to_string(),
+          );
         }
+        // Internal fields remain private to this exact Rust wrapper. Adoption
+        // publishes its identity without copying native pointers into Wasm.
         (None, state.properties.clone())
       }
       Some(HeapValue::Function(state)) => {

@@ -9,6 +9,7 @@
 // These helpers are engine-independent despite living under the QuickJS
 // backend today. Reuse their real Rust implementation so deno_core's string
 // conversion path never needs an interpreter or a native simdutf library.
+mod continuation;
 pub(crate) mod realm_objects;
 #[path = "../quickjs/simdutf.rs"]
 mod simdutf;
@@ -127,6 +128,7 @@ struct PromiseStateData {
 
 #[derive(Clone, Copy)]
 struct PromiseReaction {
+  continuation_data: *const Value,
   on_fulfilled: *const crate::Function,
   on_rejected: *const crate::Function,
   derived: *const Promise,
@@ -137,8 +139,9 @@ struct PromiseResolverState {
 }
 
 enum Microtask {
-  Function(*const crate::Function),
+  Function(*const crate::Function, *const Value),
   PromiseReaction {
+    continuation_data: *const Value,
     handler: *const crate::Function,
     argument: *const Value,
     settlement: PromiseSettlement,
@@ -352,6 +355,7 @@ struct IsolateState {
   microtasks_policy: crate::MicrotasksPolicy,
   microtasks: Vec<Microtask>,
   running_microtasks: bool,
+  continuation_data: *const Value,
   terminating: AtomicBool,
   active_try_catch: *mut TryCatchAbiState,
   pending_exception: *const Value,
@@ -535,7 +539,8 @@ fn publish_deno_core_runtime(
   context: *const Context,
   runtime: Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
 ) -> Result<(), String> {
-  let Some(HeapValue::Context(state)) = (unsafe { heap_value_mut(context) }) else {
+  let Some(HeapValue::Context(state)) = (unsafe { heap_value_mut(context) })
+  else {
     return Err("Deno bootstrap has no live context".to_string());
   };
   if state.deno_core_bootstrap.is_some() || state.module_runtime.is_some() {
@@ -1814,6 +1819,7 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     microtasks_policy: crate::MicrotasksPolicy::Auto,
     microtasks: Vec::new(),
     running_microtasks: false,
+    continuation_data: ptr::null(),
     terminating: AtomicBool::new(false),
     active_try_catch: ptr::null_mut(),
     pending_exception: ptr::null(),
@@ -2044,10 +2050,11 @@ pub extern "C" fn v8__Isolate__EnqueueMicrotask(
   {
     return;
   }
+  let continuation_data = continuation::get(isolate);
   unsafe {
     isolate_state(isolate)
       .microtasks
-      .push(Microtask::Function(function))
+      .push(Microtask::Function(function, continuation_data))
   };
 }
 
@@ -2073,12 +2080,20 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
       }
       state.microtasks.remove(0)
     };
+    let continuation_data = match &task {
+      Microtask::Function(_, value) => *value,
+      Microtask::PromiseReaction {
+        continuation_data, ..
+      } => *continuation_data,
+    };
+    let _restore = continuation::enter(isolate, continuation_data);
     match task {
-      Microtask::Function(function) => {
+      Microtask::Function(function, _) => {
         let receiver = v8__Undefined(isolate).cast();
         let _ = invoke_function(function, receiver, 0, ptr::null(), false);
       }
       Microtask::PromiseReaction {
+        continuation_data: _,
         handler,
         argument,
         settlement,
@@ -2729,6 +2744,7 @@ pub extern "C" fn v8__Context__New(
   let console = new_object(isolate);
   let console_key = new_string(isolate, "console".to_string());
   let extras = new_object(isolate);
+  continuation::install(isolate, extras);
   if let Some(properties) = properties_mut(extras) {
     properties.push(TemplateProperty {
       key: console_key.cast(),
@@ -5301,6 +5317,7 @@ fn settle_promise_value(
       PromiseSettlement::Pending => ptr::null(),
     };
     Microtask::PromiseReaction {
+      continuation_data: reaction.continuation_data,
       handler,
       argument: value,
       settlement,
@@ -5385,6 +5402,7 @@ fn promise_then(
   if isolate.is_null() {
     return ptr::null();
   }
+  let continuation_data = continuation::get(isolate);
   let derived =
     allocate_promise(isolate, PromiseSettlement::Pending, ptr::null());
   let (settlement, result) = {
@@ -5394,6 +5412,7 @@ fn promise_then(
     state.handled = true;
     if state.settlement == PromiseSettlement::Pending {
       state.reactions.push(PromiseReaction {
+        continuation_data,
         on_fulfilled,
         on_rejected,
         derived,
@@ -5409,6 +5428,7 @@ fn promise_then(
   };
   unsafe { isolate_state(isolate) }.microtasks.push(
     Microtask::PromiseReaction {
+      continuation_data,
       handler,
       argument: result,
       settlement,
@@ -5507,9 +5527,19 @@ fn named_property<T>(object: *const T, name: &str) -> Option<*const Value> {
   if realm_objects::is_bound(object.cast()) {
     let key = new_string(current_isolate(), name.to_string());
     return match realm_objects::get(object.cast(), key.cast())? {
-      Ok(value) if !matches!(unsafe { heap_value(value) }, Some(HeapValue::Undefined)) => Some(value),
+      Ok(value)
+        if !matches!(
+          unsafe { heap_value(value) },
+          Some(HeapValue::Undefined)
+        ) =>
+      {
+        Some(value)
+      }
       Ok(_) => None,
-      Err(error) => { realm_objects::report(error); None }
+      Err(error) => {
+        realm_objects::report(error);
+        None
+      }
     };
   }
   properties(object).and_then(|properties| {
@@ -5746,7 +5776,10 @@ fn install_prelinked_deno_core_callbacks(
     for name in PRELINKED_DENO_CORE_CALLBACKS {
       let function = named_property(core, name)
         .ok_or_else(|| format!("initialized Deno core is missing {name}"))?;
-      if !matches!(unsafe { heap_value(function) }, Some(HeapValue::Function(_))) {
+      if !matches!(
+        unsafe { heap_value(function) },
+        Some(HeapValue::Function(_))
+      ) {
         return Err(format!("initialized Deno core {name} is not callable"));
       }
     }
@@ -5907,6 +5940,10 @@ fn run_prelinked_deno_core_script(
       |runtime| publish_deno_core_runtime(context, runtime),
     )?;
   }
+  with_deno_core_runtime(context, "core script execution", |runtime| {
+    runtime.run_deno_core_script(phase)?;
+    Ok(())
+  })?;
   let final_wrapper = phase + 1 == DENO_CORE_PRELINKED_SCRIPTS.len();
   let deno_ops = if final_wrapper {
     Some(resolve_prelinked_deno_ops(context)?)

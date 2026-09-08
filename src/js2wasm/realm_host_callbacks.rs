@@ -90,6 +90,18 @@ pub(crate) fn invoke_host(
     // Object/Function APIs used by that callback can safely acquire it again.
     let mut caught = [0_usize; 6];
     v8__TryCatch__CONSTRUCT(caught.as_mut_ptr(), isolate);
+    if std::env::var_os("V8X_JS2WASM_TRACE_HOST").is_some() {
+      let name = match unsafe { heap_value(callback.function) } {
+        Some(HeapValue::Function(state)) => {
+          unsafe { string_value(state.name) }.unwrap_or("<unnamed>")
+        }
+        _ => "<invalid>",
+      };
+      eprintln!(
+        "v8x/js2wasm: host callback {name} ({} arguments)",
+        arguments.len()
+      );
+    }
     let result =
       invoke_native_callback(callback.function, receiver, &arguments, false);
     let exception = v8__TryCatch__Exception(caught.as_ptr());

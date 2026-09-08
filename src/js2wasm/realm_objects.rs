@@ -290,3 +290,17 @@ pub fn js2wasm_attach_realm_for_test(
   )?;
   Ok(())
 }
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_run_core_script_for_test(
+  context: &Context,
+  phase: usize,
+) -> Result<(), String> {
+  with_deno_core_runtime(context, "test script stage", |runtime| {
+    if !runtime.run_deno_core_script(phase)? {
+      return Err("fixture has no deferred script runner".into());
+    }
+    Ok(())
+  })
+}

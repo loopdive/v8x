@@ -34,9 +34,11 @@ mod realm_values;
 use realm_values::CallerRealm;
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub use realm_values::js2wasm_test_realm_values;
-#[cfg(feature = "js2wasm_runtime_compile")]
-pub(crate) use realm_values::{load_realm_for_test, bootstrap_context_for_test};
 pub(crate) use realm_values::{RealmAccess, RealmValue};
+#[cfg(feature = "js2wasm_runtime_compile")]
+pub(crate) use realm_values::{
+  bootstrap_context_for_test, load_realm_for_test,
+};
 static NEXT_REALM_ID: AtomicUsize = AtomicUsize::new(1);
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[path = "js2wasm_context_store_tests.rs"]
@@ -1444,18 +1446,26 @@ impl SharedDenoRuntime {
     let engine = Engine::new(&config)
       .map_err(|error| format!("configure embedded Wasmtime: {error}"))?;
     let mut linker = Linker::new(&engine);
-    linker.func_wrap(
-      DENO_IMPORT_MODULE,
-      "__v8x_attach_context",
-      |caller: Caller<'_, DenoHostState>| -> wasmtime::Result<()> {
-        let owner = crate::js2wasm::realm_objects::bootstrap_owner_for_attachment(
-          caller.data().realm_owner_identity,
-        ).map_err(wasmtime::Error::msg)?;
-        let mut access = CallerRealm::new(caller).map_err(wasmtime::Error::msg)?;
-        crate::js2wasm::realm_objects::attach_bootstrap_context(&mut access, &owner)
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        "__v8x_attach_context",
+        |caller: Caller<'_, DenoHostState>| -> wasmtime::Result<()> {
+          let owner =
+            crate::js2wasm::realm_objects::bootstrap_owner_for_attachment(
+              caller.data().realm_owner_identity,
+            )
+            .map_err(wasmtime::Error::msg)?;
+          let mut access =
+            CallerRealm::new(caller).map_err(wasmtime::Error::msg)?;
+          crate::js2wasm::realm_objects::attach_bootstrap_context(
+            &mut access,
+            &owner,
+          )
           .map_err(wasmtime::Error::msg)
-      },
-    ).map_err(|error| format!("bind context attachment: {error:#}"))?;
+        },
+      )
+      .map_err(|error| format!("bind context attachment: {error:#}"))?;
     linker
       .func_wrap(
         DENO_IMPORT_MODULE,
@@ -2124,6 +2134,60 @@ pub fn js2wasm_precompile_runtime_eval_provider_for_test(
   persist_runtime_eval_provider_artifact(&wasm, &precompiled)
 }
 
+fn render_pending_wasm_exception<T>(
+  store: &mut Store<T>,
+  instance: Instance,
+) -> String {
+  let Some(exception) = store.take_pending_exception() else {
+    return "no pending Wasm exception payload".into();
+  };
+  let rendered = (|| -> Result<String, String> {
+    let fields = exception
+      .fields(&mut *store)
+      .map_err(|error| error.to_string())?
+      .collect::<Vec<_>>();
+    let [payload] = fields.as_slice() else {
+      return Err(format!(
+        "expected one exception field, got {}",
+        fields.len()
+      ));
+    };
+    let prepare = instance
+      .get_func(&mut *store, "__exn_render_prepare")
+      .ok_or("missing exception renderer")?;
+    let character = instance
+      .get_typed_func::<i32, i32>(&mut *store, "__exn_render_char")
+      .map_err(|error| error.to_string())?;
+    let mut results = [wasmtime::Val::I32(0)];
+    prepare
+      .call(&mut *store, &[*payload], &mut results)
+      .map_err(|error| error.to_string())?;
+    let length = results[0].i32().ok_or("invalid exception length")?;
+    if !(0..=65536).contains(&length) {
+      return Err(format!(
+        "exception length outside diagnostic limit: {length}"
+      ));
+    }
+    let mut units = Vec::with_capacity(length as usize);
+    for index in 0..length {
+      let unit = character
+        .call(&mut *store, index)
+        .map_err(|error| error.to_string())?;
+      units
+        .push(u16::try_from(unit).map_err(|_| "invalid exception code unit")?);
+    }
+    Ok(String::from_utf16_lossy(&units))
+  })();
+  match rendered {
+    Ok(message) => format!("Wasm exception: {message}"),
+    Err(error) => {
+      // A failed renderer must not leave its own exception pending.
+      store.take_pending_exception();
+      format!("Wasm exception payload could not be rendered: {error}")
+    }
+  }
+}
+
 fn take_pending_wasm_exception_summary<T>(store: &mut Store<T>) -> String {
   store.take_pending_exception().map_or_else(
     || "no pending Wasm exception payload".to_string(),
@@ -2185,7 +2249,13 @@ pub(crate) fn deno_core_bootstrap_runtime_from_env(
   let cwd = std::env::current_dir().map_err(|error| {
     format!("resolve Deno bootstrap working directory: {error}")
   })?;
-  DenoRuntime::instantiate_published(shared, &prepared, cwd, heap_isolate, publish)
+  DenoRuntime::instantiate_published(
+    shared,
+    &prepared,
+    cwd,
+    heap_isolate,
+    publish,
+  )
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -2252,7 +2322,8 @@ impl DenoRuntime {
     )?));
     // Publish before user top-level code can install values and then throw.
     // No heap/context borrow is held across execution of that code.
-    runtime.borrow_mut().store.data_mut().realm_owner_identity = Rc::as_ptr(&runtime) as usize;
+    runtime.borrow_mut().store.data_mut().realm_owner_identity =
+      Rc::as_ptr(&runtime) as usize;
     publish(runtime.clone())?;
     runtime.borrow_mut().initialize_primary()?;
     Ok(runtime)
@@ -2314,7 +2385,21 @@ impl DenoRuntime {
   fn initialize_primary(&mut self) -> Result<(), String> {
     self.run_deferred_module_init()?;
     self.verify_cwd_probe()?;
-    self.verify_deno_core_bootstrap_probe()?;
+    if self
+      .instance
+      .get_func(&mut self.store, "__v8x_run_deno_core_script")
+      .is_some()
+    {
+      let phase =
+        self.call_optional_number_export("__v8x_deno_script_phase")?;
+      if phase != Some(0.0) {
+        return Err(format!(
+          "deferred Deno artifact initialized at script phase {phase:?}, expected zero"
+        ));
+      }
+    } else {
+      self.verify_deno_core_bootstrap_probe()?;
+    }
     self.verify_runtime_eval_state_probe()
   }
 
@@ -2604,6 +2689,38 @@ impl DenoRuntime {
     Err(format!("classic-script evaluator returned status {status}"))
   }
 
+  pub(crate) fn run_deno_core_script(
+    &mut self,
+    phase: usize,
+  ) -> Result<bool, String> {
+    let Some(run) = self
+      .instance
+      .get_func(&mut self.store, "__v8x_run_deno_core_script")
+    else {
+      return Ok(false);
+    };
+    let before = self.call_optional_number_export("__v8x_deno_script_phase")?;
+    if before != Some(phase as f64) {
+      return Err(format!("Deno script phase {before:?}, expected {phase}"));
+    }
+    let result = run
+      .typed::<f64, f64>(&self.store)
+      .map_err(|error| format!("type Deno script runner: {error}"))?
+      .call(&mut self.store, phase as f64)
+      .map_err(|error| {
+        let payload =
+          render_pending_wasm_exception(&mut self.store, self.instance);
+        format!("run Deno script phase {phase}: {error:#}; {payload}")
+      })?;
+    let after = self.call_optional_number_export("__v8x_deno_script_phase")?;
+    if result != (phase + 1) as f64 || after != Some(result) {
+      return Err(format!(
+        "Deno script phase {phase} returned {result}, state {after:?}"
+      ));
+    }
+    Ok(true)
+  }
+
   fn run_deferred_module_init(&mut self) -> Result<(), String> {
     let Some(init) = self.instance.get_func(&mut self.store, "__module_init")
     else {
@@ -2613,7 +2730,11 @@ impl DenoRuntime {
       .typed::<(), ()>(&self.store)
       .map_err(|error| format!("type __module_init: {error}"))?
       .call(&mut self.store, ())
-      .map_err(|error| format!("run __module_init: {error:#}"))
+      .map_err(|error| {
+        let payload =
+          render_pending_wasm_exception(&mut self.store, self.instance);
+        format!("run __module_init: {error:#}; {payload}")
+      })
   }
 
   fn verify_cwd_probe(&mut self) -> Result<(), String> {
@@ -2844,7 +2965,7 @@ impl DenoRuntime {
   #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   pub(crate) fn advance_deno_core_module(&mut self) -> Result<(), String> {
     if self.advance_deno_core_stage(DENO_CORE_MODULE_STAGE, 43.0, 2.0)? {
-      Ok(())
+      self.verify_deno_core_bootstrap_probe()
     } else {
       Err(format!(
         "prelinked Deno artifact has no {DENO_CORE_MODULE_STAGE} export"

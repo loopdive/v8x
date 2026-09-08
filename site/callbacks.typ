@@ -65,3 +65,11 @@ Function templates store the Rust callback and its data, then install the
 trampoline above when materialized.
 
 #next("modules", [Modules: identity across compile, instantiate, evaluate])
+
+
+The js2wasm runtime artifact exposes deferred core-script stages. A focused
+Rust-host fixture verifies that callbacks registered between stages are visible
+to later compiled scripts, and that failed stages cannot be retried. Native
+context internal fields remain in the Rust wrapper when its object enters the
+realm. Native microtasks preserve continuation data across callbacks. These
+checks do not establish complete Deno bootstrap or compiled-Promise support.

@@ -1694,10 +1694,23 @@ fn transfers_host_graph_without_losing_identity_or_descriptors() {
   let root_key = v8::String::new(scope, "hostRoot").unwrap();
   let global_key = v8::String::new(scope, "hostGlobal").unwrap();
   assert_eq!(global.set(scope, root_key.into(), root.into()), Some(true));
-  assert_eq!(root.set(scope, global_key.into(), global.into()), Some(true));
+  assert_eq!(
+    root.set(scope, global_key.into(), global.into()),
+    Some(true)
+  );
   v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
-  assert!(global.get(scope, root_key.into()).unwrap().strict_equals(root.into()));
-  assert!(root.get(scope, global_key.into()).unwrap().strict_equals(global.into()));
+  assert!(
+    global
+      .get(scope, root_key.into())
+      .unwrap()
+      .strict_equals(root.into())
+  );
+  assert!(
+    root
+      .get(scope, global_key.into())
+      .unwrap()
+      .strict_equals(global.into())
+  );
   let inspect_key = v8::String::new(scope, "inspectHost").unwrap();
   let inspect = v8::Local::<v8::Function>::try_from(
     global.get(scope, inspect_key.into()).unwrap(),
@@ -1890,28 +1903,242 @@ fn attaches_host_context_during_bootstrap_and_retains_failed_owner() {
   let path = std::env::var_os("V8X_JS2WASM_BOOTSTRAP_CONTEXT_WASM")
     .expect("compiled bootstrap fixture");
   for fail in [false, true] {
-    let context = v8::Context::new(scope, Default::default());
+    let template = v8::ObjectTemplate::new(scope);
+    template.set_internal_field_count(2);
+    let context = v8::Context::new(
+      scope,
+      v8::ContextOptions {
+        global_template: Some(template),
+        ..Default::default()
+      },
+    );
     let scope = &mut v8::ContextScope::new(scope, context);
     let global = context.global(scope);
+    let marker = Box::new(123_u64);
+    let marker_ptr = (&*marker as *const u64).cast::<std::ffi::c_void>();
+    global.set_aligned_pointer_in_internal_field(0, marker_ptr, 0);
     let number_key = v8::String::new(scope, "hostNumber").unwrap();
     let number = v8::Number::new(scope, 42.0);
-    assert_eq!(global.set(scope, number_key.into(), number.into()), Some(true));
+    assert_eq!(
+      global.set(scope, number_key.into(), number.into()),
+      Some(true)
+    );
     let callback_key = v8::String::new(scope, "hostCallback").unwrap();
     let callback = v8::Function::new_raw(scope, realm_host_leaf).unwrap();
-    assert_eq!(global.set(scope, callback_key.into(), callback.into()), Some(true));
+    assert_eq!(
+      global.set(scope, callback_key.into(), callback.into()),
+      Some(true)
+    );
     let fail_key = v8::String::new(scope, "bootFail").unwrap();
     let should_fail = v8::Boolean::new(scope, fail);
-    assert_eq!(global.set(scope, fail_key.into(), should_fail.into()), Some(true));
-    let result = v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path));
+    assert_eq!(
+      global.set(scope, fail_key.into(), should_fail.into()),
+      Some(true)
+    );
+    let result =
+      v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path));
     if fail {
-      assert!(result.unwrap_err().contains("__module_init"));
+      let error = result.unwrap_err();
+      assert!(error.contains("__module_init"), "{error}");
+      assert!(
+        error.contains("Error: requested bootstrap failure"),
+        "{error}"
+      );
     } else {
       result.unwrap();
     }
+    if !fail {
+      let identity_key = v8::String::new(scope, "identity").unwrap();
+      let identity = v8::Local::<v8::Function>::try_from(
+        global.get(scope, identity_key.into()).unwrap(),
+      )
+      .unwrap();
+      let returned = identity
+        .call(scope, global.into(), &[global.into()])
+        .unwrap();
+      assert!(returned.strict_equals(global.into()));
+      let returned = v8::Local::<v8::Object>::try_from(returned).unwrap();
+      assert_eq!(returned.internal_field_count(), 2);
+      assert_eq!(
+        unsafe { returned.get_aligned_pointer_from_internal_field(0, 0) },
+        marker_ptr
+      );
+    }
+    assert_eq!(global.internal_field_count(), 2);
+    assert_eq!(
+      unsafe { global.get_aligned_pointer_from_internal_field(0, 0) },
+      marker_ptr
+    );
+    global.set_aligned_pointer_in_internal_field(1, marker_ptr, 0);
+    assert_eq!(
+      unsafe { global.get_aligned_pointer_from_internal_field(1, 0) },
+      marker_ptr
+    );
     let key = v8::String::new(scope, "initializedFromHost").unwrap();
-    assert_eq!(global.get(scope, key.into()).unwrap().number_value(scope), Some(43.0));
-    let error = v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path)).unwrap_err();
+    assert_eq!(
+      global.get(scope, key.into()).unwrap().number_value(scope),
+      Some(43.0)
+    );
+    let error =
+      v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path))
+        .unwrap_err();
     assert!(error.contains("already owns a runtime"), "{error}");
-    assert_eq!(global.get(scope, key.into()).unwrap().number_value(scope), Some(43.0));
+    assert_eq!(
+      global.get(scope, key.into()).unwrap().number_value(scope),
+      Some(43.0)
+    );
+  }
+}
+
+thread_local! {
+  static CONTINUATION_EVENTS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+}
+
+unsafe extern "C" fn observe_continuation(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let parts = unsafe { &*info }.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let value = scope
+    .get_continuation_preserved_embedder_data()
+    .number_value(scope)
+    .unwrap();
+  CONTINUATION_EVENTS.with(|events| events.borrow_mut().push(value));
+  let inner = v8::Number::new(scope, 99.0);
+  scope.set_continuation_preserved_embedder_data(inner.into());
+  if value == 7.0 {
+    let message = v8::String::new(scope, "continuation task failed").unwrap();
+    let error = v8::Exception::error(scope, message);
+    scope.throw_exception(error);
+  }
+}
+
+#[test]
+fn extras_and_native_apis_share_continuation_data() {
+  initialize();
+  for _ in 0..2 {
+    let isolate = &mut v8::Isolate::new(Default::default());
+    v8::scope!(let scope, isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    assert!(
+      scope
+        .get_continuation_preserved_embedder_data()
+        .is_undefined()
+    );
+    let extras = context.get_extras_binding_object(scope);
+    let get_key =
+      v8::String::new(scope, "getContinuationPreservedEmbedderData").unwrap();
+    let set_key =
+      v8::String::new(scope, "setContinuationPreservedEmbedderData").unwrap();
+    let get = v8::Local::<v8::Function>::try_from(
+      extras.get(scope, get_key.into()).unwrap(),
+    )
+    .unwrap();
+    let set = v8::Local::<v8::Function>::try_from(
+      extras.get(scope, set_key.into()).unwrap(),
+    )
+    .unwrap();
+    let first = v8::Object::new(scope);
+    scope.set_continuation_preserved_embedder_data(first.into());
+    assert!(
+      get
+        .call(scope, extras.into(), &[])
+        .unwrap()
+        .strict_equals(first.into())
+    );
+    let second = v8::Object::new(scope);
+    set.call(scope, extras.into(), &[second.into()]).unwrap();
+    assert!(
+      scope
+        .get_continuation_preserved_embedder_data()
+        .strict_equals(second.into())
+    );
+    set.call(scope, extras.into(), &[]).unwrap();
+    assert!(
+      scope
+        .get_continuation_preserved_embedder_data()
+        .is_undefined()
+    );
+  }
+}
+
+#[test]
+fn microtasks_restore_captured_continuation_data() {
+  initialize();
+  CONTINUATION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let observe = v8::Function::new_raw(scope, observe_continuation).unwrap();
+  let one = v8::Number::new(scope, 1.0);
+  scope.set_continuation_preserved_embedder_data(one.into());
+  scope.enqueue_microtask(observe);
+  let two = v8::Number::new(scope, 2.0);
+  scope.set_continuation_preserved_embedder_data(two.into());
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  promise.then2(scope, observe, observe).unwrap();
+  let three = v8::Number::new(scope, 3.0);
+  scope.set_continuation_preserved_embedder_data(three.into());
+  resolver.resolve(scope, one.into()).unwrap();
+  let four = v8::Number::new(scope, 4.0);
+  scope.set_continuation_preserved_embedder_data(four.into());
+  promise.then2(scope, observe, observe).unwrap();
+  let seven = v8::Number::new(scope, 7.0);
+  scope.set_continuation_preserved_embedder_data(seven.into());
+  scope.enqueue_microtask(observe);
+  let five = v8::Number::new(scope, 5.0);
+  scope.set_continuation_preserved_embedder_data(five.into());
+  scope.perform_microtask_checkpoint();
+  CONTINUATION_EVENTS
+    .with(|events| assert_eq!(&*events.borrow(), &[1.0, 2.0, 4.0, 7.0]));
+  assert_eq!(
+    scope
+      .get_continuation_preserved_embedder_data()
+      .number_value(scope),
+    Some(5.0)
+  );
+}
+
+#[test]
+#[ignore = "requires compiled staged-core fixture"]
+fn defers_core_until_native_ops_are_registered() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let path =
+    std::env::var_os("V8X_JS2WASM_STAGED_CORE_WASM").expect("staged fixture");
+  for install_op in [false, true] {
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    v8::js2wasm_bootstrap_context_for_test(&context, Path::new(&path)).unwrap();
+    let global = context.global(scope);
+    let first = v8::String::new(scope, "first").unwrap();
+    assert!(global.get(scope, first.into()).unwrap().is_undefined());
+    assert!(v8::js2wasm_run_core_script_for_test(&context, 1).is_err());
+    v8::js2wasm_run_core_script_for_test(&context, 0).unwrap();
+    v8::js2wasm_run_core_script_for_test(&context, 1).unwrap();
+    if !install_op {
+      assert!(v8::js2wasm_run_core_script_for_test(&context, 2).is_err());
+      let error =
+        v8::js2wasm_run_core_script_for_test(&context, 2).unwrap_err();
+      assert!(error.contains("expected 2"), "{error}");
+      continue;
+    }
+    let key = v8::String::new(scope, "nativeOp").unwrap();
+    let callback = v8::Function::new_raw(scope, realm_host_leaf).unwrap();
+    assert_eq!(global.set(scope, key.into(), callback.into()), Some(true));
+    v8::js2wasm_run_core_script_for_test(&context, 2).unwrap();
+    v8::js2wasm_run_core_script_for_test(&context, 3).unwrap();
+    let key = v8::String::new(scope, "moduleAnswer").unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let result = function.call(scope, global.into(), &[]).unwrap();
+    assert_eq!(result.number_value(scope), Some(42.0));
   }
 }

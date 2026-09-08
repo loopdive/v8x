@@ -23,6 +23,8 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints } from "./context-value-bridge.mjs";
 
+import { stagedCoreSource } from "./staged-core.mjs";
+
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
@@ -537,7 +539,12 @@ if (typeof moduleInit !== "function") {
 }
 moduleInit();
 const bootstrapProbe = instance.exports.__v8x_probe_deno_core_bootstrap;
-if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== 42) {
+const scriptPhase = instance.exports.__v8x_deno_script_phase;
+const phased = typeof scriptPhase === "function";
+if (phased && (scriptPhase() !== 0 || typeof instance.exports.__v8x_run_deno_core_script !== "function")) {
+  throw new Error("runtime scripts ran before the native host requested them");
+}
+if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== (phased ? 0 : 42)) {
   throw new Error("application bootstrap probe failed after __module_init");
 }
 process.stdout.write("raw module bootstrap ok\n");
@@ -668,8 +675,13 @@ function assertApplicationLinksRuntimeEvalProvider(appModule, providerModule) {
   }
   moduleInit();
   const bootstrapProbe = instance.exports.__v8x_probe_deno_core_bootstrap;
-  if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== 42) {
-    fail("application bootstrap probe failed with optimized provider linked");
+  const scriptPhase = instance.exports.__v8x_deno_script_phase;
+  const phased = typeof scriptPhase === "function";
+  if (phased && (scriptPhase() !== 0 || typeof instance.exports.__v8x_run_deno_core_script !== "function")) {
+    fail("provider linking executed deferred core scripts");
+  }
+  if (typeof bootstrapProbe !== "function" || bootstrapProbe() !== (phased ? 0 : 42)) {
+    fail("application initial-state probe failed with optimized provider linked");
   }
 }
 
@@ -925,20 +937,11 @@ function runHostScript(): number {
 
 export function __v8x_probe_deno_core_bootstrap(): number {
   const bootstrap: any = (globalThis as any).__bootstrap;
-  const captured: any = (globalThis as any).__capturedBootstrap;
-  if (bootstrap == null || captured == null) return 0;
-  if (captured.core == null || captured.core.ops == null) return 0;
-  if (captured.core === bootstrap.core || captured.core.ops === bootstrap.core.ops) return 0;
-  if (captured.core.print !== bootstrap.core.print) return 0;
-  if (captured.core.ops.op_print !== bootstrap.core.ops.op_print) return 0;
-  if (bootstrap.internals !== captured.internals || bootstrap.primordials !== captured.primordials) return 0;
+  if (stage !== 2 || bootstrap == null) return 0;
   if (moduleCore !== bootstrap.core || moduleInternals !== bootstrap.internals) return 0;
   if (modulePrimordials !== bootstrap.primordials) return 0;
-  if (
-    modulePrimordials.Uint8Array === (globalThis as any).Uint8Array ||
-    modulePrimordials.Uint32Array === (globalThis as any).Uint32Array ||
-    modulePrimordials.BigInt64Array === (globalThis as any).BigInt64Array
-  ) return 0;
+  if (typeof moduleCore.print !== "function" || typeof moduleCore.ops.op_print !== "function") return 0;
+  if (typeof modulePrimordials.ObjectFreeze !== "function") return 0;
   return 42;
 }
 export function __v8x_stage_deno_core_wrappers(): number {
@@ -977,8 +980,16 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   if (profile === "runtime") {
     // Root handles must exist before the host hook, which precedes all core
     // imports. The host global becomes authoritative before core captures ops.
-    files[`${appRoot}/runtime-seed.ts`] = CONTEXT_VALUE_BRIDGE_SOURCE + RUNTIME_SEED +
+    files[`${appRoot}/runtime-seed.ts`] = CONTEXT_VALUE_BRIDGE_SOURCE + RUNTIME_SEED.slice(0, RUNTIME_SEED.indexOf("const extrasBinding =")) +
       "\ndeclare function __v8x_attach_context(): void;\n__v8x_attach_context();\n";
+    files[`${appRoot}/staged-core.ts`] = stagedCoreSource(denoSources);
+    const eagerImports = "import \"./core/00_primordials.js\";\nimport \"./core/00_infra.js\";\nimport \"./core/02_timers.js\";\nimport \"./core/01_core.js\";\nimport {\n  core as moduleCore,\n  internals as moduleInternals,\n  primordials as modulePrimordials,\n} from \"./core/mod.js\";";
+    if (!files[`${appRoot}/entry.ts`].includes(eagerImports)) fail("runtime core import layout changed");
+    files[`${appRoot}/entry.ts`] = files[`${appRoot}/entry.ts`]
+      .replace(eagerImports, "import { runScript, scriptPhase, runModule } from \"./staged-core.ts\";\nlet moduleCore: any;\nlet moduleInternals: any;\nlet modulePrimordials: any;\nexport function __v8x_run_deno_core_script(index: number): number { return runScript(index); }\nexport function __v8x_deno_script_phase(): number { return scriptPhase(); }")
+      .replace(TYPED_ARRAY_SHIMS_AFTER_CORE, "")
+      .replace("if (stage !== 0) throw new Error(\"Deno core wrappers stage order mismatch\");", "if (stage !== 0 || scriptPhase() !== 4) throw new Error(\"Deno core wrappers stage order mismatch\");")
+      .replace("if (stage !== 1) throw new Error(\"Deno core module stage order mismatch\");", "if (stage !== 1) throw new Error(\"Deno core module stage order mismatch\");\n  const namespace = runModule();\n  moduleCore = namespace.core;\n  moduleInternals = namespace.internals;\n  modulePrimordials = namespace.primordials;");
     files[`${appRoot}/entry.ts`] += contextValueBridgeEntrypoints("./runtime-seed.ts");
   } else {
     files[`${appRoot}/entry.ts`] += CONTEXT_VALUE_BRIDGE_SOURCE;
@@ -986,6 +997,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
 
   const graphInputs = [
     ...lockSources,
+    ...(profile === "runtime" ? [recordInput("generated/staged-core.ts", Buffer.from(files[`${appRoot}/staged-core.ts`]), { role: "deferred-core-scripts" })] : []),
     recordInput("generated/runtime-seed.ts", Buffer.from(files[`${appRoot}/runtime-seed.ts`]), {
       role: "abi-bridge",
     }),
@@ -1048,6 +1060,8 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     "__v8x_script_result_utf16_code_unit",
     ...(profile === "runtime"
       ? [
+          "__v8x_run_deno_core_script",
+          "__v8x_deno_script_phase",
           "__v8x_stage_deno_core_wrappers",
           "__v8x_stage_deno_core_module",
           "__v8x_stage_deno_hello_world_usage",
