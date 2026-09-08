@@ -6,6 +6,7 @@
 
 #![allow(non_snake_case, unused)]
 
+mod boolean;
 mod retained_buffer;
 mod private;
 pub(crate) use retained_buffer::RetainedHostBuffer;

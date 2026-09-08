@@ -2792,3 +2792,46 @@ fn rejects_linked_symbol_state_when_context_exports_are_missing() {
       .is_undefined()
   );
 }
+
+#[test]
+fn boolean_value_and_to_boolean_follow_native_truthiness() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let cases: Vec<(v8::Local<v8::Value>, bool)> = vec![
+    (v8::undefined(scope).into(), false),
+    (v8::null(scope).into(), false),
+    (v8::Boolean::new(scope, false).into(), false),
+    (v8::Boolean::new(scope, true).into(), true),
+    (v8::Number::new(scope, 0.0).into(), false),
+    (v8::Number::new(scope, -0.0).into(), false),
+    (v8::Number::new(scope, f64::NAN).into(), false),
+    (v8::Number::new(scope, -1.0).into(), true),
+    (v8::Number::new(scope, f64::MIN_POSITIVE).into(), true),
+    (v8::Number::new(scope, f64::INFINITY).into(), true),
+    (v8::Number::new(scope, f64::NEG_INFINITY).into(), true),
+    (v8::BigInt::new_from_i64(scope, 0).into(), false),
+    (v8::BigInt::new_from_i64(scope, 1).into(), true),
+    (v8::BigInt::new_from_i64(scope, -1).into(), true),
+    (v8::String::new(scope, "").unwrap().into(), false),
+    (v8::String::new(scope, "0").unwrap().into(), true),
+    (v8::String::new(scope, "false").unwrap().into(), true),
+    (v8::String::new(scope, "\0").unwrap().into(), true),
+    (v8::Object::new(scope).into(), true),
+    (v8::Array::new(scope, 0).into(), true),
+    (v8::Symbol::new(scope, None).into(), true),
+    (v8::External::new(scope, std::ptr::null_mut()).into(), true),
+  ];
+  for (index, (value, expected)) in cases.into_iter().enumerate() {
+    assert_eq!(
+      value.boolean_value(scope),
+      expected,
+      "BooleanValue case {index}"
+    );
+    let boolean = value.to_boolean(scope);
+    assert!(boolean.is_boolean());
+    assert_eq!(boolean.is_true(), expected, "ToBoolean case {index}");
+  }
+}
