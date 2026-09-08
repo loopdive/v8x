@@ -212,6 +212,9 @@ pub(super) fn call(
 }
 
 pub(super) fn report(error: String) {
+  if std::env::var_os("V8X_JS2WASM_TRACE_HOST").is_some() {
+    eprintln!("v8x/js2wasm: {error}");
+  }
   let message = new_string(current_isolate(), error);
   let exception = allocate_error(message, "Error");
   record_exception(current_isolate(), exception);

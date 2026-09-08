@@ -34,7 +34,11 @@ impl RealmAccess for DenoRuntime {
     };
     function
       .call(&mut self.store, &args, &mut result)
-      .map_err(|error| format!("call realm bridge {name}: {error:#}"))?;
+      .map_err(|error| {
+        let payload =
+          render_pending_wasm_exception(&mut self.store, self.realm_instance);
+        format!("call realm bridge {name}: {error:#}; {payload}")
+      })?;
     if !returns {
       return Ok(0.0);
     }

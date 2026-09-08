@@ -175,6 +175,7 @@ struct ObjectTemplateState {
 }
 
 struct FunctionTemplateState {
+  length: i32,
   callback: crate::FunctionCallback,
   data: *const Value,
   class_name: *const V8String,
@@ -2604,7 +2605,7 @@ pub extern "C" fn v8__FunctionTemplate__New(
   callback: crate::FunctionCallback,
   data: *const Value,
   _signature: *const crate::Signature,
-  _length: i32,
+  length: i32,
   _constructor_behavior: crate::ConstructorBehavior,
   _side_effect_type: crate::SideEffectType,
   _c_functions: *const crate::fast_api::CFunction,
@@ -2615,6 +2616,7 @@ pub extern "C" fn v8__FunctionTemplate__New(
   allocate(
     isolate,
     HeapValue::FunctionTemplate(FunctionTemplateState {
+      length,
       callback,
       data,
       class_name: ptr::null(),
@@ -3570,25 +3572,56 @@ pub extern "C" fn v8__Function__New(
   _context: *const Context,
   callback: crate::FunctionCallback,
   data: *const Value,
-  _length: i32,
+  length: i32,
   _constructor_behavior: crate::ConstructorBehavior,
   _side_effect_type: crate::SideEffectType,
 ) -> *const crate::Function {
-  allocate_function(current_isolate(), callback, data, Vec::new(), ptr::null())
+  allocate_function_with_length(
+    current_isolate(),
+    callback,
+    data,
+    Vec::new(),
+    ptr::null(),
+    length,
+  )
 }
 
 fn allocate_function(
   isolate: *mut RealIsolate,
   callback: crate::FunctionCallback,
   data: *const Value,
+  properties: Vec<TemplateProperty>,
+  name: *const V8String,
+) -> *const crate::Function {
+  allocate_function_with_length(isolate, callback, data, properties, name, 0)
+}
+
+fn allocate_function_with_length(
+  isolate: *mut RealIsolate,
+  callback: crate::FunctionCallback,
+  data: *const Value,
   mut properties: Vec<TemplateProperty>,
   name: *const V8String,
+  length: i32,
 ) -> *const crate::Function {
   let name = if name.is_null() {
     new_string(isolate, String::new())
   } else {
     name
   };
+  // Native callbacks expose the API-declared arity, not the rest wrapper's 0.
+  // Defining this in the host graph also preserves it during realm adoption.
+  let length_key = new_string(isolate, "length".to_string());
+  let length_value: *const Value =
+    allocate(isolate, HeapValue::Number(length.max(0) as f64));
+  properties.retain(|property| {
+    !same_property_key(property.key.cast(), length_key.cast())
+  });
+  properties.push(TemplateProperty {
+    key: length_key.cast(),
+    value: length_value.cast(),
+    attributes: 3, // ReadOnly | DontEnum, but configurable.
+  });
   let name_key = new_string(isolate, "name".to_string());
   if let Some(property) = properties
     .iter_mut()
@@ -3633,12 +3666,13 @@ pub extern "C" fn v8__FunctionTemplate__GetFunction(
     value: prototype.cast(),
     attributes: 0,
   });
-  allocate_function(
+  allocate_function_with_length(
     current_isolate(),
     state.callback,
     state.data,
     function_properties,
     state.class_name,
+    state.length,
   )
 }
 

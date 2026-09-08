@@ -907,6 +907,30 @@ fn weak_handles_preserve_identity_and_context_slots_drop_once() {
 }
 
 #[test]
+fn preserves_native_function_lengths() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let length_key = v8::String::new(scope, "length").unwrap();
+  for length in [0, 1, 3, 8] {
+    let template = v8::FunctionTemplate::builder_raw(noop_callback)
+      .length(length)
+      .build(scope);
+    let templated = template.get_function(scope).unwrap();
+    let direct = v8::Function::builder_raw(noop_callback)
+      .length(length)
+      .build(scope)
+      .unwrap();
+    for function in [templated, direct] {
+      let value = function.get(scope, length_key.into()).unwrap();
+      assert_eq!(value.number_value(scope), Some(length as f64));
+    }
+  }
+}
+
+#[test]
 fn preserves_function_names_from_templates_and_explicit_updates() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -1924,7 +1948,10 @@ fn attaches_host_context_during_bootstrap_and_retains_failed_owner() {
       Some(true)
     );
     let callback_key = v8::String::new(scope, "hostCallback").unwrap();
-    let callback = v8::Function::new_raw(scope, realm_host_leaf).unwrap();
+    let callback = v8::Function::builder_raw(realm_host_leaf)
+      .length(3)
+      .build(scope)
+      .unwrap();
     assert_eq!(
       global.set(scope, callback_key.into(), callback.into()),
       Some(true)
@@ -1947,6 +1974,14 @@ fn attaches_host_context_during_bootstrap_and_retains_failed_owner() {
     } else {
       result.unwrap();
     }
+    let length_key = v8::String::new(scope, "length").unwrap();
+    assert_eq!(
+      callback
+        .get(scope, length_key.into())
+        .unwrap()
+        .number_value(scope),
+      Some(3.0)
+    );
     if !fail {
       let identity_key = v8::String::new(scope, "identity").unwrap();
       let identity = v8::Local::<v8::Function>::try_from(

@@ -73,3 +73,7 @@ to later compiled scripts, and that failed stages cannot be retried. Native
 context internal fields remain in the Rust wrapper when its object enters the
 realm. Native microtasks preserve continuation data across callbacks. These
 checks do not establish complete Deno bootstrap or compiled-Promise support.
+
+Native js2wasm functions retain the length supplied by Function and
+FunctionTemplate builders. The property is included when a host callback
+enters the compiled realm. A bootstrap fixture checks its value after transfer.
