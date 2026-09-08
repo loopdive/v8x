@@ -28,7 +28,7 @@ import { stagedCoreSource } from "./staged-core.mjs";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "f6b953743e16fc12d39ff27dbea99ba3c5be095d";
+const EXPECTED_JS2_REF = "5b0751634ded1316b9a3baa7c77507e4fec13400";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
@@ -1011,9 +1011,11 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     ),
   ];
   const sourceGraphSha256 = inputSetDigest(graphInputs);
+  const appCompileOptions = profile === "runtime" ? { ...COMPILE_OPTIONS, standaloneSymbolState: "export" } : COMPILE_OPTIONS;
   const compileOptionsPreimage = profile === "poc" ? COMPILE_OPTIONS_PREIMAGE : {
     ...COMPILE_OPTIONS_PREIMAGE,
     entry: `${appRoot}/entry.ts`,
+    options: appCompileOptions,
     source_paths: CORE_SCRIPT_INPUTS.map((input) => input.path),
   };
   const canonicalCompileOptions = canonicalJson(compileOptionsPreimage);
@@ -1028,7 +1030,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   const app = await compiler.compileMulti(
     files,
     `${appRoot}/entry.ts`,
-    COMPILE_OPTIONS,
+    appCompileOptions,
   );
   const appBinary = checkedCompile(app, `Deno ${profile} application`);
   const appModule = new WebAssembly.Module(appBinary);
@@ -1091,9 +1093,11 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   // Never use selectCachedRuntimeEvalProvider(): that selector can choose
   // QuickJS, refusal, or cache fallback. This direct call is interpreter-only.
   const providerSource = provider.buildRuntimeEvalProviderSource();
-  const providerResult = await compiler.compile(providerSource, {
+  const providerCompileOptions = {
     ...provider.RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
-  });
+    ...(profile === "runtime" ? { standaloneSymbolState: "export" } : {}),
+  };
+  const providerResult = await compiler.compile(providerSource, providerCompileOptions);
   const providerBinary = checkedCompile(
     providerResult,
     "runtime-eval interpreter provider",
@@ -1144,6 +1148,9 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
       recordFile(js2, `src/interp/${name}`, "interpreter-source"),
     ),
   ];
+  if (profile === "runtime") {
+    providerInputs.push(recordInput("generated/runtime-eval-options.json", Buffer.from(canonicalJson(providerCompileOptions)), { role: "provider-compile-options" }));
+  }
   const providerSourceRecord = recordInput(
     "generated/runtime-eval-provider.ts",
     Buffer.from(providerSource),
@@ -1210,6 +1217,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
       runtime_eval_provider: {
         kind: "interpreter",
         direct_builder: "buildRuntimeEvalProviderSource",
+        ...(profile === "runtime" ? { options: providerCompileOptions } : {}),
         source: providerSourceRecord,
         inputs: providerInputs,
         sha256: providerGraphSha256,

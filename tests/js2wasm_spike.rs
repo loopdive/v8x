@@ -2546,6 +2546,26 @@ fn retains_and_invokes_foreign_callback_after_replacing_its_global() {
   let replacement =
     v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap())
       .unwrap();
+  for name in [
+    "linkedSymbolEqual",
+    "linkedFreshDistinct",
+    "linkedSymbolKey",
+    "linkedSymbolDescription",
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let value = global.get(scope, key.into()).unwrap();
+    assert!(value.is_boolean(), "{name} must be a real Boolean result");
+    assert!(value.is_true(), "{name}");
+  }
+  let registered_key = v8::String::new(scope, "linked-key").unwrap();
+  let registered = v8::Symbol::for_key(scope, registered_key);
+  let field = v8::String::new(scope, "producerRegistered").unwrap();
+  assert!(
+    global
+      .get(scope, field.into())
+      .unwrap()
+      .strict_equals(registered.into())
+  );
   let retained = v8::Local::new(scope, &saved);
   assert!(!retained.strict_equals(replacement.into()));
   let three = v8::Number::new(scope, 3.0);
@@ -2735,5 +2755,40 @@ fn symbols_preserve_registry_freshness_and_descriptions_across_realms() {
       .unwrap()
       .number_value(scope),
     Some(73.0)
+  );
+}
+
+#[test]
+#[ignore = "requires independently compiled linked callback fixtures"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn rejects_linked_symbol_state_when_context_exports_are_missing() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let directory =
+    PathBuf::from(std::env::var_os("V8X_JS2WASM_LINKED_CALLBACK_DIR").unwrap());
+  v8::js2wasm_attach_realm_for_test(
+    &context,
+    &directory.join("unshared-context.wasm"),
+  )
+  .unwrap();
+  let error = v8::js2wasm_attach_graph_for_test(
+    &context,
+    &directory.join("producer.wasm"),
+  )
+  .unwrap_err();
+  assert!(
+    error.contains("missing context export __symbol_counter"),
+    "{error}"
+  );
+  let key = v8::String::new(scope, "producerRegistered").unwrap();
+  assert!(
+    context
+      .global(scope)
+      .get(scope, key.into())
+      .unwrap()
+      .is_undefined()
   );
 }

@@ -136,8 +136,14 @@ Symbol values and property keys now transfer between the native API and the
 compiled realm, preserving registered-key identity, fresh-symbol identity,
 absent versus empty descriptions, and Symbol.iterator. Rebuild the core and
 linked artifacts for the added bridge exports. Other well-known Symbol APIs,
-Symbol-keyed native object graph enumeration, and registry identity across
-independently compiled graphs still need coverage.
+Symbol-keyed native object graph enumeration, and interpreter/multiple-context
+ownership still need coverage. Independently compiled graphs in one context
+share the counter, descriptions, registry and boxed-value intern table through
+six mutable Wasm globals. The compiler sidecar imports them from v8x:context;
+the runtime-profile core and fallback provider export them with
+standaloneSymbolState: "export". Rebuild core, provider and graph packages
+together. Missing context exports are rejected before graph initialization;
+they are never replaced by trap stubs or empty state.
 
 ### Bounded Deno `hello_world` POC
 
@@ -150,7 +156,7 @@ Deno compatibility.
 
 The runner requires clean detached worktrees: the current v8x commit is
 recorded exactly, JS2 is fixed at
-`f6b953743e16fc12d39ff27dbea99ba3c5be095d`, and Deno is fixed at
+`5b0751634ded1316b9a3baa7c77507e4fec13400`, and Deno is fixed at
 `1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. It reads all Deno source through
 `git show <pinned-ref>:path`, including the raw Rust string literal in
 `libs/core/examples/hello_world.rs`; it does not use a checked-out fixture or

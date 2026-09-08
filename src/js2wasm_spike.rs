@@ -29,21 +29,23 @@ compile_error!(
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+#[path = "js2wasm_graph_packages.rs"]
+mod graph_packages;
 #[path = "js2wasm_realm_values.rs"]
 mod realm_values;
 #[path = "js2wasm_shared_buffers.rs"]
 mod shared_buffers;
-#[path = "js2wasm_graph_packages.rs"]
-mod graph_packages;
 #[cfg(feature = "js2wasm_runtime_compile")]
-pub fn js2wasm_test_graph_packages() { graph_packages::test_graph_packages_bind_entry_source_and_bytes(); }
+pub fn js2wasm_test_graph_packages() {
+  graph_packages::test_graph_packages_bind_entry_source_and_bytes();
+}
 use realm_values::CallerRealm;
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub use realm_values::js2wasm_test_realm_values;
 pub(crate) use realm_values::{RealmAccess, RealmValue};
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub(crate) use realm_values::{
-  bootstrap_context_for_test, load_realm_for_test, load_graph_for_test,
+  bootstrap_context_for_test, load_graph_for_test, load_realm_for_test,
 };
 static NEXT_REALM_ID: AtomicUsize = AtomicUsize::new(1);
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -103,6 +105,14 @@ const RUNTIME_EVAL_IMPORT_MODULE: &str = "js2wasm:runtime-eval";
 const CONTEXT_IMPORT_MODULE: &str = "v8x:context";
 const CONTEXT_IMPORTS: &[&str] =
   &["__v8x_context_global_this", "__v8x_context_call"];
+const CONTEXT_SYMBOL_GLOBALS: &[&str] = &[
+  "__symbol_counter",
+  "__symbol_desc_table",
+  "__symbol_intern_table",
+  "__symbol_reg_keys",
+  "__symbol_reg_ids",
+  "__symbol_reg_count",
+];
 const RUNTIME_EVAL_JSON_IMPORT_MODULE: &str = "v8x:runtime-eval-json";
 const RUNTIME_EVAL_IMPORTS: &[&str] = &[
   "__runtime_apply_interpreted",
@@ -1818,7 +1828,15 @@ impl SharedDenoRuntime {
         || (import.module() == RUNTIME_EVAL_JSON_IMPORT_MODULE
           && import.name() == "__v8x_runtime_eval_json");
       let context_import = import.module() == CONTEXT_IMPORT_MODULE
-        && CONTEXT_IMPORTS.contains(&import.name());
+        && match import.ty() {
+          wasmtime::ExternType::Func(_) => {
+            CONTEXT_IMPORTS.contains(&import.name())
+          }
+          wasmtime::ExternType::Global(_) => {
+            CONTEXT_SYMBOL_GLOBALS.contains(&import.name())
+          }
+          _ => false,
+        };
       needs_runtime_eval |= runtime_eval_import || context_import;
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
@@ -2458,7 +2476,15 @@ impl DenoRuntime {
         // not let the deferred-import trap fallback hide an outdated artifact.
         for import in module.imports() {
           if import.module() == CONTEXT_IMPORT_MODULE
-            && realm.get_func(&mut *store, import.name()).is_none()
+            && match import.ty() {
+              wasmtime::ExternType::Func(_) => {
+                realm.get_func(&mut *store, import.name()).is_none()
+              }
+              wasmtime::ExternType::Global(_) => {
+                realm.get_global(&mut *store, import.name()).is_none()
+              }
+              _ => true,
+            }
           {
             return Err(format!(
               "js2wasm realm provider is missing context export {}",
@@ -2468,11 +2494,6 @@ impl DenoRuntime {
         }
         let mut linker = shared.linker.clone();
         linker.allow_shadowing(true);
-        linker
-          .define_unknown_imports_as_traps(module)
-          .map_err(|error| {
-            format!("bind deferred js2wasm imports: {error:#}")
-          })?;
         linker
           .instance(&mut *store, RUNTIME_EVAL_IMPORT_MODULE, provider)
           .map_err(|error| {
@@ -2487,6 +2508,11 @@ impl DenoRuntime {
           .instance(&mut *store, CONTEXT_IMPORT_MODULE, realm)
           .map_err(|error| {
             format!("bind js2wasm context provider exports: {error:#}")
+          })?;
+        linker
+          .define_unknown_imports_as_traps(module)
+          .map_err(|error| {
+            format!("bind deferred js2wasm imports: {error:#}")
           })?;
         let instance =
           linker.instantiate(&mut *store, module).map_err(|error| {
@@ -3014,7 +3040,9 @@ pub(crate) fn compile_and_instantiate(
     return Err("js2wasm module graph is empty".to_string());
   }
   let shared = shared_runtime()?;
-  let prepared = if let Some(artifact) = graph_packages::configured_input(entry, modules)? {
+  let prepared = if let Some(artifact) =
+    graph_packages::configured_input(entry, modules)?
+  {
     shared.precompiled_graph_file(&artifact, entry, modules)?
   } else {
     #[cfg(feature = "js2wasm_runtime_compile")]
