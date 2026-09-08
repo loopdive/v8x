@@ -43,7 +43,7 @@ pub use realm_values::js2wasm_test_realm_values;
 pub(crate) use realm_values::{RealmAccess, RealmValue};
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub(crate) use realm_values::{
-  bootstrap_context_for_test, load_realm_for_test,
+  bootstrap_context_for_test, load_realm_for_test, load_graph_for_test,
 };
 static NEXT_REALM_ID: AtomicUsize = AtomicUsize::new(1);
 #[cfg(feature = "js2wasm_runtime_compile")]

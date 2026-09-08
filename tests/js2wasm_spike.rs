@@ -2505,3 +2505,114 @@ fn identifies_external_values_by_brand_not_pointer_contents() {
     assert!(!value.is_external());
   }
 }
+
+#[test]
+#[ignore = "requires independently compiled linked callback fixtures"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn retains_and_invokes_foreign_callback_after_replacing_its_global() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let directory = PathBuf::from(
+    std::env::var_os("V8X_JS2WASM_LINKED_CALLBACK_DIR")
+      .expect("linked callback fixtures"),
+  );
+  v8::js2wasm_attach_realm_for_test(&context, &directory.join("context.wasm"))
+    .unwrap();
+  v8::js2wasm_attach_graph_for_test(&context, &directory.join("producer.wasm"))
+    .unwrap();
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "deferredCallback").unwrap();
+  let function =
+    v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap())
+      .unwrap();
+  let saved = v8::Global::new(scope, function);
+  let two = v8::Number::new(scope, 2.0);
+  assert_eq!(
+    function
+      .call(scope, global.into(), &[two.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  v8::js2wasm_attach_graph_for_test(
+    &context,
+    &directory.join("replacement.wasm"),
+  )
+  .unwrap();
+  let replacement =
+    v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap())
+      .unwrap();
+  let retained = v8::Local::new(scope, &saved);
+  assert!(!retained.strict_equals(replacement.into()));
+  let three = v8::Number::new(scope, 3.0);
+  assert_eq!(
+    retained
+      .call(scope, global.into(), &[three.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(45.0)
+  );
+  assert_eq!(
+    replacement
+      .call(scope, global.into(), &[])
+      .unwrap()
+      .number_value(scope),
+    Some(99.0)
+  );
+}
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn native_errors_expose_realm_constructor_and_preserve_identity() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("context fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  let message = v8::String::new(scope, "native failure").unwrap();
+  let error = v8::Exception::error(scope, message);
+  let object = v8::Local::<v8::Object>::try_from(error).unwrap();
+  let constructor_key = v8::String::new(scope, "constructor").unwrap();
+  let constructor = object.get(scope, constructor_key.into()).unwrap();
+  assert!(
+    constructor.is_function(),
+    "native error must expose the realm constructor"
+  );
+  let message_key = v8::String::new(scope, "message").unwrap();
+  assert_eq!(
+    object
+      .get(scope, message_key.into())
+      .unwrap()
+      .to_string(scope)
+      .unwrap()
+      .to_rust_string_lossy(scope),
+    "native failure"
+  );
+  let global = context.global(scope);
+  let identity_key = v8::String::new(scope, "identity").unwrap();
+  let identity = v8::Local::<v8::Function>::try_from(
+    global.get(scope, identity_key.into()).unwrap(),
+  )
+  .unwrap();
+  assert!(
+    identity
+      .call(scope, global.into(), &[error])
+      .unwrap()
+      .strict_equals(error)
+  );
+  let prototype = object.get_prototype(scope).unwrap();
+  assert!(prototype.is_object());
+  assert!(
+    object
+      .get_prototype(scope)
+      .unwrap()
+      .strict_equals(prototype)
+  );
+}

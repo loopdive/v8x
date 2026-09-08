@@ -125,6 +125,13 @@ application needs runtime-created source strings, set
 `V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE` to trusted caches created by the same
 Wasmtime build.
 
+Native host Errors are adopted into the active compiled realm when reflected
+through the object API. Their native wrapper identity is retained across
+round-trips. The compiler pin below adds immutable Error construction identity;
+rebuild the core, provider, and every linked module together because the Wasm
+Error carrier layout changed. User-subclass prototype overrides and complete
+Deno error formatting still require end-to-end validation.
+
 ### Bounded Deno `hello_world` POC
 
 `tools/deno/run-js2wasm-poc.sh` is a non-ignored Linux x86_64 gate for one
@@ -136,7 +143,7 @@ Deno compatibility.
 
 The runner requires clean detached worktrees: the current v8x commit is
 recorded exactly, JS2 is fixed at
-`16498efb481cb022ee5c4dcc9bb137b6d4c91a50`, and Deno is fixed at
+`a994605f4faaa34829d3cd92f6d84faa5669cf17`, and Deno is fixed at
 `1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. It reads all Deno source through
 `git show <pinned-ref>:path`, including the raw Rust string literal in
 `libs/core/examples/hello_world.rs`; it does not use a checked-out fixture or

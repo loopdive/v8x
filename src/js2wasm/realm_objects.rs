@@ -52,8 +52,12 @@ fn into_realm(
       let message = message.clone();
       let name = runtime.realm_string(&name.encode_utf16().collect::<Vec<_>>())?;
       let message = runtime.realm_string(&message.encode_utf16().collect::<Vec<_>>())?;
-      runtime.realm_handle("__v8x_value_error",
-        &[runtime.realm_check(name)?, runtime.realm_check(message)?])
+      let handle = runtime.realm_handle("__v8x_value_error",
+        &[runtime.realm_check(name)?, runtime.realm_check(message)?])?;
+      unsafe { isolate_state(current_isolate()) }.realm_objects.push(RealmObjectBinding {
+        host: value.cast(), runtime: owner.clone(), value: handle,
+      });
+      Ok(handle)
     }
 
     Some(HeapValue::ArrayBuffer(_)) => {
@@ -196,6 +200,7 @@ pub(super) fn length(array: *const Array) -> Option<Result<u32, String>> {
 pub(super) fn get_prototype(
   object: *const Object,
 ) -> Option<Result<*const Value, String>> {
+  if let Err(error) = adopt_native_error(object) { return Some(Err(error)); }
   let entry = binding(object)?;
   Some(callback_access::with_owner(&entry.runtime, |runtime| {
     let value = runtime.realm_get_prototype(entry.value)?;
@@ -207,6 +212,7 @@ pub(super) fn set_prototype(
   object: *const Object,
   prototype: *const Value,
 ) -> Option<Result<bool, String>> {
+  if let Err(error) = adopt_native_error(object) { return Some(Err(error)); }
   let entry = binding(object)?;
   Some(callback_access::with_owner(&entry.runtime, |runtime| {
     let prototype = into_realm(runtime, &entry.runtime, prototype)?;
@@ -218,6 +224,7 @@ pub(super) fn get(
   object: *const Object,
   key: *const Value,
 ) -> Option<Result<*const Value, String>> {
+  if let Err(error) = adopt_native_error(object) { return Some(Err(error)); }
   let entry = binding(object)?;
   Some(callback_access::with_owner(&entry.runtime, |runtime| {
     let key = into_realm(runtime, &entry.runtime, key)?;
@@ -231,6 +238,7 @@ pub(super) fn set(
   key: *const Value,
   value: *const Value,
 ) -> Option<Result<(), String>> {
+  if let Err(error) = adopt_native_error(object) { return Some(Err(error)); }
   let entry = binding(object)?;
   Some(callback_access::with_owner(&entry.runtime, |runtime| {
     let key = into_realm(runtime, &entry.runtime, key)?;
@@ -365,5 +373,27 @@ pub fn js2wasm_run_core_script_for_test(
       return Err("fixture has no deferred script runner".into());
     }
     Ok(())
+  })
+}
+
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_attach_graph_for_test(context: &Context, path: &std::path::Path) -> Result<(), String> {
+  let entry = binding(v8__Context__Global(context)).ok_or("test context has no realm")?;
+  let mut runtime = entry.runtime.try_borrow_mut().map_err(|_| "test realm is executing")?;
+  crate::js2wasm_spike::load_graph_for_test(&mut runtime, path)
+}
+
+
+fn adopt_native_error(object: *const Object) -> Result<(), String> {
+  if !matches!(unsafe { heap_value(object) }, Some(HeapValue::Error { .. })) || binding(object).is_some() {
+    return Ok(());
+  }
+  let context = current_context();
+  if context.is_null() { return Ok(()); }
+  let Some(global) = binding(v8__Context__Global(context)) else { return Ok(()); };
+  callback_access::with_owner(&global.runtime, |runtime| {
+    into_realm(runtime, &global.runtime, object.cast()).map(|_| ())
   })
 }

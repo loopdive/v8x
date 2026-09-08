@@ -284,12 +284,22 @@ pub(crate) trait RealmAccess {
 pub(crate) fn load_realm_for_test(
   path: &Path,
 ) -> Result<Rc<RefCell<DenoRuntime>>, String> {
-  let shared = SharedDenoRuntime::new()?;
+  // Match production graph attachment: all modules use the same Engine.
+  let shared = shared_runtime()?;
   let bytes = fs::read(path).map_err(|e| e.to_string())?;
   let module = Module::new(&shared.engine, bytes).map_err(|e| e.to_string())?;
   let prepared = shared.prepare_module(&module)?;
   DenoRuntime::instantiate(&shared, &prepared, PathBuf::from("."), 0)
     .map(|runtime| Rc::new(RefCell::new(runtime)))
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+pub(crate) fn load_graph_for_test(runtime: &mut DenoRuntime, path: &Path) -> Result<(), String> {
+  let shared = shared_runtime()?;
+  let bytes = fs::read(path).map_err(|e| e.to_string())?;
+  let module = Module::new(&shared.engine, bytes).map_err(|e| e.to_string())?;
+  let prepared = shared.prepare_module(&module)?;
+  runtime.instantiate_graph(shared, &prepared)
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]

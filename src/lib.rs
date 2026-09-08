@@ -148,7 +148,7 @@ mod js2wasm;
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
 pub use js2wasm::realm_objects::{
-  js2wasm_attach_realm_for_test, js2wasm_bootstrap_context_for_test,
+  js2wasm_attach_realm_for_test, js2wasm_attach_graph_for_test, js2wasm_bootstrap_context_for_test,
   js2wasm_run_core_script_for_test,
 };
 
