@@ -4789,6 +4789,40 @@ pub extern "C" fn v8__Value__NumberValue(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IntegerValue(
+  value: *const Value,
+  context: *const Context,
+  out: *mut Maybe<i64>,
+) {
+  if !matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_))) {
+    unsafe { write_maybe(out, None) };
+    return;
+  }
+  // Rust's saturating float cast matches V8 NumberToInt64: truncate finite
+  // fractions, map NaN to zero, and clamp overflow and infinities.
+  let result = match unsafe { heap_value(value) } {
+    Some(HeapValue::Number(number)) => Some(*number as i64),
+    Some(HeapValue::Boolean(boolean)) => Some(i64::from(*boolean)),
+    Some(HeapValue::Null | HeapValue::Undefined) => Some(0),
+    Some(HeapValue::Symbol(_) | HeapValue::BigInt(_)) => {
+      let message = new_string(current_isolate(),
+        "Cannot convert a Symbol or BigInt value to a number".to_string());
+      record_exception(current_isolate(), allocate_error(message, "TypeError"));
+      None
+    }
+    Some(_) => match realm_objects::to_number(value, context) {
+      Ok(number) => number.map(|number| number as i64),
+      Err(error) => {
+        realm_objects::report(error);
+        None
+      }
+    },
+    None => None,
+  };
+  unsafe { write_maybe(out, result) };
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Integer__New(
   isolate: *mut RealIsolate,
   value: i32,

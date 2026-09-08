@@ -15,6 +15,17 @@ if ((globalThis as any).hostNumber !== 42) throw new Error("host seed missing du
 if ((globalThis as any).bootFail) throw new Error("requested bootstrap failure");
 ` : "";
 const applicationSource = `
+(globalThis as any).coercionError = { marker: 73 };
+(globalThis as any).coercionObject = {
+  [Symbol.toPrimitive](hint:any):any {
+    if (hint !== "number") throw new Error("wrong numeric hint");
+    return "42.9";
+  }
+};
+(globalThis as any).throwingCoercion = {
+  valueOf():any { throw (globalThis as any).coercionError; }
+};
+
 const unnamedFunction:any = function():number { return 42; };
 Object.defineProperty(unnamedFunction, "name", { value: undefined, configurable: true });
 (globalThis as any).unnamedForHost = unnamedFunction;
@@ -126,5 +137,25 @@ assert.throws(()=>e.__v8x_value_typed_array(buffer,99,0,1));
 assert.throws(()=>e.__v8x_value_typed_array(buffer,2,1,1));
 assert.throws(()=>e.__v8x_value_typed_array(buffer,2,12,2));
 console.log("PASS: fixed host buffer handles, shared overlapping views, view bounds and kind rejection");
-if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
+
 console.log("PASS: identity, prototype updates and refusals, callable result, UTF-16, NaN, signed zero, invalid handles");
+
+function numericEnvelope(handle) {
+  const envelope=e.__v8x_value_to_number(handle);
+  return [e.__v8x_value_as_boolean(e.__v8x_value_get(envelope,str("0"))),
+    e.__v8x_value_get(envelope,str("1"))];
+}
+for (const [input, expected] of [["",0],[" 42.9 ",42.9],["0x10",16],["0b11",3],["no",NaN]]) {
+  const [ok,value]=numericEnvelope(str(input));
+  assert.equal(ok,1,input);
+  assert.equal(e.__v8x_value_as_number(value),expected,input);
+}
+const [coercedOk,coerced]=numericEnvelope(e.__v8x_value_get(global,str("coercionObject")));
+assert.equal(coercedOk,1);
+assert.equal(e.__v8x_value_as_number(coerced),42.9);
+const [threw,exception]=numericEnvelope(e.__v8x_value_get(global,str("throwingCoercion")));
+assert.equal(threw,0);
+assert.equal(exception,e.__v8x_value_get(global,str("coercionError")));
+
+console.log("PASS: numeric strings, number-hint coercion, and original exception identity");
+if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);

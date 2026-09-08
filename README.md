@@ -158,7 +158,7 @@ Deno compatibility.
 
 The runner requires clean detached worktrees: the current v8x commit is
 recorded exactly, JS2 is fixed at
-`5086736c37bd96f34e6dd69fdee4ac1fad18dfcf`, and Deno is fixed at
+`bda15bdf70baefc3d7620f32a03dc3660c2fd005`, and Deno is fixed at
 `1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. It reads all Deno source through
 `git show <pinned-ref>:path`, including the raw Rust string literal in
 `libs/core/examples/hello_world.rs`; it does not use a checked-out fixture or
@@ -226,3 +226,10 @@ on the chosen engine, so the swap is a drop-in — `deno_core` compiles unchange
 | Deno JSC        | 80.7 MB   | ~48 MB static |
 | Deno system JSC | 54.2 MB   | 0             |
 | Deno quickjs-ng | 56.1 MB   | ~1 MB static  |
+
+Numeric conversion through `Value::integer_value` handles numeric saturation,
+primitive inputs, and compiled-realm string/object coercion. Focused native
+tests verify the original thrown object reaches `TryCatch` unchanged. String
+and object coercion requires an attached realm with the numeric-conversion
+bridge export. Full production artifacts must be rebuilt for this export;
+these focused tests are not a full Deno compatibility result.

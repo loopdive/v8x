@@ -3005,3 +3005,80 @@ fn runtime_eval_preserves_context_symbol_identity() {
     );
   }
 }
+
+#[test]
+fn integer_value_preserves_numeric_boundaries() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  for (number, expected) in [
+    (3.0, 3), (3.9, 3), (-3.9, -3), (0.0, 0), (-0.0, 0),
+    (f64::NAN, 0), (f64::INFINITY, i64::MAX),
+    (f64::NEG_INFINITY, i64::MIN), (f64::MAX, i64::MAX),
+    (-f64::MAX, i64::MIN), (9_223_372_036_854_774_784.0, 9_223_372_036_854_774_784),
+    (-9_223_372_036_854_774_784.0, -9_223_372_036_854_774_784),
+  ] {
+    let value = v8::Number::new(scope, number);
+    assert_eq!(value.integer_value(scope), Some(expected), "{number:?}");
+  }
+  for (value, expected) in [
+    (v8::Boolean::new(scope, true).into(), 1),
+    (v8::Boolean::new(scope, false).into(), 0),
+    (v8::null(scope).into(), 0),
+    (v8::undefined(scope).into(), 0),
+  ] as [(v8::Local<v8::Value>, i64); 4] {
+    assert_eq!(value.integer_value(scope), Some(expected));
+  }
+}
+
+#[test]
+fn integer_value_rejects_symbol_and_bigint_with_type_error() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let values: [v8::Local<v8::Value>; 2] = [
+    v8::Symbol::new(scope, None).into(),
+    v8::BigInt::new_from_i64(scope, 1).into(),
+  ];
+  for value in values {
+    v8::tc_scope!(let caught, scope);
+    assert_eq!(value.integer_value(caught), None);
+    assert!(caught.has_caught());
+    let exception = caught.exception().unwrap();
+    let text = exception.to_string(caught).unwrap().to_rust_string_lossy(caught);
+    assert!(text.starts_with("TypeError:"), "{text}");
+  }
+}
+
+#[test]
+#[ignore = "requires compiled numeric-coercion context fixture"]
+#[cfg(feature = "js2wasm_runtime_compile")]
+fn integer_value_coerces_in_realm_and_preserves_exception_identity() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM").expect("context fixture");
+  v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+  for (text, expected) in [("",0),(" 42.9 ",42),("-3.9",-3),("0x10",16),("0b11",3),("no",0)] {
+    let value = v8::String::new(scope, text).unwrap();
+    assert_eq!(value.integer_value(scope), Some(expected), "{text:?}");
+  }
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "coercionObject").unwrap();
+  let object = global.get(scope,key.into()).unwrap();
+  assert_eq!(object.integer_value(scope),Some(42));
+  let key = v8::String::new(scope, "coercionError").unwrap();
+  let token = global.get(scope,key.into()).unwrap();
+  let key = v8::String::new(scope, "throwingCoercion").unwrap();
+  let throwing = global.get(scope,key.into()).unwrap();
+  v8::tc_scope!(let caught, scope);
+  assert_eq!(throwing.integer_value(caught),None);
+  assert!(caught.has_caught());
+  assert!(caught.exception().unwrap().strict_equals(token));
+}

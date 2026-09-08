@@ -95,6 +95,14 @@ export function __v8x_value_as_number(id: number): number {
   return value;
 }
 
+export function __v8x_value_to_number(id: number): number {
+  const value = __v8xValueAt(id);
+  // Unary plus performs ToNumber, unlike Number() which accepts BigInt.
+  // Keep the thrown value itself so native TryCatch retains its identity.
+  try { return __v8xKeepValue([true, +value]); }
+  catch (error) { return __v8xKeepValue([false, error]); }
+}
+
 const __v8xHostBufferIds = new Set<number>();
 export function __v8x_value_buffer_create(length: number): number {
   if (length < 0 || length > 2147483647 || length !== Math.floor(length))
@@ -177,6 +185,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_as_boolean",
   "__v8x_value_number",
   "__v8x_value_as_number",
+  "__v8x_value_to_number",
   "__v8x_value_buffer_create",
   "__v8x_value_buffer_storage",
   "__v8x_value_typed_array",

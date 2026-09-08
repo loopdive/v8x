@@ -285,6 +285,32 @@ pub(super) fn call(
   }))
 }
 
+pub(super) fn to_number(
+  value: *const Value,
+  context: *const Context,
+) -> Result<Option<f64>, String> {
+  let owner = binding(value.cast())
+    .or_else(|| binding(v8__Context__Global(context)))
+    .ok_or_else(|| "numeric coercion requires an attached compiled realm".to_string())?
+    .runtime;
+  callback_access::with_owner(&owner, |runtime| {
+    let value = into_realm(runtime, &owner, value)?;
+    let envelope = runtime.realm_handle("__v8x_value_to_number",
+      &[runtime.realm_check(value)?])?;
+    let zero = runtime.realm_string(&[48])?;
+    let one = runtime.realm_string(&[49])?;
+    let success = runtime.realm_get(envelope, zero)?;
+    let result = runtime.realm_get(envelope, one)?;
+    if runtime.realm_as_boolean(success)? {
+      Ok(Some(runtime.realm_as_number(result)?))
+    } else {
+      let exception = from_realm(runtime, &owner, result)?;
+      record_exception(current_isolate(), exception);
+      Ok(None)
+    }
+  })
+}
+
 pub(super) fn report(error: String) {
   if std::env::var_os("V8X_JS2WASM_TRACE_HOST").is_some() {
     eprintln!("v8x/js2wasm: {error}");
