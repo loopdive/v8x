@@ -6,6 +6,9 @@
 
 #![allow(non_snake_case, unused)]
 
+mod retained_buffer;
+pub(crate) use retained_buffer::RetainedHostBuffer;
+
 // These helpers are engine-independent despite living under the QuickJS
 // backend today. Reuse their real Rust implementation so deno_core's string
 // conversion path never needs an interpreter or a native simdutf library.

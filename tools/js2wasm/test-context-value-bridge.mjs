@@ -15,6 +15,8 @@ if ((globalThis as any).hostNumber !== 42) throw new Error("host seed missing du
 if ((globalThis as any).bootFail) throw new Error("requested bootstrap failure");
 ` : "";
 const applicationSource = `
+(globalThis as any).exerciseSharedBuffer = function(host:any,view:any):number { view[0]=7; host(); return view[0]; };
+(globalThis as any).throwSharedBuffer = function(view:any):void { view[0]=11; throw new Error("buffer throw"); };
 (globalThis as any).identity = function (value: any): any { return value; };
 (globalThis as any).sample = { answer: 42 };
 (globalThis as any).values = [1, true, null];
@@ -87,5 +89,28 @@ assert.equal(e.__v8x_value_number(NaN),e.__v8x_value_number(NaN));
 assert.notEqual(e.__v8x_value_number(0),e.__v8x_value_number(-0));
 assert.throws(()=>e.__v8x_value_kind(-1));
 assert.throws(()=>e.__v8x_value_as_number(obj));
+
+const buffer=e.__v8x_value_buffer_create(16);
+const u8=e.__v8x_value_typed_array(buffer,0,0,16);
+const u32=e.__v8x_value_typed_array(buffer,2,4,2);
+const i32=e.__v8x_value_typed_array(buffer,3,4,2);
+assert.equal(e.__v8x_value_get(u8,str("buffer")),buffer);
+assert.equal(e.__v8x_value_get(u32,str("buffer")),buffer);
+assert.equal(e.__v8x_value_as_number(e.__v8x_value_get(u32,str("byteOffset"))),4);
+e.__v8x_value_set(u32,str("0"),e.__v8x_value_number(0x12345678));
+assert.deepEqual([4,5,6,7].map(i=>e.__v8x_value_as_number(e.__v8x_value_get(u8,str(String(i))))),[120,86,52,18]);
+e.__v8x_value_set(u8,str("7"),e.__v8x_value_number(255));
+assert.equal(e.__v8x_value_as_number(e.__v8x_value_get(u32,str("0"))),4281620088);
+assert.equal(e.__v8x_value_as_number(e.__v8x_value_get(i32,str("0"))),-13347208);
+for(const kind of [1,4,5]) {
+ const view=e.__v8x_value_typed_array(buffer,kind,0,1);
+ assert.equal(e.__v8x_value_get(view,str("buffer")),buffer);
+}
+assert.throws(()=>e.__v8x_value_buffer_storage(obj));
+assert.throws(()=>e.__v8x_value_buffer_create(-1));
+assert.throws(()=>e.__v8x_value_typed_array(buffer,99,0,1));
+assert.throws(()=>e.__v8x_value_typed_array(buffer,2,1,1));
+assert.throws(()=>e.__v8x_value_typed_array(buffer,2,12,2));
+console.log("PASS: fixed host buffer handles, shared overlapping views, view bounds and kind rejection");
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
 console.log("PASS: identity, prototype updates and refusals, callable result, UTF-16, NaN, signed zero, invalid handles");

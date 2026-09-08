@@ -8,6 +8,18 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_adopt_buffer(
+    &mut self,
+    host: crate::js2wasm::RetainedHostBuffer,
+  ) -> Result<RealmValue, String> {
+    use wasmtime::AsContextMut;
+    let handle = shared_buffers::adopt(
+      self.store.as_context_mut(),
+      self.realm_instance,
+      host,
+    )?;
+    self.realm_from_handle(handle)
+  }
   fn realm_id(&self) -> usize {
     self.realm_id
   }
@@ -50,6 +62,10 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_adopt_buffer(
+    &mut self,
+    host: crate::js2wasm::RetainedHostBuffer,
+  ) -> Result<RealmValue, String>;
   fn realm_id(&self) -> usize;
   fn realm_raw(
     &mut self,
@@ -357,6 +373,18 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_adopt_buffer(
+    &mut self,
+    host: crate::js2wasm::RetainedHostBuffer,
+  ) -> Result<RealmValue, String> {
+    use wasmtime::AsContextMut;
+    let handle = shared_buffers::adopt(
+      self.caller.as_context_mut(),
+      self.realm_instance,
+      host,
+    )?;
+    self.realm_from_handle(handle)
+  }
   fn realm_id(&self) -> usize {
     self.realm_id
   }

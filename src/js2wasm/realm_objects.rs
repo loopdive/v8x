@@ -55,7 +55,39 @@ fn into_realm(
       runtime.realm_handle("__v8x_value_error",
         &[runtime.realm_check(name)?, runtime.realm_check(message)?])
     }
+
+    Some(HeapValue::ArrayBuffer(_)) => {
+      let handle = runtime.realm_adopt_buffer(RetainedHostBuffer::new(value.cast())?)?;
+      unsafe { isolate_state(current_isolate()) }.realm_objects.push(RealmObjectBinding {
+        host: value.cast(), runtime: owner.clone(), value: handle,
+      });
+      Ok(handle)
+    }
+    Some(HeapValue::TypedArray(state)) => {
+      if !state.properties.is_empty() {
+        return Err("host typed-array custom properties are not transferable yet".to_string());
+      }
+      let kind = match state.kind {
+        TypedArrayKind::Uint8 => 0.0,
+        TypedArrayKind::Uint16 => 1.0,
+        TypedArrayKind::Uint32 => 2.0,
+        TypedArrayKind::Int32 => 3.0,
+        TypedArrayKind::BigUint64 => 4.0,
+        TypedArrayKind::BigInt64 => 5.0,
+      };
+      let buffer = state.buffer;
+      let offset = state.byte_offset as f64;
+      let length = state.length as f64;
+      let buffer = into_realm(runtime, owner, buffer.cast())?;
+      let handle = runtime.realm_handle("__v8x_value_typed_array",
+        &[runtime.realm_check(buffer)?, kind, offset, length])?;
+      unsafe { isolate_state(current_isolate()) }.realm_objects.push(RealmObjectBinding {
+        host: value.cast(), runtime: owner.clone(), value: handle,
+      });
+      Ok(handle)
+    }
     _ => Err("host value conversion to the compiled realm is not implemented for this type".to_string()),
+
   }
 }
 

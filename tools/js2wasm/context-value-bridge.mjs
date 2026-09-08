@@ -71,6 +71,33 @@ export function __v8x_value_as_number(id: number): number {
   if (typeof value !== "number") throw new TypeError("expected number handle");
   return value;
 }
+
+const __v8xHostBufferIds = new Set<number>();
+export function __v8x_value_buffer_create(length: number): number {
+  if (length < 0 || length > 2147483647 || length !== Math.floor(length))
+    throw new RangeError("invalid host buffer length");
+  const id = __v8xKeepValue(new ArrayBuffer(length));
+  __v8xHostBufferIds.add(id);
+  return id;
+}
+// Private storage ABI: only fixed buffers created by the bridge are accepted.
+// Rust validates the native byte-vector layout through Wasmtime GC APIs.
+export function __v8x_value_buffer_storage(id: number): any {
+  if (!__v8xHostBufferIds.has(id)) throw new TypeError("not a host-backed buffer handle");
+  return __v8xValueAt(id);
+}
+export function __v8x_value_typed_array(buffer: number, kind: number, offset: number, length: number): number {
+  const value = __v8x_value_buffer_storage(buffer);
+  if (offset < 0 || offset !== Math.floor(offset) || length < 0 || length !== Math.floor(length))
+    throw new RangeError("invalid host view range");
+  if (kind === 0) return __v8xKeepValue(new Uint8Array(value, offset, length));
+  if (kind === 1) return __v8xKeepValue(new Uint16Array(value, offset, length));
+  if (kind === 2) return __v8xKeepValue(new Uint32Array(value, offset, length));
+  if (kind === 3) return __v8xKeepValue(new Int32Array(value, offset, length));
+  if (kind === 4) return __v8xKeepValue(new BigUint64Array(value, offset, length));
+  if (kind === 5) return __v8xKeepValue(new BigInt64Array(value, offset, length));
+  throw new RangeError("invalid host view kind");
+}
 export function __v8x_value_object(): number { return __v8xKeepValue({}); }
 export function __v8x_value_array(): number { return __v8xKeepValue([]); }
 export function __v8x_value_get_prototype(owner: number): number {
@@ -124,6 +151,9 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_as_boolean",
   "__v8x_value_number",
   "__v8x_value_as_number",
+  "__v8x_value_buffer_create",
+  "__v8x_value_buffer_storage",
+  "__v8x_value_typed_array",
   "__v8x_value_object",
   "__v8x_value_array",
   "__v8x_value_get_prototype",
@@ -140,7 +170,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
 
 export function contextValueBridgeEntrypoints(modulePath) {
   const signatures = [...CONTEXT_VALUE_BRIDGE_SOURCE.matchAll(
-    /export function (__v8x_value_\w+)\(([^)]*)\): (number|void) \{/g
+    /export function (__v8x_value_\w+)\(([^)]*)\): (number|void|any) \{/g
   )];
   if (signatures.length !== CONTEXT_VALUE_BRIDGE_EXPORTS.length ||
       CONTEXT_VALUE_BRIDGE_EXPORTS.some(name => !signatures.some(s => s[1] === name))) {

@@ -31,6 +31,8 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 #[path = "js2wasm_realm_values.rs"]
 mod realm_values;
+#[path = "js2wasm_shared_buffers.rs"]
+mod shared_buffers;
 use realm_values::CallerRealm;
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub use realm_values::js2wasm_test_realm_values;
@@ -965,6 +967,8 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  host_buffers: Vec<shared_buffers::HostBufferBinding>,
+  limiter: DenoHeapLimiter,
   realm_id: usize,
   realm_instance: Option<Instance>,
   realm_owner_identity: usize,
@@ -981,7 +985,12 @@ struct DenoHostState {
   last_error: Option<DenoBridgeError>,
 }
 
-impl ResourceLimiter for DenoHostState {
+// Keep the Send-bound limiter separate from thread-affine backing-store owners.
+struct DenoHeapLimiter {
+  heap_isolate: usize,
+}
+
+impl ResourceLimiter for DenoHeapLimiter {
   fn memory_growing(
     &mut self,
     current: usize,
@@ -2339,6 +2348,8 @@ impl DenoRuntime {
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        host_buffers: Vec::new(),
+        limiter: DenoHeapLimiter { heap_isolate },
         realm_id: 0,
         realm_instance: None,
         realm_owner_identity: 0,
@@ -2355,7 +2366,8 @@ impl DenoRuntime {
         last_error: None,
       },
     );
-    store.limiter(|state| state);
+    store.limiter(|state| &mut state.limiter);
+    store.call_hook(shared_buffers::synchronize);
     let mut runtime_eval_provider = None;
     let instance = Self::instantiate_in_store(
       shared,
@@ -2541,6 +2553,7 @@ impl DenoRuntime {
     isolate: *mut crate::RealIsolate,
   ) {
     self.store.data_mut().heap_isolate = isolate as usize;
+    self.store.data_mut().limiter.heap_isolate = isolate as usize;
   }
 
   pub(crate) fn bind_test_fn(

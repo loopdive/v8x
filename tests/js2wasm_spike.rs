@@ -2244,3 +2244,51 @@ fn defers_core_until_native_ops_are_registered() {
     assert_eq!(result.number_value(scope), Some(42.0));
   }
 }
+
+#[test]
+#[ignore = "requires compiled context value bridge fixture"]
+fn shares_host_buffers_with_the_compiled_realm() {
+  initialize();
+  let deletion_count = AtomicUsize::new(0);
+  let mut bytes = vec![0_u8; 16].into_boxed_slice();
+  let backing = unsafe {
+    v8::ArrayBuffer::new_backing_store_from_ptr(
+      bytes.as_mut_ptr().cast(), bytes.len(), count_backing_store_deletion,
+      (&deletion_count as *const AtomicUsize).cast_mut().cast(),
+    )
+  }.make_shared();
+  let mut isolate = v8::Isolate::new(Default::default());
+  {
+    v8::scope!(let scope, &mut isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM").unwrap();
+    v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+    let global = context.global(scope);
+    let key = v8::String::new(scope, "identity").unwrap();
+    let identity = v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap()).unwrap();
+    let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing);
+    let u8_view = v8::Uint8Array::new(scope, buffer, 0, 16).unwrap();
+    let u32_view = v8::Uint32Array::new(scope, buffer, 4, 2).unwrap();
+    for value in [buffer.into(), u8_view.into(), u32_view.into()] {
+      let returned = identity.call(scope, global.into(), &[value]).unwrap();
+      assert!(returned.strict_equals(value));
+    }
+    drop(backing);
+    assert_eq!(deletion_count.load(Ordering::SeqCst), 0);
+    bytes[4..8].copy_from_slice(&0x12345678_u32.to_le_bytes());
+    assert_eq!(u32_view.get_index(scope, 0).unwrap().number_value(scope), Some(0x12345678_u32 as f64));
+    let number = v8::Number::new(scope, 255.0);
+    assert_eq!(u8_view.set_index(scope, 7, number.into()), Some(true));
+    assert_eq!(bytes[7], 255);
+    assert_eq!(u32_view.get_index(scope, 0).unwrap().number_value(scope), Some(0xff345678_u32 as f64));
+    let key = v8::String::new(scope, "throwSharedBuffer").unwrap();
+    let thrower = v8::Local::<v8::Function>::try_from(global.get(scope, key.into()).unwrap()).unwrap();
+    v8::tc_scope!(let scope, scope);
+    assert!(thrower.call(scope, global.into(), &[u8_view.into()]).is_none());
+    assert!(scope.has_caught());
+    assert_eq!(bytes[0], 11);
+  }
+  drop(isolate);
+  assert_eq!(deletion_count.load(Ordering::SeqCst), 1);
+}
