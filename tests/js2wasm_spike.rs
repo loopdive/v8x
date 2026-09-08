@@ -2615,4 +2615,23 @@ fn native_errors_expose_realm_constructor_and_preserve_identity() {
       .unwrap()
       .strict_equals(prototype)
   );
+  // Deno reads constructor.name at every level while formatting Errors.
+  let mut current = prototype;
+  let mut depth = 0;
+  while current.is_object() {
+    let current_object = v8::Local::<v8::Object>::try_from(current).unwrap();
+    let ctor = current_object.get(scope, constructor_key.into()).unwrap();
+    assert!(
+      ctor.is_function(),
+      "prototype at depth {depth} has no constructor"
+    );
+    current = current_object.get_prototype(scope).unwrap();
+    depth += 1;
+    assert!(
+      depth <= 2,
+      "cyclic or unexpected native Error prototype chain"
+    );
+  }
+  assert_eq!(depth, 2);
+  assert!(current.is_null());
 }
