@@ -983,6 +983,9 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     files[`${appRoot}/runtime-seed.ts`] = CONTEXT_VALUE_BRIDGE_SOURCE + RUNTIME_SEED.slice(0, RUNTIME_SEED.indexOf("const extrasBinding =")) +
       "\ndeclare function __v8x_attach_context(): void;\n__v8x_attach_context();\n";
     files[`${appRoot}/staged-core.ts`] = stagedCoreSource(denoSources);
+    // compileMulti evaluates every supplied source file, not only imports.
+    // The originals are represented exactly once inside the staged wrappers.
+    for (const input of CORE_SCRIPT_INPUTS) delete files[`${appRoot}/core/${input.path}`];
     const eagerImports = "import \"./core/00_primordials.js\";\nimport \"./core/00_infra.js\";\nimport \"./core/02_timers.js\";\nimport \"./core/01_core.js\";\nimport {\n  core as moduleCore,\n  internals as moduleInternals,\n  primordials as modulePrimordials,\n} from \"./core/mod.js\";";
     if (!files[`${appRoot}/entry.ts`].includes(eagerImports)) fail("runtime core import layout changed");
     files[`${appRoot}/entry.ts`] = files[`${appRoot}/entry.ts`]
