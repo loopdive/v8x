@@ -1034,6 +1034,8 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     // Resolve generic dynamic-call/eval branches locally with the existing
     // explicit-refusal implementation. This contains no parser/interpreter.
     files[`${appRoot}/entry.ts`] += "\n" + refusal.buildRuntimeEvalRefusalProviderSource();
+    if (files[`${appRoot}/entry.ts`].split("(0, eval)(readHostScript())").length !== 2)
+      fail("AOT dispatch expects exactly one dynamic script entry");
     files[`${appRoot}/entry.ts`] = 'import { runAotHostScript } from "./aot-program.ts";\n' +
       files[`${appRoot}/entry.ts`].replace("(0, eval)(readHostScript())", "runAotHostScript(readHostScript())");
     graphInputs[graphInputs.length - 1] = recordInput("generated/entry.ts", Buffer.from(files[`${appRoot}/entry.ts`]), { role: "closed-world-aot-router" });
@@ -1116,8 +1118,6 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
       fail(`Deno ${profile} application does not export ${name}`);
     }
   }
-  atomicWrite(output, appBinary);
-
   if (execution === "aot") {
     const imports = WebAssembly.Module.imports(appModule);
     const forbidden = imports.filter((entry) => entry.module !== "v8x:deno" || entry.kind !== "function");
@@ -1132,10 +1132,13 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
       artifacts: { app: recordInput("deno-core.wasm", appBinary, { role: "app" }) },
       wasmtime: { version: WASMTIME_VERSION, engine_config: ENGINE_CONFIG },
     };
+    atomicWrite(output, appBinary);
     atomicWrite(provenanceOutput, JSON.stringify(provenance, null, 2) + "\n");
     console.log(JSON.stringify(provenance, null, 2));
     return;
   }
+
+  atomicWrite(output, appBinary);
 
   const provider = await import(
     pathToFileURL(join(js2, "scripts/runtime-eval-provider.mjs")).href

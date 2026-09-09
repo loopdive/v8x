@@ -59,9 +59,16 @@ bulk-string/property implementation, not the contribution of either separately.
 The harness is compare-bulk-transfer.mjs and results are retained at
 /private/tmp/deno-profile.RCcI44/bulk-ab/results.json.
 
-Remaining limitations: generic export lookups are not yet cached; the value
-table still uses linear identity lookup; packet construction/decoding costs
-remain; this is not a general cross-call scheduler or a full Deno implementation.
+Follow-up: the value table now has a native Map index, preserving distinct
+signed-zero handles and deleting retired packets from both index and roots.
+The paired compiler fixes hashing of logical string views. See
+results/2026-09-09-indexed-processes.md for the new 12.8× faster A/B and the
+remaining V8/QuickJS gap. The measurements above remain the historical bulk-only
+checkpoint, not measurements of the index.
+
+Remaining limitations: generic export lookups are not yet cached; packet
+construction/decoding costs remain; this is not a general cross-call scheduler
+or a full Deno implementation.
 
 Profiling is opt-in with V8X_JS2WASM_PROFILE_PHASES; reported scopes are inclusive
 and may nest. Precompilation accepts V8X_JS2WASM_CRANELIFT_OPT=none, speed, or

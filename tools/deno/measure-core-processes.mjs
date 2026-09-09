@@ -29,14 +29,17 @@ const expected = readFileSync(
   "utf8",
 );
 const core = required("DENO_BENCH_CORE_AOT");
-const provider = required("DENO_BENCH_PROVIDER_AOT");
+const noProvider = process.env.DENO_BENCH_NO_PROVIDER === "1";
+if (noProvider && process.env.DENO_BENCH_PROVIDER_AOT)
+  throw Error("Do not supply a provider in an explicitly provider-free benchmark");
+const provider = noProvider ? undefined : required("DENO_BENCH_PROVIDER_AOT");
 const engines = [
   { name: "v8", path: required("DENO_BENCH_V8"), artifacts: [] },
   { name: "quickjs", path: required("DENO_BENCH_QUICKJS"), artifacts: [] },
   {
     name: "js2wasm",
     path: required("DENO_BENCH_JS2WASM"),
-    artifacts: [core, provider],
+    artifacts: provider ? [core, provider] : [core],
   },
 ];
 
@@ -95,7 +98,7 @@ for (let round = 0; round < repeats; round++) {
       if (key.startsWith("V8X_JS2WASM_")) delete env[key];
     if (engine.name === "js2wasm") {
       env.V8X_JS2WASM_DENO_CORE_AOT_MODULE = core;
-      env.V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE = provider;
+      if (provider) env.V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE = provider;
     }
     const start = performance.now();
     const run = spawnSync("/usr/bin/time", ["-l", engine.stripped.path], {
