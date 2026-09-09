@@ -428,6 +428,9 @@ async function runCargoDeno() {
       "none",
       "--final-status-level",
       "none",
+      ...(b.nextest_test_threads
+        ? ["--test-threads", String(b.nextest_test_threads)]
+        : []),
       ...(skipArgs.length ? ["--", ...skipArgs] : []),
     ],
     { cwd: denoDir, env, echo: false },
@@ -546,6 +549,7 @@ function ensureDenoV8Patch(denoDir) {
 //   vendor_jsc  -> WebKit FULL_VERSION + short submodule sha, e.g. "625.1.23 (0f307e9)"
 //   system_jsc  -> framework CFBundleVersion, e.g. "20621.3.11.11.3"
 //   quickjs     -> QJS_VERSION_* from quickjs.h, e.g. "0.15.1"
+//   js2wasm     -> pinned Wasmtime dependency, e.g. "Wasmtime 47.0.3"
 function engineVersion() {
   try {
     if (b.features.includes("vendor_jsc")) {
@@ -569,6 +573,13 @@ function engineVersion() {
       if (maj == null) return null;
       const suf = (g("SUFFIX") || "").replace(/"/g, "");
       return `${maj}.${g("MINOR")}.${g("PATCH")}${suf}`;
+    }
+    if (b.features.includes("engine_js2wasm")) {
+      const cargo = fs.readFileSync(path.join(ROOT, "Cargo.toml"), "utf8");
+      const version = cargo.match(
+        /^wasmtime\s*=\s*\{[^\n]*\bversion\s*=\s*"=?([^"]+)"/m,
+      )?.[1];
+      return version ? `Wasmtime ${version}` : "Wasmtime";
     }
   } catch {}
   return null;

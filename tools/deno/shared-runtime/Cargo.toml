@@ -1,0 +1,24 @@
+[package]
+name = "v8x-shared-runtime"
+version = "149.4.0-rc.4"
+edition = "2024"
+publish = false
+
+[lib]
+name = "v8"
+crate-type = ["dylib"]
+
+[dependencies]
+runtime = { package = "v8x", path = "../../..", default-features = false, features = ["engine_js2wasm", "js2wasm_diagnostic_abi"] }
+
+[features]
+default = []
+simdutf = ["runtime/simdutf"]
+js2wasm_gc_copying = ["runtime/js2wasm_gc_copying"]
+use_custom_libcxx = ["runtime/use_custom_libcxx"]
+v8_enable_pointer_compression = ["runtime/v8_enable_pointer_compression"]
+v8_enable_sandbox = ["runtime/v8_enable_sandbox"]
+v8_enable_v8_checks = ["runtime/v8_enable_v8_checks"]
+
+[build-dependencies]
+cc = "1.0"

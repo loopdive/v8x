@@ -11,7 +11,7 @@
 
 = Callbacks and exceptions
 
-Every native callback crosses an engine C frame before it reaches Rust.
+JSC and QuickJS native callbacks cross an engine C frame before reaching Rust.
 The trampoline does five things, in order:
 
 + restore the thread-local isolate and context; many ABI functions receive
@@ -21,6 +21,19 @@ The trampoline does five things, in order:
 + call the Rust callback, catching panics so they never unwind through
   engine frames
 + translate the return-value slot back into an engine value
+
+The experimental js2wasm backend uses Wasmtime host imports instead of an
+engine C trampoline. Values stay rooted in their compiled realm, and Rust
+wrappers retain object identity. Synchronous nested callbacks use the active
+Wasmtime caller to access that realm. Ordinary host callbacks and built-in
+error transport are covered by focused tests; host construction, arbitrary
+exotic values and complete exception identity are not implemented.
+
+A realm-backed callback can have an undefined or non-string JavaScript
+`name` property. Function conversion preserves that property and call identity
+in the realm; it uses an empty native wrapper display name when there is no
+string name to cache. Focused tests cover both cases and ordinary named
+functions.
 
 == Exceptions live in side state
 
@@ -58,3 +71,19 @@ Function templates store the Rust callback and its data, then install the
 trampoline above when materialized.
 
 #next("modules", [Modules: identity across compile, instantiate, evaluate])
+
+
+The js2wasm runtime artifact exposes deferred core-script stages. A focused
+Rust-host fixture verifies that callbacks registered between stages are visible
+to later compiled scripts, and that failed stages cannot be retried. Native
+context internal fields remain in the Rust wrapper when its object enters the
+realm. Native microtasks preserve continuation data across callbacks. These
+checks do not establish complete Deno bootstrap or compiled-Promise support.
+
+Native js2wasm functions retain the length supplied by Function and
+FunctionTemplate builders. The property is included when a host callback
+enters the compiled realm. A bootstrap fixture checks its value after transfer.
+
+Host object graph adoption preserves explicit null and object prototypes,
+including shared identity and property cycles. Prototype reads and writes on
+adopted objects use the compiled realm; rejected prototype cycles return false.

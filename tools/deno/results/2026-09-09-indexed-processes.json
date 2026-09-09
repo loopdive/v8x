@@ -1,0 +1,293 @@
+{
+  "date": "2026-09-09T14:48:37.911Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "repeats": 7,
+  "engines": [
+    {
+      "name": "v8",
+      "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "db2e9e9be6037207ae3e50f6e580db8ae60e9b4b63f1b44951005c77c0db93c7"
+      },
+      "sharedLibraries": [],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-indexed/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "94c39f2c0896a9d9c721c08fca08ddb9264000c044d2df95031997691e4c1db9"
+      },
+      "payloadBytes": 39078032
+    },
+    {
+      "name": "quickjs",
+      "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "4c5d27efb48bc976e822846e6ccfb22c59f416318e29f2475d3238752b7d6893"
+      },
+      "sharedLibraries": [],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-indexed/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "ce1239d2fd39efcafe1a8c317da9c554f67ba94ec8bf9465b14b2478949fa054"
+      },
+      "payloadBytes": 5613536
+    },
+    {
+      "name": "js2wasm",
+      "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk/hello-world-js2wasm",
+      "artifacts": [
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/core-indexed-speed.cwasm",
+          "bytes": 94533608,
+          "sha256": "709a9df314274be3f48e55e235cb8af83b7c99295703ac31eff5b0ce4c7073c7"
+        },
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/provider-indexed-speed.cwasm",
+          "bytes": 312168496,
+          "sha256": "ae73a668705bbef3df90c8c610c95cfd009c51ad36bde3372cac23deb9138095"
+        }
+      ],
+      "original": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk/hello-world-js2wasm",
+        "bytes": 1691456,
+        "sha256": "3f3e3195e3ca6054b6dceaa27fdfbc39a03f3afc4c0e8b0325448961aaf66a12"
+      },
+      "sharedLibraries": [
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/comparison-indexed/libv8.dylib",
+          "bytes": 6339136,
+          "sha256": "b15fe4f23e5a70d034b486f1bcfe8ddcaba6fa7bcf1db9e1b7f1bfcc0df8b826"
+        },
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/comparison-indexed/libstd-09bec66e14073fe6.dylib",
+          "bytes": 1216576,
+          "sha256": "51b1103464864cae2cdf6e60eecd8b2ed81bc5da9a72f20db6fa21cd586c400d"
+        }
+      ],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-indexed/hello-world-js2wasm",
+        "bytes": 1691456,
+        "sha256": "3f3e3195e3ca6054b6dceaa27fdfbc39a03f3afc4c0e8b0325448961aaf66a12"
+      },
+      "payloadBytes": 415949272
+    }
+  ],
+  "runs": [
+    {
+      "engine": "v8",
+      "round": 1,
+      "wallMs": 578.5276660000001,
+      "peakRssBytes": 21282816,
+      "peakPhysicalFootprintBytes": 6816968,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 1,
+      "wallMs": 309.470959,
+      "peakRssBytes": 18759680,
+      "peakPhysicalFootprintBytes": 11305344,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 1,
+      "wallMs": 1622.400709,
+      "peakRssBytes": 357695488,
+      "peakPhysicalFootprintBytes": 10011368,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 2,
+      "wallMs": 24.407916999999998,
+      "peakRssBytes": 18694144,
+      "peakPhysicalFootprintBytes": 11239808,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 2,
+      "wallMs": 905.3123329999999,
+      "peakRssBytes": 357695488,
+      "peakPhysicalFootprintBytes": 9994960,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 2,
+      "wallMs": 9.000542000000223,
+      "peakRssBytes": 21151744,
+      "peakPhysicalFootprintBytes": 6702280,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 3,
+      "wallMs": 903.7896249999999,
+      "peakRssBytes": 357695488,
+      "peakPhysicalFootprintBytes": 9994960,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 3,
+      "wallMs": 8.990084000000024,
+      "peakRssBytes": 21217280,
+      "peakPhysicalFootprintBytes": 6751432,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 3,
+      "wallMs": 24.551542000000154,
+      "peakRssBytes": 18432000,
+      "peakPhysicalFootprintBytes": 10977664,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 4,
+      "wallMs": 8.78979199999958,
+      "peakRssBytes": 21151744,
+      "peakPhysicalFootprintBytes": 6718688,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 4,
+      "wallMs": 24.28533299999981,
+      "peakRssBytes": 18792448,
+      "peakPhysicalFootprintBytes": 11338112,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 4,
+      "wallMs": 908.7251660000002,
+      "peakRssBytes": 357728256,
+      "peakPhysicalFootprintBytes": 10044136,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 5,
+      "wallMs": 24.412999999999556,
+      "peakRssBytes": 18530304,
+      "peakPhysicalFootprintBytes": 11075968,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 5,
+      "wallMs": 898.6736250000004,
+      "peakRssBytes": 357629952,
+      "peakPhysicalFootprintBytes": 9929424,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 5,
+      "wallMs": 8.821916999999303,
+      "peakRssBytes": 21184512,
+      "peakPhysicalFootprintBytes": 6718640,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 6,
+      "wallMs": 905.381292,
+      "peakRssBytes": 357679104,
+      "peakPhysicalFootprintBytes": 9994984,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 6,
+      "wallMs": 9.039041999999426,
+      "peakRssBytes": 21151744,
+      "peakPhysicalFootprintBytes": 6685896,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 6,
+      "wallMs": 24.457749999999578,
+      "peakRssBytes": 18726912,
+      "peakPhysicalFootprintBytes": 11272576,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 7,
+      "wallMs": 8.430167000000438,
+      "peakRssBytes": 21217280,
+      "peakPhysicalFootprintBytes": 6751432,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 7,
+      "wallMs": 23.805750000000444,
+      "peakRssBytes": 18710528,
+      "peakPhysicalFootprintBytes": 11256192,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 7,
+      "wallMs": 911.6662500000002,
+      "peakRssBytes": 357728256,
+      "peakPhysicalFootprintBytes": 10044136,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    }
+  ]
+}

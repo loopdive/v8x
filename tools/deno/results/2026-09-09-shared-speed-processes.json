@@ -1,0 +1,272 @@
+{
+  "date": "2026-09-09T11:34:47.674Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "repeats": 7,
+  "engines": [
+    {
+      "name": "v8",
+      "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "db2e9e9be6037207ae3e50f6e580db8ae60e9b4b63f1b44951005c77c0db93c7"
+      },
+      "sharedLibraries": [],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-shared-speed/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "94c39f2c0896a9d9c721c08fca08ddb9264000c044d2df95031997691e4c1db9"
+      },
+      "payloadBytes": 39078032
+    },
+    {
+      "name": "quickjs",
+      "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "4c5d27efb48bc976e822846e6ccfb22c59f416318e29f2475d3238752b7d6893"
+      },
+      "sharedLibraries": [],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-shared-speed/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "ce1239d2fd39efcafe1a8c317da9c554f67ba94ec8bf9465b14b2478949fa054"
+      },
+      "payloadBytes": 5613536
+    },
+    {
+      "name": "js2wasm",
+      "path": "/private/tmp/v8x-deno-followup-20260908/target/release/examples/hello_world",
+      "artifacts": [
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/core-speed.cwasm",
+          "bytes": 89961816,
+          "sha256": "696a7f63c0f6291be4bae5ab8715e03cd6fdd5d24a3c59ceb92b70c2a8de2fcb"
+        },
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/provider-speed.cwasm",
+          "bytes": 311005016,
+          "sha256": "7afd6462ae788ec97c11c0f4df72ebfd84113a032485534188223e9d89deab9f"
+        }
+      ],
+      "original": {
+        "path": "/private/tmp/v8x-deno-followup-20260908/target/release/examples/hello_world",
+        "bytes": 2124320,
+        "sha256": "7b47982da32e7e22e709717af10c0d176d248897275ea5285889799f6d433391"
+      },
+      "sharedLibraries": [
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/comparison-shared-speed/libv8.dylib",
+          "bytes": 6335472,
+          "sha256": "dda2585debade9eddc4ecec083d23a1231078e0c68603b33bbac6a94a1c2cb63"
+        },
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/comparison-shared-speed/libstd-09bec66e14073fe6.dylib",
+          "bytes": 1216576,
+          "sha256": "51b1103464864cae2cdf6e60eecd8b2ed81bc5da9a72f20db6fa21cd586c400d"
+        }
+      ],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-shared-speed/hello-world-js2wasm",
+        "bytes": 1691456,
+        "sha256": "3f3e3195e3ca6054b6dceaa27fdfbc39a03f3afc4c0e8b0325448961aaf66a12"
+      },
+      "payloadBytes": 410210336
+    }
+  ],
+  "runs": [
+    {
+      "engine": "v8",
+      "round": 1,
+      "wallMs": 552.8478749999995,
+      "peakRssBytes": 21200896,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 1,
+      "wallMs": 300.11325000000033,
+      "peakRssBytes": 18776064,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 1,
+      "wallMs": 13287.913166999999,
+      "peakRssBytes": 352829440,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 2,
+      "wallMs": 24.98383300000205,
+      "peakRssBytes": 18759680,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 2,
+      "wallMs": 12678.932832999999,
+      "peakRssBytes": 352862208,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 2,
+      "wallMs": 13.094499999999243,
+      "peakRssBytes": 21168128,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 3,
+      "wallMs": 12772.408958,
+      "peakRssBytes": 352862208,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 3,
+      "wallMs": 11.339292000004207,
+      "peakRssBytes": 21151744,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 3,
+      "wallMs": 25.662624999997206,
+      "peakRssBytes": 18497536,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 4,
+      "wallMs": 8.395874999994703,
+      "peakRssBytes": 21217280,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 4,
+      "wallMs": 23.24045799999294,
+      "peakRssBytes": 18792448,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 4,
+      "wallMs": 12776.379625000001,
+      "peakRssBytes": 352894976,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 5,
+      "wallMs": 23.952916999995068,
+      "peakRssBytes": 18759680,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 5,
+      "wallMs": 12812.491083,
+      "peakRssBytes": 352894976,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 5,
+      "wallMs": 10.581666999991285,
+      "peakRssBytes": 21118976,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 6,
+      "wallMs": 12826.492125000004,
+      "peakRssBytes": 352796672,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 6,
+      "wallMs": 12.386750000005122,
+      "peakRssBytes": 21266432,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 6,
+      "wallMs": 23.920457999993232,
+      "peakRssBytes": 18677760,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 7,
+      "wallMs": 8.622749999994994,
+      "peakRssBytes": 21135360,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 7,
+      "wallMs": 23.859792000002926,
+      "peakRssBytes": 18710528,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 7,
+      "wallMs": 13025.049790999998,
+      "peakRssBytes": 352944128,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    }
+  ]
+}
