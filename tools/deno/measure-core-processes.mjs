@@ -38,6 +38,7 @@ const engines = [
   { name: "quickjs", path: required("DENO_BENCH_QUICKJS"), artifacts: [] },
   {
     name: "js2wasm",
+    collector: process.env.DENO_BENCH_GC_COLLECTOR ?? "drc",
     path: required("DENO_BENCH_JS2WASM"),
     artifacts: provider ? [core, provider] : [core],
   },
@@ -97,6 +98,7 @@ for (let round = 0; round < repeats; round++) {
     for (const key of Object.keys(env))
       if (key.startsWith("V8X_JS2WASM_")) delete env[key];
     if (engine.name === "js2wasm") {
+      env.V8X_JS2WASM_GC_COLLECTOR = engine.collector;
       env.V8X_JS2WASM_DENO_CORE_AOT_MODULE = core;
       if (provider) env.V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE = provider;
     }

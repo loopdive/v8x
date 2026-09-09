@@ -7,18 +7,21 @@ if (!provider) throw Error("usage: compare-bulk-transfer.mjs OUT SCALAR_EXE BULK
 mkdirSync(out, {recursive:true});
 const expected = readFileSync(new URL("./js2wasm-poc-expected.stdout", import.meta.url), "utf8");
 const rows = [];
+const controlCollector = process.env.DENO_AB_CONTROL_COLLECTOR ?? "drc";
+const candidateCollector = process.env.DENO_AB_CANDIDATE_COLLECTOR ?? "drc";
 for (let round = 0; round < 5; round++) {
   for (const name of round % 2 ? ["bulk", "scalar"] : ["scalar", "bulk"]) {
     const env = {...process.env};
     for (const k of Object.keys(env)) if (k.startsWith("V8X_JS2WASM_")) delete env[k];
     env.V8X_JS2WASM_DENO_CORE_AOT_MODULE = name === "bulk" ? bulkCore : scalarCore;
     const selectedProvider = name === "bulk" ? candidateProvider : provider;
+    env.V8X_JS2WASM_GC_COLLECTOR = name === "bulk" ? candidateCollector : controlCollector;
     if (selectedProvider !== "none") env.V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE = selectedProvider;
     const start = performance.now();
     const result = spawnSync("/usr/bin/time", ["-l", name === "bulk" ? bulk : scalar], {env, encoding:"utf8"});
     const row = {name, round, ms:performance.now()-start, status:result.status, stdout:result.stdout, stderr:result.stderr};
     rows.push(row);
-    writeFileSync(out + "/results.json", JSON.stringify({inputs:{scalar,bulk,scalarCore,bulkCore,provider,candidateProvider},rows},null,2));
+    writeFileSync(out + "/results.json", JSON.stringify({inputs:{scalar,bulk,scalarCore,bulkCore,provider,candidateProvider,controlCollector,candidateCollector},rows},null,2));
     if (result.status !== 0 || result.stdout !== expected) throw Error("incorrect " + name + ": " + result.stderr);
     console.log(name, round+1, row.ms.toFixed(1), "ms PASS");
   }

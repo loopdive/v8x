@@ -418,6 +418,17 @@ pub fn js2wasm_test_realm_values(path: &Path) -> Result<(), String> {
     assert_eq!(runtime.realm_get(obj, definitions[0].0)?, definitions[7].1);
     eprintln!("PASS: bulk UTF-16 round trips and ordered property packets");
   }
+  // Exercise root relocation, not merely allocation, under a moving collector.
+  // The same check also runs with the historical DRC collector.
+  runtime.store.gc(None).map_err(|error| error.to_string())?;
+  assert_eq!(runtime.realm_as_utf16(text)?, units);
+  assert_eq!(runtime.realm_get(global, key)?, obj);
+  assert_eq!(runtime.realm_call(callable, global, args)?, obj);
+  runtime.store.gc(None).map_err(|error| error.to_string())?;
+  assert_eq!(
+    runtime.realm_as_number(negative_zero)?.to_bits(),
+    (-0.0f64).to_bits()
+  );
   // Graph execution must not switch the table used by existing realm handles.
   let alternate = DenoRuntime::instantiate_in_store(
     &shared,

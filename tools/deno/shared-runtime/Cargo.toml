@@ -14,6 +14,7 @@ runtime = { package = "v8x", path = "../../..", default-features = false, featur
 [features]
 default = []
 simdutf = ["runtime/simdutf"]
+js2wasm_gc_copying = ["runtime/js2wasm_gc_copying"]
 use_custom_libcxx = ["runtime/use_custom_libcxx"]
 v8_enable_pointer_compression = ["runtime/v8_enable_pointer_compression"]
 v8_enable_sandbox = ["runtime/v8_enable_sandbox"]

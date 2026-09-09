@@ -1478,6 +1478,25 @@ impl SharedDenoRuntime {
     #[cfg(feature = "js2wasm_deno_poc_replay")]
     let poc_replay = DenoPocReplayArtifacts::from_env()?;
     let mut config = Config::new();
+    // Do not let adding a compiled-in collector silently change artifact ABI.
+    // The historical configuration enabled only DRC, so make that default
+    // explicit. Selection must agree during precompilation and replay.
+    config.collector(match std::env::var("V8X_JS2WASM_GC_COLLECTOR") {
+      Err(std::env::VarError::NotPresent) => {
+        wasmtime::Collector::DeferredReferenceCounting
+      }
+      Ok(value) if value == "drc" => {
+        wasmtime::Collector::DeferredReferenceCounting
+      }
+      #[cfg(all(
+        feature = "js2wasm_gc_copying",
+        not(feature = "js2wasm_deno_poc_replay")
+      ))]
+      Ok(value) if value == "copying" => wasmtime::Collector::Copying,
+      other => {
+        return Err(format!("unsupported V8X_JS2WASM_GC_COLLECTOR: {other:?}"));
+      }
+    });
     config
       .wasm_function_references(true)
       .wasm_gc(true)
