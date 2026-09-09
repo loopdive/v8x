@@ -150,6 +150,7 @@ pub(super) fn transfer_into(
       let value = runtime.realm_number(length as f64)?;
       runtime.realm_set(object, key, value)?;
     }
+    let mut definitions = Vec::new();
     for (key, value, attributes) in &node.properties {
       let key =
         runtime.realm_string(&key.encode_utf16().collect::<Vec<_>>())?;
@@ -157,7 +158,16 @@ pub(super) fn transfer_into(
         Some(value) => *value,
         None => into_realm(runtime, owner, *value)?,
       };
-      runtime.realm_define_data(object, key, value, *attributes)?;
+      if target.is_none() {
+        definitions.push((key, value, *attributes));
+      } else {
+        runtime.realm_define_data(object, key, value, *attributes)?;
+      }
+    }
+    // Only newly allocated, unpublished nodes. Seeded or already visible
+    // objects retain immediate operations and exception ordering.
+    if !definitions.is_empty() {
+      runtime.realm_define_many(object, &definitions)?;
     }
   }
   let result = handles[&(root as usize)];

@@ -8,6 +8,20 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String> {
+    use wasmtime::AsContextMut;
+    shared_buffers::packet(
+      self.store.as_context_mut(),
+      self.realm_instance,
+      bytes,
+    )
+  }
+  fn realm_has_export(&mut self, name: &str) -> bool {
+    self
+      .realm_instance
+      .get_func(&mut self.store, name)
+      .is_some()
+  }
   fn realm_adopt_buffer(
     &mut self,
     host: crate::js2wasm::RetainedHostBuffer,
@@ -62,6 +76,8 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String>;
+  fn realm_has_export(&mut self, name: &str) -> bool;
   fn realm_adopt_buffer(
     &mut self,
     host: crate::js2wasm::RetainedHostBuffer,
@@ -154,6 +170,11 @@ pub(crate) trait RealmAccess {
   }
 
   fn realm_string(&mut self, units: &[u16]) -> Result<RealmValue, String> {
+    if self.realm_has_export("__v8x_value_string_from_buffer") {
+      let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+      let packet = self.realm_packet(&bytes)?;
+      return self.realm_handle("__v8x_value_string_from_buffer", &[packet]);
+    }
     let mut value = self.realm_handle("__v8x_value_string_empty", &[])?;
     for unit in units {
       value = self.realm_handle(
@@ -267,6 +288,41 @@ pub(crate) trait RealmAccess {
     Ok(())
   }
 
+  fn realm_define_many(
+    &mut self,
+    object: RealmValue,
+    entries: &[(RealmValue, RealmValue, u32)],
+  ) -> Result<(), String> {
+    let owner = self.realm_check(object)?;
+    if entries.len() < 4 || !self.realm_has_export("__v8x_value_define_packet")
+    {
+      for &(key, value, flags) in entries {
+        self.realm_define_data(object, key, value, flags)?;
+      }
+      return Ok(());
+    }
+    let mut bytes = Vec::new();
+    for &(key, value, flags) in entries {
+      for handle in [
+        self.realm_check(key)?,
+        self.realm_check(value)?,
+        flags as f64,
+      ] {
+        if !handle.is_finite()
+          || handle < 0.0
+          || handle > u32::MAX as f64
+          || handle.fract() != 0.0
+        {
+          return Err("property packet value exceeds u32 ABI".into());
+        }
+        bytes.extend_from_slice(&(handle as u32).to_le_bytes());
+      }
+    }
+    let packet = self.realm_packet(&bytes)?;
+    self.realm_raw("__v8x_value_define_packet", &[owner, packet], false)?;
+    Ok(())
+  }
+
   fn realm_call(
     &mut self,
     callable: RealmValue,
@@ -294,7 +350,10 @@ pub(crate) fn load_realm_for_test(
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
-pub(crate) fn load_graph_for_test(runtime: &mut DenoRuntime, path: &Path) -> Result<(), String> {
+pub(crate) fn load_graph_for_test(
+  runtime: &mut DenoRuntime,
+  path: &Path,
+) -> Result<(), String> {
   let shared = shared_runtime()?;
   let bytes = fs::read(path).map_err(|e| e.to_string())?;
   let module = Module::new(&shared.engine, bytes).map_err(|e| e.to_string())?;
@@ -338,6 +397,27 @@ pub fn js2wasm_test_realm_values(path: &Path) -> Result<(), String> {
   assert!(runtime.realm_as_number(nan)?.is_nan());
   let lone = runtime.realm_string(&[0xd800])?;
   assert_eq!(runtime.realm_as_utf16(lone)?, vec![0xd800]);
+  if runtime.realm_has_export("__v8x_value_string_from_buffer") {
+    for units in [vec![], vec![0, 0xd800, 0xdc00, 0xffff], vec![97; 1024]] {
+      let value = runtime.realm_string(&units)?;
+      assert_eq!(runtime.realm_as_utf16(value)?, units);
+    }
+    let mut definitions = Vec::new();
+    for index in 0..8 {
+      let key = runtime.realm_string(&[b'a' as u16 + index])?;
+      let value = runtime.realm_number(index as f64)?;
+      definitions.push((key, value, 0));
+    }
+    runtime.realm_define_many(obj, &definitions)?;
+    for &(key, value, _) in &definitions {
+      assert_eq!(runtime.realm_get(obj, key)?, value);
+    }
+    // Definition order remains significant when a key appears twice.
+    definitions[7].0 = definitions[0].0;
+    runtime.realm_define_many(obj, &definitions)?;
+    assert_eq!(runtime.realm_get(obj, definitions[0].0)?, definitions[7].1);
+    eprintln!("PASS: bulk UTF-16 round trips and ordered property packets");
+  }
   // Graph execution must not switch the table used by existing realm handles.
   let alternate = DenoRuntime::instantiate_in_store(
     &shared,
@@ -383,6 +463,20 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String> {
+    use wasmtime::AsContextMut;
+    shared_buffers::packet(
+      self.caller.as_context_mut(),
+      self.realm_instance,
+      bytes,
+    )
+  }
+  fn realm_has_export(&mut self, name: &str) -> bool {
+    self
+      .realm_instance
+      .get_func(&mut self.caller, name)
+      .is_some()
+  }
   fn realm_adopt_buffer(
     &mut self,
     host: crate::js2wasm::RetainedHostBuffer,

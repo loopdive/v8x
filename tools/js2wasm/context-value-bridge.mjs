@@ -117,6 +117,30 @@ export function __v8x_value_buffer_storage(id: number): any {
   if (!__v8xHostBufferIds.has(id)) throw new TypeError("not a host-backed buffer handle");
   return __v8xValueAt(id);
 }
+// Private transient transfer packets. Decode UTF-16 explicitly, including lone
+// surrogates, rather than passing through a lossy UTF-8 conversion.
+export function __v8x_value_string_from_buffer(id: number): number {
+  const bytes = new Uint8Array(__v8x_value_buffer_storage(id));
+  if (bytes.length % 2 !== 0) throw new RangeError("invalid UTF-16 packet");
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 2)
+    text += String.fromCharCode(bytes[i] + bytes[i + 1] * 256);
+  __v8xHostBufferIds.delete(id);
+  __v8xValues[id] = undefined;
+  return __v8xKeepValue(text);
+}
+export function __v8x_value_define_packet(owner: number, packet: number): void {
+  const bytes = new Uint8Array(__v8x_value_buffer_storage(packet));
+  if (bytes.length % 12 !== 0) throw new RangeError("invalid property packet");
+  for (let i = 0; i < bytes.length; i += 12) {
+    const key = bytes[i] + bytes[i+1]*256 + bytes[i+2]*65536 + bytes[i+3]*16777216;
+    const value = bytes[i+4] + bytes[i+5]*256 + bytes[i+6]*65536 + bytes[i+7]*16777216;
+    const flags = bytes[i+8] + bytes[i+9]*256 + bytes[i+10]*65536 + bytes[i+11]*16777216;
+    __v8x_value_define_data(owner, key, value, flags);
+  }
+  __v8xHostBufferIds.delete(packet);
+  __v8xValues[packet] = undefined;
+}
 export function __v8x_value_typed_array(buffer: number, kind: number, offset: number, length: number): number {
   const value = __v8x_value_buffer_storage(buffer);
   if (offset < 0 || offset !== Math.floor(offset) || length < 0 || length !== Math.floor(length))
@@ -188,6 +212,8 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_to_number",
   "__v8x_value_buffer_create",
   "__v8x_value_buffer_storage",
+  "__v8x_value_string_from_buffer",
+  "__v8x_value_define_packet",
   "__v8x_value_typed_array",
   "__v8x_value_object",
   "__v8x_value_array",

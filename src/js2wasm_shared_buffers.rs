@@ -11,6 +11,58 @@ pub(super) struct HostBufferBinding {
   handle: f64,
 }
 
+/// One-shot packet, deliberately not registered with the persistent buffer
+/// synchronization hook. The consuming export releases its numeric root.
+pub(super) fn packet(
+  store: StoreContextMut<'_, DenoHostState>,
+  instance: Instance,
+  input: &[u8],
+) -> Result<f64, String> {
+  if input.len() > i32::MAX as usize {
+    return Err("transfer packet exceeds buffer ABI".into());
+  }
+  let mut roots = RootScope::new(store);
+  let mut store = roots.as_context_mut();
+  (|| -> wasmtime::Result<f64> {
+    let create = instance
+      .get_typed_func::<f64, f64>(&mut store, "__v8x_value_buffer_create")?;
+    let handle = create.call(&mut store, input.len() as f64)?;
+    let storage = instance
+      .get_func(&mut store, "__v8x_value_buffer_storage")
+      .ok_or_else(|| wasmtime::Error::msg("missing packet storage export"))?;
+    let mut raw = [Val::ExternRef(None)];
+    storage.call(&mut store, &[Val::F64(handle.to_bits())], &mut raw)?;
+    let external = raw[0]
+      .externref()
+      .and_then(|v| v.copied())
+      .ok_or_else(|| wasmtime::Error::msg("packet storage is not externref"))?;
+    let value = AnyRef::convert_extern(&mut store, external)?;
+    let vector = value
+      .as_struct(&store)?
+      .ok_or_else(|| wasmtime::Error::msg("packet storage is not a struct"))?;
+    if vector.field(&mut store, 0)?.i32() != Some(input.len() as i32) {
+      return Err(wasmtime::Error::msg("invalid packet length ABI"));
+    }
+    let data = vector.field(&mut store, 1)?;
+    let array = data
+      .anyref()
+      .and_then(|v| v.copied())
+      .ok_or_else(|| wasmtime::Error::msg("missing packet byte array"))?
+      .as_array(&store)?
+      .ok_or_else(|| wasmtime::Error::msg("invalid packet byte array"))?;
+    if array.len(&store)? as usize != input.len()
+      || !matches!(array.ty(&store)?.element_type(), wasmtime::StorageType::I8)
+    {
+      return Err(wasmtime::Error::msg("incompatible packet byte ABI"));
+    }
+    for (index, byte) in input.iter().enumerate() {
+      array.set(&mut store, index as u32, Val::I32(*byte as i32))?;
+    }
+    Ok(handle)
+  })()
+  .map_err(|error| format!("write transfer packet: {error:#}"))
+}
+
 /// No Wasm calls here: a return hook may run with a pending Wasm exception.
 pub(super) fn synchronize(
   store: StoreContextMut<'_, DenoHostState>,
