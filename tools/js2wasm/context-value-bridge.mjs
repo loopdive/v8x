@@ -12,7 +12,8 @@ __v8xValueIds.set(globalThis, 1);
 // Map uses SameValueZero. The bridge deliberately distinguishes signed zero.
 let __v8xNegativeZeroId = -1;
 function __v8xValueAt(id: number): any {
-  if (id < 0 || id !== Math.floor(id) || id >= __v8xValues.length)
+  // Reject fractional and non-finite ABI inputs using arithmetic only.
+  if (id < 0 || id % 1 !== 0 || id >= __v8xValues.length)
     throw new RangeError("invalid realm value handle");
   return __v8xValues[id];
 }
@@ -115,7 +116,7 @@ const __v8xPacketIds = new Set<number>();
 // Native-only, unpublished, one-shot packets do not need canonical identity.
 // Keep them rooted, but avoid the object-key bucket scan on insert/delete.
 export function __v8x_value_packet_create(length: number): number {
-  if (length < 0 || length > 2147483647 || length !== Math.floor(length))
+  if (length < 0 || length > 2147483647 || length % 1 !== 0)
     throw new RangeError("invalid transfer packet length");
   const id = __v8xValues.length;
   __v8xValues.push(new ArrayBuffer(length));
@@ -130,7 +131,7 @@ function __v8xRetirePacket(id: number): void {
   __v8xValues[id] = undefined;
 }
 export function __v8x_value_buffer_create(length: number): number {
-  if (length < 0 || length > 2147483647 || length !== Math.floor(length))
+  if (length < 0 || length > 2147483647 || length % 1 !== 0)
     throw new RangeError("invalid host buffer length");
   const id = __v8xKeepValue(new ArrayBuffer(length));
   __v8xHostBufferIds.add(id);
@@ -166,7 +167,7 @@ export function __v8x_value_define_packet(owner: number, packet: number): void {
 }
 export function __v8x_value_typed_array(buffer: number, kind: number, offset: number, length: number): number {
   const value = __v8x_value_buffer_storage(buffer);
-  if (offset < 0 || offset !== Math.floor(offset) || length < 0 || length !== Math.floor(length))
+  if (offset < 0 || offset % 1 !== 0 || length < 0 || length % 1 !== 0)
     throw new RangeError("invalid host view range");
   if (kind === 0) return __v8xKeepValue(new Uint8Array(value, offset, length));
   if (kind === 1) return __v8xKeepValue(new Uint16Array(value, offset, length));
@@ -191,7 +192,7 @@ export function __v8x_value_set(owner: number, key: number, value: number): void
   __v8xValueAt(owner)[__v8xValueAt(key)] = __v8xValueAt(value);
 }
 export function __v8x_value_define_data(owner: number, key: number, value: number, flags: number): void {
-  if (flags < 0 || flags > 7 || flags !== Math.floor(flags))
+  if (flags < 0 || flags > 7 || flags % 1 !== 0)
     throw new RangeError("invalid property attributes");
   Object.defineProperty(__v8xValueAt(owner), __v8xValueAt(key), {
     value: __v8xValueAt(value), writable: (flags & 1) === 0,

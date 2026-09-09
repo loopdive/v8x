@@ -15,6 +15,9 @@ if ((globalThis as any).hostNumber !== 42) throw new Error("host seed missing du
 if ((globalThis as any).bootFail) throw new Error("requested bootstrap failure");
 ` : "";
 const applicationSource = `
+(globalThis as any).poisonMathForBridge = function():void {
+  (globalThis as any).Math = { floor: function():never { throw new Error("realm Math.floor was called"); } };
+};
 (globalThis as any).stringStorageCases = function(seed:any):any {
   let deep:any = seed;
   for (let i = 0; i < 128; i++) deep = deep + seed;
@@ -197,4 +200,22 @@ const view = e.__v8x_value_typed_array(persistent, 0, 0, 16);
 assert.equal(e.__v8x_value_get(view, str("buffer")), persistent);
 assert.equal(e.__v8x_value_get(view, str("buffer")), persistent);
 console.log("PASS: transient packet retirement and persistent buffer identity");
+const poisonMath = e.__v8x_value_get(global, str("poisonMathForBridge"));
+e.__v8x_value_call(poisonMath, global, e.__v8x_value_array());
+assert.equal(e.__v8x_value_kind(-0), 0);
+const integerKey = str("integer-validation");
+for (const invalid of [-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER]) {
+  assert.throws(() => e.__v8x_value_kind(invalid));
+  assert.throws(() => e.__v8x_value_buffer_create(invalid));
+  assert.throws(() => e.__v8x_value_packet_create(invalid));
+  assert.throws(() => e.__v8x_value_typed_array(persistent, 0, invalid, 0));
+  assert.throws(() => e.__v8x_value_typed_array(persistent, 0, 0, invalid));
+  assert.throws(() => e.__v8x_value_define_data(obj, integerKey, positiveZero, invalid));
+}
+assert.equal(e.__v8x_value_string_from_buffer(e.__v8x_value_packet_create(-0)), str(""));
+assert.equal(e.__v8x_value_get(e.__v8x_value_typed_array(persistent, 0, -0, 0), str("buffer")), persistent);
+for (let flags = 0; flags <= 7; flags++)
+  e.__v8x_value_define_data(e.__v8x_value_object(), integerKey, positiveZero, flags);
+assert.throws(() => e.__v8x_value_define_data(obj, integerKey, positiveZero, 8));
+console.log("PASS: arithmetic integer validation, NaN/infinities/signed zero, and replaced realm Math");
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
