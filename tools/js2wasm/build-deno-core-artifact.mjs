@@ -1030,6 +1030,10 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   ];
   if (execution === "aot") {
     files[`${appRoot}/aot-program.ts`] = aotHelloWorldSource(exactUsage);
+    const refusal = await import(pathToFileURL(join(js2, "scripts/runtime-eval-provider.mjs")).href);
+    // Resolve generic dynamic-call/eval branches locally with the existing
+    // explicit-refusal implementation. This contains no parser/interpreter.
+    files[`${appRoot}/entry.ts`] += "\n" + refusal.buildRuntimeEvalRefusalProviderSource();
     files[`${appRoot}/entry.ts`] = 'import { runAotHostScript } from "./aot-program.ts";\n' +
       files[`${appRoot}/entry.ts`].replace("(0, eval)(readHostScript())", "runAotHostScript(readHostScript())");
     graphInputs[graphInputs.length - 1] = recordInput("generated/entry.ts", Buffer.from(files[`${appRoot}/entry.ts`]), { role: "closed-world-aot-router" });
