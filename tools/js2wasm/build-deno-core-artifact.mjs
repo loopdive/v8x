@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints } from "./context-value-bridge.mjs";
 
 import { stagedCoreSource } from "./staged-core.mjs";
+import { aotHelloWorldSource } from "./aot-hello-world.mjs";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
@@ -309,6 +310,7 @@ function parseArgs(argv) {
     "provider-out",
     "provenance-out",
     "profile",
+    "execution",
   ]);
   for (const key of args.keys()) {
     if (!allowed.has(key)) fail(`unsupported --${key}`);
@@ -330,10 +332,14 @@ function parseArgs(argv) {
     js2: requiredInput("js2"),
     deno: requiredInput("deno"),
     output: requiredOutput("out"),
-    providerOutput: requiredOutput("provider-out"),
+    providerOutput: args.get("execution") === "aot" ? undefined : requiredOutput("provider-out"),
     provenanceOutput: requiredOutput("provenance-out"),
     profile: args.get("profile") ?? "poc",
+    execution: args.get("execution") ?? "dynamic",
   };
+  if (!["aot", "dynamic"].includes(parsed.execution)) fail("--execution must be aot or dynamic");
+  if (parsed.execution === "aot" && parsed.profile !== "runtime") fail("AOT execution requires --profile=runtime");
+  if (parsed.execution === "aot" && args.has("provider-out")) fail("AOT execution does not emit a provider; omit --provider-out");
   if (parsed.profile !== "poc" && parsed.profile !== "runtime") {
     fail(`--profile must be poc or runtime, received ${parsed.profile}`);
   }
@@ -713,7 +719,7 @@ function inputSetDigest(inputs) {
 }
 
 async function main() {
-  const { v8x, js2, deno, output, providerOutput, provenanceOutput, profile } =
+  const { v8x, js2, deno, output, providerOutput, provenanceOutput, profile, execution } =
     parseArgs(process.argv.slice(2));
   if (v8x !== SCRIPT_V8X_ROOT) {
     fail(
@@ -750,7 +756,7 @@ async function main() {
 
   const denoSources = new Map();
   const lockSources = [];
-  const selectedInputs = profile === "poc" ? DENO_INPUTS : CORE_SCRIPT_INPUTS;
+  const selectedInputs = profile === "poc" || execution === "aot" ? DENO_INPUTS : CORE_SCRIPT_INPUTS;
   for (const input of selectedInputs) {
     const raw = sourceFromPinnedDeno(deno, input.gitPath);
     const bytes = input.extract ? extractHelloWorldUsage(raw) : raw;
@@ -1022,17 +1028,28 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
       { role: profile === "poc" ? "closed-world-router" : "runtime-router" },
     ),
   ];
+  if (execution === "aot") {
+    files[`${appRoot}/aot-program.ts`] = aotHelloWorldSource(exactUsage);
+    files[`${appRoot}/entry.ts`] = 'import { runAotHostScript } from "./aot-program.ts";\n' +
+      files[`${appRoot}/entry.ts`].replace("(0, eval)(readHostScript())", "runAotHostScript(readHostScript())");
+    graphInputs[graphInputs.length - 1] = recordInput("generated/entry.ts", Buffer.from(files[`${appRoot}/entry.ts`]), { role: "closed-world-aot-router" });
+    graphInputs.push(recordInput("generated/aot-program.ts", Buffer.from(files[`${appRoot}/aot-program.ts`]), { role: "aot-program" }));
+  }
   const sourceGraphSha256 = inputSetDigest(graphInputs);
-  const appCompileOptions = profile === "runtime" ? {
+  const appCompileOptions = execution === "aot" ? {
+    ...COMPILE_OPTIONS,
+    standaloneSymbolState: "export",
+  } : profile === "runtime" ? {
     ...COMPILE_OPTIONS,
     standaloneSymbolState: { module: "js2wasm:runtime-eval", reexport: true },
     link: ["js2wasm:runtime-eval"],
   } : COMPILE_OPTIONS;
   const compileOptionsPreimage = profile === "poc" ? COMPILE_OPTIONS_PREIMAGE : {
     ...COMPILE_OPTIONS_PREIMAGE,
+    ...(execution === "aot" ? { compiler: { api: "compileMulti", provider_kind: "none" }, execution } : {}),
     entry: `${appRoot}/entry.ts`,
     options: appCompileOptions,
-    source_paths: CORE_SCRIPT_INPUTS.map((input) => input.path),
+    source_paths: selectedInputs.map((input) => input.path),
   };
   const canonicalCompileOptions = canonicalJson(compileOptionsPreimage);
   const computedCompileOptionsDigest = sha256(canonicalCompileOptions);
@@ -1058,7 +1075,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   // The frozen POC is function-import-only. Runtime Symbol globals require
   // the real provider; its isolated-child check runs after provider compilation.
   if (profile === "poc") assertRawModuleInitializesWithStubImports(appBinary, profile);
-  if (
+  if (execution !== "aot" &&
     !WebAssembly.Module.imports(appModule).some(
       (entry) => entry.module === "js2wasm:runtime-eval",
     )
@@ -1096,6 +1113,25 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     }
   }
   atomicWrite(output, appBinary);
+
+  if (execution === "aot") {
+    const imports = WebAssembly.Module.imports(appModule);
+    const forbidden = imports.filter((entry) => entry.module !== "v8x:deno" || entry.kind !== "function");
+    if (forbidden.length) fail(`AOT artifact retains non-host dependencies: ${JSON.stringify(forbidden)}`);
+    assertRawModuleInitializesWithStubImports(appBinary, profile);
+    const provenance = {
+      schema_version: 2, kind: "v8x-js2wasm-deno-aot-raw-inputs", profile, execution,
+      revisions: { v8x: v8xRef, js2: EXPECTED_JS2_REF, deno: EXPECTED_DENO_REF },
+      sources: lockSources, source_graph: { sha256: sourceGraphSha256, inputs: graphInputs },
+      compile_options: { canonical_json: canonicalCompileOptions, sha256: computedCompileOptionsDigest },
+      runtime_eval_provider: null, imports,
+      artifacts: { app: recordInput("deno-core.wasm", appBinary, { role: "app" }) },
+      wasmtime: { version: WASMTIME_VERSION, engine_config: ENGINE_CONFIG },
+    };
+    atomicWrite(provenanceOutput, JSON.stringify(provenance, null, 2) + "\n");
+    console.log(JSON.stringify(provenance, null, 2));
+    return;
+  }
 
   const provider = await import(
     pathToFileURL(join(js2, "scripts/runtime-eval-provider.mjs")).href
