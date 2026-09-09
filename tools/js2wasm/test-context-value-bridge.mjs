@@ -158,4 +158,22 @@ assert.equal(threw,0);
 assert.equal(exception,e.__v8x_value_get(global,str("coercionError")));
 
 console.log("PASS: numeric strings, number-hint coercion, and original exception identity");
+const positiveZero=e.__v8x_value_number(0), negativeZero=e.__v8x_value_number(-0);
+const identities=[];
+for(let i=0;i<512;i++) identities.push(e.__v8x_value_object());
+assert.equal(new Set(identities).size,512);
+for(let i=0;i<512;i++) {
+  const n=e.__v8x_value_number(i+1000);
+  assert.equal(e.__v8x_value_number(i+1000),n);
+}
+assert.equal(e.__v8x_value_number(-0),negativeZero);
+assert.equal(e.__v8x_value_number(0),positiveZero);
+assert.notEqual(positiveZero,negativeZero);
+assert.equal(e.__v8x_value_as_number(positiveZero),0);
+assert.ok(Object.is(e.__v8x_value_as_number(negativeZero),-0));
+const repeatedPacket=e.__v8x_value_buffer_create(0);
+assert.equal(e.__v8x_value_string_from_buffer(repeatedPacket),str(""));
+assert.throws(()=>e.__v8x_value_buffer_storage(repeatedPacket));
+assert.equal(e.__v8x_value_string_from_buffer(e.__v8x_value_buffer_create(0)),str(""));
+console.log("PASS: indexed handle growth, signed-zero stability, and packet retirement");
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);

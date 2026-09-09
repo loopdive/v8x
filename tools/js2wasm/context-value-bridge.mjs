@@ -6,21 +6,28 @@
 export const CONTEXT_VALUE_BRIDGE_SOURCE = `
 declare function __v8x_host_call(id: number, receiver: number, args: number): number;
 const __v8xValues: any[] = [undefined, globalThis];
+const __v8xValueIds = new Map<any, number>();
+__v8xValueIds.set(undefined, 0);
+__v8xValueIds.set(globalThis, 1);
+// Map uses SameValueZero. The bridge deliberately distinguishes signed zero.
+let __v8xNegativeZeroId = -1;
 function __v8xValueAt(id: number): any {
   if (id < 0 || id !== Math.floor(id) || id >= __v8xValues.length)
     throw new RangeError("invalid realm value handle");
   return __v8xValues[id];
 }
 function __v8xKeepValue(value: any): number {
-  for (let i = 0; i < __v8xValues.length; i++) {
-    const previous = __v8xValues[i];
-    if (previous === value) {
-      if (typeof value !== "number" || value !== 0 || 1 / previous === 1 / value) return i;
-    } else if (typeof previous === "number" && typeof value === "number"
-      && previous !== previous && value !== value) return i;
+  const negativeZero = typeof value === "number" && value === 0 && 1 / value < 0;
+  if (negativeZero && __v8xNegativeZeroId >= 0) return __v8xNegativeZeroId;
+  if (!negativeZero) {
+    const previous = __v8xValueIds.get(value);
+    if (previous !== undefined) return previous;
   }
   __v8xValues.push(value);
-  return __v8xValues.length - 1;
+  const id = __v8xValues.length - 1;
+  if (negativeZero) __v8xNegativeZeroId = id;
+  else __v8xValueIds.set(value, id);
+  return id;
 }
 // Compiler-owned seam: identity in a single module, a canonical callable
 // adapter when the runtime-eval provider can observe the host closure.
@@ -126,6 +133,7 @@ export function __v8x_value_string_from_buffer(id: number): number {
   for (let i = 0; i < bytes.length; i += 2)
     text += String.fromCharCode(bytes[i] + bytes[i + 1] * 256);
   __v8xHostBufferIds.delete(id);
+  __v8xValueIds.delete(__v8xValues[id]);
   __v8xValues[id] = undefined;
   return __v8xKeepValue(text);
 }
@@ -139,6 +147,7 @@ export function __v8x_value_define_packet(owner: number, packet: number): void {
     __v8x_value_define_data(owner, key, value, flags);
   }
   __v8xHostBufferIds.delete(packet);
+  __v8xValueIds.delete(__v8xValues[packet]);
   __v8xValues[packet] = undefined;
 }
 export function __v8x_value_typed_array(buffer: number, kind: number, offset: number, length: number): number {
