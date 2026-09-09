@@ -28,7 +28,7 @@ import { stagedCoreSource } from "./staged-core.mjs";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "bda15bdf70baefc3d7620f32a03dc3660c2fd005";
+const EXPECTED_JS2_REF = "72f281a632ac2b86e6fa2aaf5b76df2a7fd7b5f4";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
