@@ -1855,6 +1855,7 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__Dispose(isolate: *mut RealIsolate) {
+  let _phase = crate::js2wasm_spike::DenoPhaseTimer::new("isolate-dispose");
   if isolate.is_null() {
     return;
   }
@@ -3989,6 +3990,8 @@ pub extern "C" fn v8__Function__Call(
   argc: int,
   argv: *const *const Value,
 ) -> *const Value {
+  let _phase =
+    crate::js2wasm_spike::DenoPhaseTimer::new("native-function-call");
   invoke_function(function, receiver, argc, argv, false)
 }
 
@@ -6209,6 +6212,7 @@ pub extern "C" fn v8__Script__Run(
   script: *const Script,
   context: *const Context,
 ) -> *const Value {
+  let _phase = crate::js2wasm_spike::DenoPhaseTimer::new("native-script-run");
   let Some(HeapValue::Script(state)) = (unsafe { heap_value(script) }) else {
     return ptr::null();
   };
@@ -7737,6 +7741,8 @@ pub extern "C" fn v8__Module__Evaluate(
   module: *const Module,
   context: *const Context,
 ) -> *const Value {
+  let _phase =
+    crate::js2wasm_spike::DenoPhaseTimer::new("native-module-evaluate");
   let Some(state) = (unsafe { module_state(module) }) else {
     return ptr::null();
   };

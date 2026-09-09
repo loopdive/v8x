@@ -1443,8 +1443,34 @@ pub struct Js2WasmRuntimeStats {
   pub runtime_eval_instantiations: usize,
 }
 
+pub(crate) struct DenoPhaseTimer {
+  label: &'static str,
+  start: Option<std::time::Instant>,
+}
+impl DenoPhaseTimer {
+  pub(crate) fn new(label: &'static str) -> Self {
+    Self {
+      label,
+      start: std::env::var_os("V8X_JS2WASM_PROFILE_PHASES")
+        .map(|_| std::time::Instant::now()),
+    }
+  }
+}
+impl Drop for DenoPhaseTimer {
+  fn drop(&mut self) {
+    if let Some(start) = self.start {
+      eprintln!(
+        "V8X_PHASE {} {:.3} ms (inclusive)",
+        self.label,
+        start.elapsed().as_secs_f64() * 1000.0
+      );
+    }
+  }
+}
+
 impl SharedDenoRuntime {
   fn new() -> Result<Self, String> {
+    let _phase = DenoPhaseTimer::new("shared-runtime-setup");
     // Lock and read both executable replay artifacts before constructing any
     // Wasmtime Module. This deliberately happens before the shared runtime is
     // published through OnceLock, so every replay consumer sees the same
@@ -1461,11 +1487,21 @@ impl SharedDenoRuntime {
       .generate_address_map(false)
       .wasm_backtrace_details(WasmBacktraceDetails::Disable);
     // js2 can emit multi-megabyte functions for closed interpreter graphs.
-    // Cranelift's default speed optimizations exhaust bounded packaging hosts;
-    // unoptimized code preserves Wasm semantics and remains compatible with
-    // the compiler-free engine that deserializes the resulting AOT artifact.
+    // Keep bounded packaging hosts on unoptimized code by default; explicitly
+    // opt into native optimization when the build host has sufficient memory.
+    // Both choices remain compatible with compiler-free artifact loading.
     #[cfg(feature = "js2wasm_runtime_compile")]
-    config.cranelift_opt_level(OptLevel::None);
+    config.cranelift_opt_level(
+      match std::env::var("V8X_JS2WASM_CRANELIFT_OPT") {
+        Err(std::env::VarError::NotPresent) => OptLevel::None,
+        Ok(value) if value == "none" => OptLevel::None,
+        Ok(value) if value == "speed" => OptLevel::Speed,
+        Ok(value) if value == "speed_and_size" => OptLevel::SpeedAndSize,
+        other => {
+          return Err(format!("invalid V8X_JS2WASM_CRANELIFT_OPT: {other:?}"));
+        }
+      },
+    );
     let engine = Engine::new(&config)
       .map_err(|error| format!("configure embedded Wasmtime: {error}"))?;
     let mut linker = Linker::new(&engine);
@@ -1655,6 +1691,7 @@ impl SharedDenoRuntime {
     &self,
     artifact: &Path,
   ) -> Result<PreparedModule, String> {
+    let _phase = DenoPhaseTimer::new("core-load-and-prepare");
     let artifact = artifact.canonicalize().map_err(|error| {
       format!(
         "resolve precompiled js2wasm artifact {}: {error}",
@@ -1819,6 +1856,7 @@ impl SharedDenoRuntime {
   }
 
   fn prepare_module(&self, module: &Module) -> Result<PreparedModule, String> {
+    let _phase = DenoPhaseTimer::new("module-link-prepare");
     let mut needs_runtime_eval = false;
     for import in module.imports() {
       let known_deno_import = import.module() == DENO_IMPORT_MODULE
@@ -1960,6 +1998,7 @@ impl SharedDenoRuntime {
   }
 
   fn runtime_eval_provider(&self) -> Result<Module, String> {
+    let _phase = DenoPhaseTimer::new("provider-load");
     let mut cached = self
       .runtime_eval_provider
       .lock()
@@ -2374,6 +2413,7 @@ impl DenoRuntime {
     cwd: PathBuf,
     heap_isolate: usize,
   ) -> Result<Self, String> {
+    let _phase = DenoPhaseTimer::new("store-and-instances");
     let cwd = cwd.to_string_lossy().encode_utf16().collect();
     let mut store = Store::new(
       &shared.engine,
@@ -2655,6 +2695,7 @@ impl DenoRuntime {
     &mut self,
     source: &str,
   ) -> Result<DenoScriptResult, String> {
+    let _phase = DenoPhaseTimer::new("usage-script");
     self.store.data_mut().script = source.encode_utf16().collect();
     let status = self
       .require_function(DENO_CORE_USAGE_STAGE)?
@@ -2744,6 +2785,13 @@ impl DenoRuntime {
     &mut self,
     phase: usize,
   ) -> Result<bool, String> {
+    let _phase = DenoPhaseTimer::new(match phase {
+      0 => "core-script-0",
+      1 => "core-script-1",
+      2 => "core-script-2",
+      3 => "core-script-3",
+      _ => "core-script-other",
+    });
     let Some(run) = self
       .instance
       .get_func(&mut self.store, "__v8x_run_deno_core_script")
@@ -2773,6 +2821,7 @@ impl DenoRuntime {
   }
 
   fn run_deferred_module_init(&mut self) -> Result<(), String> {
+    let _phase = DenoPhaseTimer::new("module-init");
     let Some(init) = self.instance.get_func(&mut self.store, "__module_init")
     else {
       return Ok(());
