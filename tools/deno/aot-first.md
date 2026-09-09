@@ -1,5 +1,10 @@
 # Closed-world AOT Deno example
 
+For the faster measured collector, build the optional `js2wasm_gc_copying`
+feature and select `V8X_JS2WASM_GC_COLLECTOR=copying` for precompile and replay.
+See [collector comparison](results/2026-09-09-copying-processes.md). Existing
+DRC artifacts remain supported by default; collector variants are not interchangeable.
+
 Build with `--profile=runtime --execution=aot`, omitting `--provider-out`.
 The builder extracts and hash-verifies the exact upstream hello_world script,
 compiles its body into the main core artifact, and stores the expected source
