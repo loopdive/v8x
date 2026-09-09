@@ -35,6 +35,8 @@ mod graph_packages;
 mod realm_values;
 #[path = "js2wasm_shared_buffers.rs"]
 mod shared_buffers;
+#[path = "js2wasm_shared_strings.rs"]
+mod shared_strings;
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub fn js2wasm_test_graph_packages() {
   graph_packages::test_graph_packages_bind_entry_source_and_bytes();

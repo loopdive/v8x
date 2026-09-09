@@ -45,6 +45,17 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_bulk_utf16(
+    &mut self,
+    handle: f64,
+  ) -> Result<Option<Vec<u16>>, String> {
+    use wasmtime::AsContextMut;
+    shared_strings::read(
+      self.store.as_context_mut(),
+      self.realm_instance,
+      handle,
+    )
+  }
   fn realm_string_cache(&mut self) -> &mut HashMap<Vec<u16>, f64> {
     &mut self.store.data_mut().string_handles
   }
@@ -117,6 +128,10 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_bulk_utf16(
+    &mut self,
+    handle: f64,
+  ) -> Result<Option<Vec<u16>>, String>;
   fn realm_string_cache(&mut self) -> &mut HashMap<Vec<u16>, f64>;
   fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String>;
   fn realm_has_export(&mut self, name: &str) -> bool;
@@ -244,6 +259,9 @@ pub(crate) trait RealmAccess {
 
   fn realm_as_utf16(&mut self, value: RealmValue) -> Result<Vec<u16>, String> {
     let handle = self.realm_check(value)?;
+    if let Some(units) = self.realm_bulk_utf16(handle)? {
+      return Ok(units);
+    }
     let length = self.realm_raw("__v8x_value_utf16_length", &[handle], true)?;
     if !length.is_finite()
       || length < 0.0
@@ -490,6 +508,39 @@ pub fn js2wasm_test_realm_values(path: &Path) -> Result<(), String> {
   runtime.realm_string(&long_key)?;
   assert!(!runtime.store.data().string_handles.contains_key(&long_key));
   // Exercise root relocation, not merely allocation, under a moving collector.
+  if runtime.realm_has_export("__v8x_value_string_storage") {
+    let name = runtime
+      .realm_string(&"stringStorageCases".encode_utf16().collect::<Vec<_>>())?;
+    let make = runtime.realm_get(global, name)?;
+    let seed_units = vec![0xd800, 65, 0, 0xffff, 0xdc00];
+    let seed = runtime.realm_string(&seed_units)?;
+    let inputs = runtime.realm_array()?;
+    let zero = runtime.realm_string(&[48])?;
+    runtime.realm_set(inputs, zero, seed)?;
+    let cases = runtime.realm_call(make, global, inputs)?;
+    let expected = [
+      seed_units[1..4].to_vec(),
+      seed_units.repeat(2),
+      seed_units.repeat(129),
+      vec![],
+    ];
+    for pass in 0..2 {
+      runtime.store.gc(None).map_err(|error| error.to_string())?;
+      for (index, units) in expected.iter().enumerate() {
+        let key = runtime.realm_string(&[48 + index as u16])?;
+        let value = runtime.realm_get(cases, key)?;
+        assert_eq!(
+          runtime.realm_as_utf16(value)?,
+          *units,
+          "bulk string case {index}, GC pass {pass}"
+        );
+      }
+    }
+    assert!(runtime.realm_as_utf16(obj).is_err());
+    eprintln!(
+      "PASS: bulk UTF-16 slices, ropes, deep concatenation and invalid type after GC"
+    );
+  }
   // The same check also runs with the historical DRC collector.
   runtime.store.gc(None).map_err(|error| error.to_string())?;
   assert_eq!(runtime.realm_as_utf16(text)?, units);
@@ -545,6 +596,17 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_bulk_utf16(
+    &mut self,
+    handle: f64,
+  ) -> Result<Option<Vec<u16>>, String> {
+    use wasmtime::AsContextMut;
+    shared_strings::read(
+      self.caller.as_context_mut(),
+      self.realm_instance,
+      handle,
+    )
+  }
   fn realm_string_cache(&mut self) -> &mut HashMap<Vec<u16>, f64> {
     &mut self.caller.data_mut().string_handles
   }

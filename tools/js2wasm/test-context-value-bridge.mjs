@@ -15,6 +15,11 @@ if ((globalThis as any).hostNumber !== 42) throw new Error("host seed missing du
 if ((globalThis as any).bootFail) throw new Error("requested bootstrap failure");
 ` : "";
 const applicationSource = `
+(globalThis as any).stringStorageCases = function(seed:any):any {
+  let deep:any = seed;
+  for (let i = 0; i < 128; i++) deep = deep + seed;
+  return [seed.slice(1, -1), seed + seed, deep, ""];
+};
 (globalThis as any).coercionError = { marker: 73 };
 (globalThis as any).coercionObject = {
   [Symbol.toPrimitive](hint:any):any {

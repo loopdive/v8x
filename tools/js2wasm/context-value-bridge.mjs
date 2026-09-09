@@ -206,6 +206,12 @@ export function __v8x_value_utf16_length(id: number): number {
   if (typeof value !== "string") throw new TypeError("expected string handle");
   return value.length;
 }
+// Read-only compiler storage ABI, validated by the native reader.
+export function __v8x_value_string_storage(id: number): any {
+  const value = __v8xValueAt(id);
+  if (typeof value !== "string") throw new TypeError("expected string handle");
+  return value;
+}
 export function __v8x_value_utf16_unit(id: number, index: number): number {
   const value = __v8xValueAt(id);
   if (typeof value !== "string") throw new TypeError("expected string handle");
@@ -248,6 +254,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_define_data",
   "__v8x_value_call",
   "__v8x_value_utf16_length",
+  "__v8x_value_string_storage",
   "__v8x_value_utf16_unit",
   "__v8x_value_string_empty",
   "__v8x_value_string_append",
