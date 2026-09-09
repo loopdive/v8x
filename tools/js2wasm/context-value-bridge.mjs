@@ -111,6 +111,24 @@ export function __v8x_value_to_number(id: number): number {
 }
 
 const __v8xHostBufferIds = new Set<number>();
+const __v8xPacketIds = new Set<number>();
+// Native-only, unpublished, one-shot packets do not need canonical identity.
+// Keep them rooted, but avoid the object-key bucket scan on insert/delete.
+export function __v8x_value_packet_create(length: number): number {
+  if (length < 0 || length > 2147483647 || length !== Math.floor(length))
+    throw new RangeError("invalid transfer packet length");
+  const id = __v8xValues.length;
+  __v8xValues.push(new ArrayBuffer(length));
+  __v8xHostBufferIds.add(id);
+  __v8xPacketIds.add(id);
+  return id;
+}
+function __v8xRetirePacket(id: number): void {
+  __v8xHostBufferIds.delete(id);
+  // Legacy callers may still consume a canonical buffer as a packet.
+  if (!__v8xPacketIds.delete(id)) __v8xValueIds.delete(__v8xValues[id]);
+  __v8xValues[id] = undefined;
+}
 export function __v8x_value_buffer_create(length: number): number {
   if (length < 0 || length > 2147483647 || length !== Math.floor(length))
     throw new RangeError("invalid host buffer length");
@@ -132,9 +150,7 @@ export function __v8x_value_string_from_buffer(id: number): number {
   let text = "";
   for (let i = 0; i < bytes.length; i += 2)
     text += String.fromCharCode(bytes[i] + bytes[i + 1] * 256);
-  __v8xHostBufferIds.delete(id);
-  __v8xValueIds.delete(__v8xValues[id]);
-  __v8xValues[id] = undefined;
+  __v8xRetirePacket(id);
   return __v8xKeepValue(text);
 }
 export function __v8x_value_define_packet(owner: number, packet: number): void {
@@ -146,9 +162,7 @@ export function __v8x_value_define_packet(owner: number, packet: number): void {
     const flags = bytes[i+8] + bytes[i+9]*256 + bytes[i+10]*65536 + bytes[i+11]*16777216;
     __v8x_value_define_data(owner, key, value, flags);
   }
-  __v8xHostBufferIds.delete(packet);
-  __v8xValueIds.delete(__v8xValues[packet]);
-  __v8xValues[packet] = undefined;
+  __v8xRetirePacket(packet);
 }
 export function __v8x_value_typed_array(buffer: number, kind: number, offset: number, length: number): number {
   const value = __v8x_value_buffer_storage(buffer);
@@ -220,6 +234,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_as_number",
   "__v8x_value_to_number",
   "__v8x_value_buffer_create",
+  "__v8x_value_packet_create",
   "__v8x_value_buffer_storage",
   "__v8x_value_string_from_buffer",
   "__v8x_value_define_packet",

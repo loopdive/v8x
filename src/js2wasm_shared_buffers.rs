@@ -24,8 +24,16 @@ pub(super) fn packet(
   let mut roots = RootScope::new(store);
   let mut store = roots.as_context_mut();
   (|| -> wasmtime::Result<f64> {
-    let create = instance
-      .get_typed_func::<f64, f64>(&mut store, "__v8x_value_buffer_create")?;
+    let create_name = if instance
+      .get_func(&mut store, "__v8x_value_packet_create")
+      .is_some()
+    {
+      "__v8x_value_packet_create"
+    } else {
+      "__v8x_value_buffer_create"
+    };
+    let create =
+      instance.get_typed_func::<f64, f64>(&mut store, create_name)?;
     let handle = create.call(&mut store, input.len() as f64)?;
     let storage = instance
       .get_func(&mut store, "__v8x_value_buffer_storage")

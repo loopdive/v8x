@@ -176,4 +176,20 @@ assert.equal(e.__v8x_value_string_from_buffer(repeatedPacket),str(""));
 assert.throws(()=>e.__v8x_value_buffer_storage(repeatedPacket));
 assert.equal(e.__v8x_value_string_from_buffer(e.__v8x_value_buffer_create(0)),str(""));
 console.log("PASS: indexed handle growth, signed-zero stability, and packet retirement");
+const transientIds = new Set();
+for (let i = 0; i < 512; i++) {
+  const packet = e.__v8x_value_packet_create(0);
+  assert.ok(!transientIds.has(packet));
+  transientIds.add(packet);
+  assert.equal(e.__v8x_value_string_from_buffer(packet), str(""));
+  assert.throws(() => e.__v8x_value_buffer_storage(packet));
+  assert.throws(() => e.__v8x_value_string_from_buffer(packet));
+}
+for (const length of [-1, 0.5, NaN, Infinity, 2147483648])
+  assert.throws(() => e.__v8x_value_packet_create(length));
+const persistent = e.__v8x_value_buffer_create(16);
+const view = e.__v8x_value_typed_array(persistent, 0, 0, 16);
+assert.equal(e.__v8x_value_get(view, str("buffer")), persistent);
+assert.equal(e.__v8x_value_get(view, str("buffer")), persistent);
+console.log("PASS: transient packet retirement and persistent buffer identity");
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
