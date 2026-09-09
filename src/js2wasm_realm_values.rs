@@ -8,6 +8,9 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_string_cache(&mut self) -> &mut HashMap<Vec<u16>, f64> {
+    &mut self.store.data_mut().string_handles
+  }
   fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String> {
     use wasmtime::AsContextMut;
     shared_buffers::packet(
@@ -76,6 +79,7 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_string_cache(&mut self) -> &mut HashMap<Vec<u16>, f64>;
   fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String>;
   fn realm_has_export(&mut self, name: &str) -> bool;
   fn realm_adopt_buffer(
@@ -170,17 +174,32 @@ pub(crate) trait RealmAccess {
   }
 
   fn realm_string(&mut self, units: &[u16]) -> Result<RealmValue, String> {
-    if self.realm_has_export("__v8x_value_string_from_buffer") {
+    if units.len() <= 64 {
+      if let Some(handle) = self.realm_string_cache().get(units).copied() {
+        return self.realm_from_handle(handle);
+      }
+    }
+    let value = if self.realm_has_export("__v8x_value_string_from_buffer") {
       let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
       let packet = self.realm_packet(&bytes)?;
-      return self.realm_handle("__v8x_value_string_from_buffer", &[packet]);
-    }
-    let mut value = self.realm_handle("__v8x_value_string_empty", &[])?;
-    for unit in units {
-      value = self.realm_handle(
-        "__v8x_value_string_append",
-        &[value.handle, f64::from(*unit)],
-      )?;
+      self.realm_handle("__v8x_value_string_from_buffer", &[packet])?
+    } else {
+      let mut value = self.realm_handle("__v8x_value_string_empty", &[])?;
+      for unit in units {
+        value = self.realm_handle(
+          "__v8x_value_string_append",
+          &[value.handle, f64::from(*unit)],
+        )?;
+      }
+      value
+    };
+    // Property names dominate repeat transfers. Do not retain unbounded text.
+    if units.len() <= 64 {
+      let cache = self.realm_string_cache();
+      if cache.len() >= 512 {
+        cache.clear();
+      }
+      cache.insert(units.to_vec(), value.handle);
     }
     Ok(value)
   }
@@ -418,6 +437,20 @@ pub fn js2wasm_test_realm_values(path: &Path) -> Result<(), String> {
     assert_eq!(runtime.realm_get(obj, definitions[0].0)?, definitions[7].1);
     eprintln!("PASS: bulk UTF-16 round trips and ordered property packets");
   }
+  // Cache eviction must preserve the canonical handle, including lone UTF-16.
+  assert_eq!(runtime.realm_string(&[0xd800])?, lone);
+  for index in 0..600 {
+    runtime.realm_string(
+      &format!("cache-key-{index}")
+        .encode_utf16()
+        .collect::<Vec<_>>(),
+    )?;
+  }
+  assert!(runtime.store.data().string_handles.len() <= 512);
+  assert_eq!(runtime.realm_string(&[0xd800])?, lone);
+  let long_key = vec![42; 65];
+  runtime.realm_string(&long_key)?;
+  assert!(!runtime.store.data().string_handles.contains_key(&long_key));
   // Exercise root relocation, not merely allocation, under a moving collector.
   // The same check also runs with the historical DRC collector.
   runtime.store.gc(None).map_err(|error| error.to_string())?;
@@ -474,6 +507,9 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_string_cache(&mut self) -> &mut HashMap<Vec<u16>, f64> {
+    &mut self.caller.data_mut().string_handles
+  }
   fn realm_packet(&mut self, bytes: &[u8]) -> Result<f64, String> {
     use wasmtime::AsContextMut;
     shared_buffers::packet(

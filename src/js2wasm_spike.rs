@@ -981,6 +981,9 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  // Numeric handles refer to immutable strings strongly rooted by this realm.
+  // The cache is bounded and never shared across Stores.
+  string_handles: HashMap<Vec<u16>, f64>,
   host_buffers: Vec<shared_buffers::HostBufferBinding>,
   limiter: DenoHeapLimiter,
   realm_id: usize,
@@ -2437,6 +2440,7 @@ impl DenoRuntime {
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        string_handles: HashMap::new(),
         host_buffers: Vec::new(),
         limiter: DenoHeapLimiter { heap_isolate },
         realm_id: 0,
