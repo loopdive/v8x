@@ -981,6 +981,8 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  realm_functions: HashMap<String, realm_values::RealmFunction>,
+  realm_profile: realm_values::RealmCallProfile,
   // Numeric handles refer to immutable strings strongly rooted by this realm.
   // The cache is bounded and never shared across Stores.
   string_handles: HashMap<Vec<u16>, f64>,
@@ -2441,6 +2443,8 @@ impl DenoRuntime {
       &shared.engine,
       DenoHostState {
         string_handles: HashMap::new(),
+        realm_functions: HashMap::new(),
+        realm_profile: realm_values::RealmCallProfile::new(),
         host_buffers: Vec::new(),
         limiter: DenoHeapLimiter { heap_isolate },
         realm_id: 0,

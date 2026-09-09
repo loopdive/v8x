@@ -1,5 +1,136 @@
 use super::*;
 
+/// Store-local typed functions. Validation happens once, before caching.
+#[derive(Clone)]
+pub(super) enum RealmFunction {
+  N0(wasmtime::TypedFunc<(), f64>),
+  V0(wasmtime::TypedFunc<(), ()>),
+  N1(wasmtime::TypedFunc<f64, f64>),
+  V1(wasmtime::TypedFunc<f64, ()>),
+  N2(wasmtime::TypedFunc<(f64, f64), f64>),
+  V2(wasmtime::TypedFunc<(f64, f64), ()>),
+  N3(wasmtime::TypedFunc<(f64, f64, f64), f64>),
+  V3(wasmtime::TypedFunc<(f64, f64, f64), ()>),
+  N4(wasmtime::TypedFunc<(f64, f64, f64, f64), f64>),
+  V4(wasmtime::TypedFunc<(f64, f64, f64, f64), ()>),
+}
+
+fn realm_call(
+  mut store: wasmtime::StoreContextMut<'_, DenoHostState>,
+  instance: Instance,
+  name: &str,
+  args: &[f64],
+  returns: bool,
+) -> wasmtime::Result<f64> {
+  let function = if let Some(function) = store.data().realm_functions.get(name)
+  {
+    function.clone()
+  } else {
+    let function = match (args.len(), returns) {
+      (0, true) => {
+        RealmFunction::N0(instance.get_typed_func(&mut store, name)?)
+      }
+      (0, false) => {
+        RealmFunction::V0(instance.get_typed_func(&mut store, name)?)
+      }
+      (1, true) => {
+        RealmFunction::N1(instance.get_typed_func(&mut store, name)?)
+      }
+      (1, false) => {
+        RealmFunction::V1(instance.get_typed_func(&mut store, name)?)
+      }
+      (2, true) => {
+        RealmFunction::N2(instance.get_typed_func(&mut store, name)?)
+      }
+      (2, false) => {
+        RealmFunction::V2(instance.get_typed_func(&mut store, name)?)
+      }
+      (3, true) => {
+        RealmFunction::N3(instance.get_typed_func(&mut store, name)?)
+      }
+      (3, false) => {
+        RealmFunction::V3(instance.get_typed_func(&mut store, name)?)
+      }
+      (4, true) => {
+        RealmFunction::N4(instance.get_typed_func(&mut store, name)?)
+      }
+      (4, false) => {
+        RealmFunction::V4(instance.get_typed_func(&mut store, name)?)
+      }
+      _ => {
+        return Err(wasmtime::Error::msg("unsupported realm bridge signature"));
+      }
+    };
+    store
+      .data_mut()
+      .realm_functions
+      .insert(name.to_owned(), function.clone());
+    function
+  };
+  match (function, args, returns) {
+    (RealmFunction::N0(f), [], true) => f.call(&mut store, ()),
+    (RealmFunction::V0(f), [], false) => f.call(&mut store, ()).map(|()| 0.0),
+    (RealmFunction::N1(f), [a0], true) => f.call(&mut store, *a0),
+    (RealmFunction::V1(f), [a0], false) => {
+      f.call(&mut store, *a0).map(|()| 0.0)
+    }
+    (RealmFunction::N2(f), [a0, a1], true) => f.call(&mut store, (*a0, *a1)),
+    (RealmFunction::V2(f), [a0, a1], false) => {
+      f.call(&mut store, (*a0, *a1)).map(|()| 0.0)
+    }
+    (RealmFunction::N3(f), [a0, a1, a2], true) => {
+      f.call(&mut store, (*a0, *a1, *a2))
+    }
+    (RealmFunction::V3(f), [a0, a1, a2], false) => {
+      f.call(&mut store, (*a0, *a1, *a2)).map(|()| 0.0)
+    }
+    (RealmFunction::N4(f), [a0, a1, a2, a3], true) => {
+      f.call(&mut store, (*a0, *a1, *a2, *a3))
+    }
+    (RealmFunction::V4(f), [a0, a1, a2, a3], false) => {
+      f.call(&mut store, (*a0, *a1, *a2, *a3)).map(|()| 0.0)
+    }
+    _ => Err(wasmtime::Error::msg("realm bridge signature changed")),
+  }
+}
+
+/// Opt-in diagnostic accounting. Inclusive calls may nest through host callbacks.
+pub(super) struct RealmCallProfile {
+  entries: Option<HashMap<String, (u64, std::time::Duration)>>,
+}
+impl RealmCallProfile {
+  pub(super) fn new() -> Self {
+    Self {
+      entries: std::env::var_os("V8X_JS2WASM_PROFILE_REALM")
+        .map(|_| HashMap::new()),
+    }
+  }
+  fn start(&self) -> Option<std::time::Instant> {
+    self.entries.as_ref().map(|_| std::time::Instant::now())
+  }
+  fn finish(&mut self, name: &str, start: Option<std::time::Instant>) {
+    if let (Some(entries), Some(start)) = (&mut self.entries, start) {
+      let entry = entries.entry(name.to_owned()).or_default();
+      entry.0 += 1;
+      entry.1 += start.elapsed();
+    }
+  }
+}
+impl Drop for RealmCallProfile {
+  fn drop(&mut self) {
+    if let Some(entries) = &self.entries {
+      let mut rows: Vec<_> = entries.iter().collect();
+      rows.sort_by_key(|(_, (_, elapsed))| std::cmp::Reverse(*elapsed));
+      for (name, (count, elapsed)) in rows {
+        eprintln!(
+          "V8X_REALM {name} {count} calls {:.3} ms (inclusive)",
+          elapsed.as_secs_f64() * 1000.0
+        );
+      }
+    }
+  }
+}
+
 /// A handle is valid only in the store that allocated its realm.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RealmValue {
@@ -46,35 +177,21 @@ impl RealmAccess for DenoRuntime {
     args: &[f64],
     returns: bool,
   ) -> Result<f64, String> {
-    let function = self
-      .realm_instance
-      .get_func(&mut self.store, name)
-      .ok_or_else(|| {
-        format!("core artifact lacks realm bridge export {name}")
-      })?;
-    let args: Vec<_> = args
-      .iter()
-      .map(|v| wasmtime::Val::F64(v.to_bits()))
-      .collect();
-    let mut result = if returns {
-      vec![wasmtime::Val::F64(0)]
-    } else {
-      vec![]
-    };
-    function
-      .call(&mut self.store, &args, &mut result)
-      .map_err(|error| {
-        let payload =
-          render_pending_wasm_exception(&mut self.store, self.realm_instance);
-        format!("call realm bridge {name}: {error:#}; {payload}")
-      })?;
-    if !returns {
-      return Ok(0.0);
-    }
-    match result[0] {
-      wasmtime::Val::F64(bits) => Ok(f64::from_bits(bits)),
-      _ => Err(format!("realm bridge {name} returned a non-number")),
-    }
+    use wasmtime::AsContextMut;
+    let start = self.store.data().realm_profile.start();
+    let outcome = realm_call(
+      self.store.as_context_mut(),
+      self.realm_instance,
+      name,
+      args,
+      returns,
+    );
+    self.store.data_mut().realm_profile.finish(name, start);
+    outcome.map_err(|error| {
+      let payload =
+        render_pending_wasm_exception(&mut self.store, self.realm_instance);
+      format!("call realm bridge {name}: {error:#}; {payload}")
+    })
   }
 }
 
@@ -389,6 +506,21 @@ pub fn js2wasm_test_realm_values(path: &Path) -> Result<(), String> {
   let mut runtime =
     DenoRuntime::instantiate(&shared, &prepared, PathBuf::from("."), 0)?;
   let global = runtime.realm_global()?;
+  // Cached signatures must reject mismatches without poisoning later calls.
+  assert!(
+    runtime
+      .realm_raw("__v8x_value_global", &[0.0], true)
+      .is_err()
+  );
+  assert!(runtime.realm_raw("__v8x_value_global", &[], false).is_err());
+  assert_eq!(runtime.realm_global()?, global);
+  assert!(
+    runtime
+      .realm_raw("__v8x_missing_export", &[], true)
+      .is_err()
+  );
+  assert!(runtime.realm_raw("__v8x_value_number", &[], true).is_err());
+  assert!(runtime.realm_number(7.0).is_ok());
   let key =
     runtime.realm_string(&"greeting".encode_utf16().collect::<Vec<_>>())?;
   let units: Vec<_> = "Grüße 😀".encode_utf16().collect();
@@ -545,31 +677,17 @@ impl RealmAccess for CallerRealm<'_> {
     args: &[f64],
     returns: bool,
   ) -> Result<f64, String> {
-    let function = self
-      .realm_instance
-      .get_func(&mut self.caller, name)
-      .ok_or_else(|| {
-        format!("core artifact lacks realm bridge export {name}")
-      })?;
-    let args: Vec<_> = args
-      .iter()
-      .map(|v| wasmtime::Val::F64(v.to_bits()))
-      .collect();
-    let mut result = if returns {
-      vec![wasmtime::Val::F64(0)]
-    } else {
-      vec![]
-    };
-    function
-      .call(&mut self.caller, &args, &mut result)
-      .map_err(|error| format!("call realm bridge {name}: {error:#}"))?;
-    if !returns {
-      return Ok(0.0);
-    }
-    match result[0] {
-      wasmtime::Val::F64(bits) => Ok(f64::from_bits(bits)),
-      _ => Err(format!("realm bridge {name} returned a non-number")),
-    }
+    use wasmtime::AsContextMut;
+    let start = self.caller.data().realm_profile.start();
+    let outcome = realm_call(
+      self.caller.as_context_mut(),
+      self.realm_instance,
+      name,
+      args,
+      returns,
+    );
+    self.caller.data_mut().realm_profile.finish(name, start);
+    outcome.map_err(|error| format!("call realm bridge {name}: {error:#}"))
   }
 }
 
