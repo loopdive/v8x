@@ -29,7 +29,7 @@ import { aotHelloWorldSource } from "./aot-hello-world.mjs";
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
-const EXPECTED_JS2_REF = "e805e38c6be7f4fd3d79475627db5c3fb14e5d7d";
+const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
