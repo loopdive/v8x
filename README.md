@@ -149,6 +149,14 @@ a full production artifact rebuild and unchanged Deno replay remain required.
 
 ### Bounded Deno `hello_world` POC
 
+For the new interpreter-free path, see [closed-world AOT](tools/deno/aot-first.md).
+`--profile=runtime --execution=aot` compiles the exact pinned application script
+into the core and emits no interpreter provider. The unchanged example passes
+on macOS ARM64; [measurements](tools/deno/results/2026-09-09-aot-processes.md)
+show 106.2 MiB deployment and a 3.4× paired speedup, still behind QuickJS.
+Unknown/repeated scripts are refused. The Linux locked POC below is a separate,
+older configuration and still includes the interpreter.
+
 `tools/deno/run-js2wasm-poc.sh` is a non-ignored Linux x86_64 gate for one
 closed-world claim: the unmodified `deno_core` `hello_world` example at the
 pinned Deno commit executes its six enumerated inputs through a JS2-produced,
