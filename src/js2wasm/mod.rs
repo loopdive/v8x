@@ -580,15 +580,41 @@ fn with_deno_core_runtime<T>(
   // ContextState, then end that borrow before entering Wasmtime: host imports
   // may synchronously invoke ordinary rusty_v8 APIs that read the context.
   let runtime = deno_core_runtime(context)?;
-  let mut runtime = runtime.try_borrow_mut().map_err(|_| {
-    format!("prelinked Deno core runtime re-entered during {operation}")
-  })?;
+  with_runtime_owner(&runtime, operation, callback)
+}
+
+fn with_runtime_owner<T>(
+  owner: &Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
+  operation: &str,
+  callback: impl FnOnce(&mut crate::js2wasm_spike::DenoRuntime) -> Result<T, String>,
+) -> Result<T, String> {
   // Every path into the shared Wasmtime instance must enforce the active
   // isolate's ResourceConstraints. Keeping this at the common borrow boundary
   // covers classic scripts, source-text modules, prelinked bootstrap stages,
   // and callbacks that re-enter the runtime.
-  runtime.configure_heap_limit(current_isolate());
-  callback(&mut runtime)
+  let result = {
+    let mut runtime = owner
+      .try_borrow_mut()
+      .map_err(|_| format!("compiled runtime re-entered during {operation}"))?;
+    runtime.configure_heap_limit(current_isolate());
+    callback(&mut runtime)
+  };
+  let notifications = realm_objects::flush_rejection_events(owner);
+  match (result, notifications) {
+    (result, Ok(())) => result,
+    (Ok(_), Err(error)) => Err(error),
+    (Err(error), Err(notification)) => {
+      Err(format!("{error}; rejection notification: {notification}"))
+    }
+  }
+}
+
+pub(crate) fn capture_rejection_continuation(isolate: usize) -> usize {
+  if isolate == 0 {
+    0
+  } else {
+    continuation::get(isolate as *mut RealIsolate) as usize
+  }
 }
 
 fn allocate_error(
@@ -2139,13 +2165,8 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
       let mut did_work = false;
       for (context, runtime) in runtimes {
         v8__Context__Enter(context);
-        let result = runtime
-          .try_borrow_mut()
-          .map_err(|_| {
-            "compiled microtask runtime is already executing".to_string()
-          })
-          .and_then(|mut runtime| {
-            runtime.configure_heap_limit(isolate);
+        let result =
+          with_runtime_owner(&runtime, "microtask checkpoint", |runtime| {
             runtime.drain_microtasks()
           });
         v8__Context__Exit(context);
@@ -2224,12 +2245,10 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
           return;
         };
         v8__Context__Enter(context);
-        let result = runtime
-          .try_borrow_mut()
-          .map_err(|_| {
-            "compiled microtask runtime is already executing".to_string()
-          })
-          .and_then(|mut runtime| runtime.run_microtask(drain));
+        let result =
+          with_runtime_owner(&runtime, "compiled microtask", |runtime| {
+            runtime.run_microtask(drain)
+          });
         v8__Context__Exit(context);
         if let Err(error) = result {
           eprintln!("v8x/js2wasm: compiled microtask failed: {error}");

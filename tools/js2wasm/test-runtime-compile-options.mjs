@@ -2,10 +2,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { COMPILE_OPTIONS, runtimeCompileOptions, assertRuntimeSchedulerABI, compilerRefForProfile } from "./build-deno-core-artifact.mjs";
+import { contextPromiseRejectionDispatcherSource } from "./context-value-bridge.mjs";
+
+test("event dispatcher roots both values through the supplied realm keeper", () => {
+  const source = contextPromiseRejectionDispatcherSource("imported__v8x_value_keep");
+  assert(source.includes("imported__v8x_value_keep(promise), imported__v8x_value_keep(reason)"));
+  assert(source.includes("__v8x_deno_promise_reject_dispatch(event: number, promise: any, reason: any): void"));
+  assert.throws(() => contextPromiseRejectionDispatcherSource("keeper(); injected()"), /invalid rejection root keeper/);
+});
 
 test("runtime compiler pin advances independently of the historical POC", () => {
   assert.equal(compilerRefForProfile("poc"), "8fd489a918dee3be51bb1e75d191f9815a830eb0");
-  assert.equal(compilerRefForProfile("runtime"), "54eaa2239acd5eb1f383a500bd4d4a3b9dbdb3b2");
+  assert.equal(compilerRefForProfile("runtime"), "23d2e6cda9e58e1ee4da95b62719d6cdc03cd14a");
   assert.throws(() => compilerRefForProfile("unknown"), /unknown compiler profile/);
 });
 

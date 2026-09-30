@@ -196,6 +196,84 @@ fn from_realm(
   }
 }
 
+/// Flush only after the outer Store borrow ends. Reentrant operations append
+/// behind the existing events and let this flush retain this realm's event order.
+pub(crate) fn flush_rejection_events(
+  owner: &Rc<RefCell<DenoRuntime>>,
+) -> Result<(), String> {
+  if !owner
+    .try_borrow_mut()
+    .map_err(|_| {
+      "rejection flush attempted inside Wasmtime execution".to_string()
+    })?
+    .begin_rejection_flush()
+  {
+    return Ok(());
+  }
+  struct FlushGuard(Rc<RefCell<DenoRuntime>>);
+  impl Drop for FlushGuard {
+    fn drop(&mut self) {
+      if let Ok(mut runtime) = self.0.try_borrow_mut() {
+        runtime.end_rejection_flush();
+      }
+    }
+  }
+  let _guard = FlushGuard(owner.clone());
+  loop {
+    let translated = {
+      let mut runtime = owner.try_borrow_mut().map_err(|_| {
+        "rejection value conversion reentered runtime".to_string()
+      })?;
+      let Some(event) = runtime.take_rejection_event() else {
+        break;
+      };
+      if event.realm_id != runtime.realm_id()
+        || event.isolate == 0
+        || event.isolate != current_isolate() as usize
+      {
+        return Err(
+          "rejection notification has a different realm or isolate owner"
+            .into(),
+        );
+      }
+      let promise_value = runtime.realm_from_handle(event.promise)?;
+      let promise = from_realm(&mut *runtime, owner, promise_value)?;
+      if !matches!(unsafe { heap_value(promise) }, Some(HeapValue::Promise(_)))
+      {
+        return Err("rejection event carrier is not a native Promise".into());
+      }
+      let reason = if event.event == 1 {
+        ptr::null()
+      } else {
+        let value = runtime.realm_from_handle(event.reason)?;
+        from_realm(&mut *runtime, owner, value)?
+      };
+      let kind = match event.event {
+        0 => crate::PromiseRejectEvent::PromiseRejectWithNoHandler,
+        1 => crate::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+        2 => crate::PromiseRejectEvent::PromiseRejectAfterResolved,
+        3 => crate::PromiseRejectEvent::PromiseResolveAfterResolved,
+        _ => return Err("invalid queued Promise rejection event".into()),
+      };
+      (
+        event.isolate as *mut RealIsolate,
+        promise.cast(),
+        reason,
+        kind,
+        event.continuation_data as *const Value,
+      )
+    };
+    let _restore = continuation::enter(translated.0, translated.4);
+    promise_reject::notify(
+      translated.0,
+      translated.1,
+      translated.2,
+      translated.3,
+    );
+  }
+  Ok(())
+}
+
 pub(super) fn is_bound(object: *const Object) -> bool {
   binding(object).is_some()
 }

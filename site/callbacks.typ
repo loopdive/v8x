@@ -100,7 +100,12 @@ events remain incomplete for Wasm-owned Promises. Native Promise resolvers
 now deliver unhandled rejection, first late-handler attachment and duplicate
 settlement notifications through an isolate-local rusty_v8 callback. Public
 API controls check exact Promise/reason identity, absent values for handler
-events, reentrant attachment and isolate isolation. A separate two-graph acceptance test verifies
+events, reentrant attachment and isolate isolation. An event-producing compiled
+test context also delivers unhandled rejection and first late-handler events
+with exact Promise/reason identity. The callback can attach a handler after the
+runtime borrow ends. Both controls pass in compiler-free AOT replay. This
+opt-in transport has not yet advanced the packaged Deno compiler pin, and
+cross-realm rejection ordering remains unverified. A separate two-graph acceptance test verifies
 compiled reactions interleaved with native callbacks in one shared Store,
 including compiler-free replay of trusted context and source-bound graph
 artifacts. It also checks live namespace values, exception identity and

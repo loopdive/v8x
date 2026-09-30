@@ -35,6 +35,8 @@ mod graph_calls;
 mod graph_packages;
 #[path = "js2wasm_realm_values.rs"]
 mod realm_values;
+#[path = "js2wasm_rejection_events.rs"]
+mod rejection_events;
 #[path = "js2wasm_shared_buffers.rs"]
 mod shared_buffers;
 #[path = "js2wasm_shared_strings.rs"]
@@ -269,6 +271,7 @@ const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
 ];
 
 const DENO_HOST_IMPORTS: &[&str] = &[
+  "__v8x_promise_reject_notify",
   "__v8x_microtask_notify",
   "__v8x_attach_context",
   "__v8x_host_call",
@@ -991,6 +994,8 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  rejection_events: VecDeque<rejection_events::PendingPromiseRejection>,
+  flushing_rejections: bool,
   standalone_microtasks: VecDeque<wasmtime::Func>,
   realm_profile: realm_values::RealmCallProfile,
   // Numeric handles refer to immutable strings strongly rooted by this realm.
@@ -1540,6 +1545,33 @@ impl SharedDenoRuntime {
     let engine = Engine::new(&config)
       .map_err(|error| format!("configure embedded Wasmtime: {error}"))?;
     let mut linker = Linker::new(&engine);
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
+        "__v8x_promise_reject_notify",
+        |mut caller: Caller<'_, DenoHostState>,
+         event: f64,
+         promise: f64,
+         reason: f64|
+         -> wasmtime::Result<()> {
+          let state = caller.data_mut();
+          let mut event = rejection_events::PendingPromiseRejection::new(
+            state.realm_id,
+            state.heap_isolate,
+            event,
+            promise,
+            reason,
+          )
+          .map_err(wasmtime::Error::msg)?;
+          event.continuation_data =
+            crate::js2wasm::capture_rejection_continuation(state.heap_isolate);
+          state.rejection_events.push_back(event);
+          Ok(())
+        },
+      )
+      .map_err(|error| {
+        format!("bind Promise rejection notification: {error:#}")
+      })?;
     linker
       .func_wrap(
         DENO_IMPORT_MODULE,
@@ -2435,6 +2467,21 @@ pub(crate) struct DenoRuntime {
 }
 
 impl DenoRuntime {
+  pub(crate) fn begin_rejection_flush(&mut self) -> bool {
+    if self.store.data().flushing_rejections {
+      return false;
+    }
+    self.store.data_mut().flushing_rejections = true;
+    true
+  }
+  pub(crate) fn end_rejection_flush(&mut self) {
+    self.store.data_mut().flushing_rejections = false;
+  }
+  pub(crate) fn take_rejection_event(
+    &mut self,
+  ) -> Option<rejection_events::PendingPromiseRejection> {
+    self.store.data_mut().rejection_events.pop_front()
+  }
   pub(crate) fn realm_id(&self) -> usize {
     self.realm_id
   }
@@ -2514,6 +2561,8 @@ impl DenoRuntime {
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        rejection_events: VecDeque::new(),
+        flushing_rejections: false,
         standalone_microtasks: VecDeque::new(),
         string_handles: HashMap::new(),
         realm_profile: realm_values::RealmCallProfile::new(),

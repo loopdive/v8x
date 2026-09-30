@@ -88,6 +88,107 @@ unsafe extern "C" fn handle_rejection_during_notification(
   }
 }
 
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+fn compiled_rejection_delivery(reenter: bool) {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(if reenter {
+    handle_rejection_during_notification
+  } else {
+    record_promise_rejection
+  });
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let path = std::env::var_os("V8X_JS2WASM_REJECTION_CONTEXT")
+    .expect("event-producing test context");
+  if Path::new(&path)
+    .extension()
+    .is_some_and(|extension| extension == "cwasm")
+  {
+    v8::js2wasm_attach_precompiled_realm_for_test(&context, Path::new(&path))
+      .unwrap();
+  } else {
+    #[cfg(feature = "js2wasm_runtime_compile")]
+    v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+    #[cfg(not(feature = "js2wasm_runtime_compile"))]
+    panic!("compiler-free rejection test requires a trusted .cwasm context");
+  }
+  let global = context.global(scope);
+  let reason_key = v8::String::new(scope, "__v8x_test_reason").unwrap();
+  let reason = global.get(scope, reason_key.into()).unwrap();
+  let reject_key = v8::String::new(scope, "__v8x_test_reject").unwrap();
+  let reject = v8::Local::<v8::Function>::try_from(
+    global.get(scope, reject_key.into()).unwrap(),
+  )
+  .unwrap();
+  let receiver = v8::undefined(scope).into();
+  let promise = v8::Local::<v8::Promise>::try_from(
+    reject.call(scope, receiver, &[]).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(scope).strict_equals(reason));
+  assert_eq!(promise.has_handler(), reenter);
+  let promise_id = &*promise as *const v8::Promise as usize;
+  let reason_id = &*reason as *const v8::Value as usize;
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    let events = events.borrow();
+    assert_eq!(events.len(), if reenter { 2 } else { 1 });
+    assert_eq!(
+      events[0],
+      (
+        v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+        promise_id,
+        Some(reason_id)
+      )
+    );
+  });
+  let attach_key = v8::String::new(scope, "__v8x_test_attach").unwrap();
+  let attach = v8::Local::<v8::Function>::try_from(
+    global.get(scope, attach_key.into()).unwrap(),
+  )
+  .unwrap();
+  for _ in 0..2 {
+    attach.call(scope, receiver, &[promise.into()]).unwrap();
+  }
+  assert!(promise.has_handler());
+  scope.perform_microtask_checkpoint();
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      *events.borrow(),
+      [
+        (
+          v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+          promise_id,
+          Some(reason_id)
+        ),
+        (
+          v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+          promise_id,
+          None
+        ),
+      ]
+    )
+  });
+}
+
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[test]
+#[ignore = "requires freshly built event-producing V8X_JS2WASM_REJECTION_CONTEXT"]
+fn compiled_rejection_reports_exact_identity_and_late_handler() {
+  compiled_rejection_delivery(false);
+}
+
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[test]
+#[ignore = "requires freshly built event-producing V8X_JS2WASM_REJECTION_CONTEXT"]
+fn compiled_rejection_callback_can_reenter_without_borrowing_runtime() {
+  compiled_rejection_delivery(true);
+}
+
 #[test]
 fn native_promise_rejection_callback_can_reenter_and_attach_handler() {
   initialize();

@@ -289,3 +289,13 @@ export function contextValueBridgeEntrypoints(modulePath) {
       `export function ${name}(${parameters}): ${result} { ${result === "void" ? "" : "return "}imported${name}(${args}); }\n`;
   }).join("\n");
 }
+
+export function contextPromiseRejectionDispatcherSource(keeper = "__v8x_value_keep") {
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keeper)) throw new Error("invalid rejection root keeper");
+  return `
+declare function __v8x_promise_reject_notify(event: number, promise: number, reason: number): void;
+export function __v8x_deno_promise_reject_dispatch(event: number, promise: any, reason: any): void {
+  __v8x_promise_reject_notify(event, ${keeper}(promise), ${keeper}(reason));
+}
+`;
+}

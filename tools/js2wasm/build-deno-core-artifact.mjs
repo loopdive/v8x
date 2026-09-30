@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints } from "./context-value-bridge.mjs";
+import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints, contextPromiseRejectionDispatcherSource } from "./context-value-bridge.mjs";
 
 import { stagedCoreSource, stagedCoreNamespaceSources } from "./staged-core.mjs";
 import { aotHelloWorldSource } from "./aot-hello-world.mjs";
@@ -30,7 +30,7 @@ const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
-const RUNTIME_JS2_REF = "54eaa2239acd5eb1f383a500bd4d4a3b9dbdb3b2";
+const RUNTIME_JS2_REF = "23d2e6cda9e58e1ee4da95b62719d6cdc03cd14a";
 export function compilerRefForProfile(profile) {
   if (profile === "poc") return EXPECTED_JS2_REF;
   if (profile === "runtime") return RUNTIME_JS2_REF;
@@ -1057,6 +1057,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     files[`${appRoot}/entry.ts`] += contextValueBridgeEntrypoints("./runtime-seed.ts");
     files[`${appRoot}/entry.ts`] += `
 import * as nativeCoreNamespace from "./core-namespace.ts";
+${contextPromiseRejectionDispatcherSource("imported__v8x_value_keep")}
 export function __v8x_deno_core_namespace_handle(): number {
   if (stage < 2) throw new Error("Deno core namespace requested before module evaluation");
   return imported__v8x_value_keep(nativeCoreNamespace);

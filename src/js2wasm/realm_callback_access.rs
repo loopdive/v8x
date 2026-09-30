@@ -75,8 +75,5 @@ pub(super) fn with_owner<T>(
     return result
       .ok_or_else(|| "callback realm action did not run".to_string())?;
   }
-  let mut runtime = owner.try_borrow_mut().map_err(|_| {
-    "realm is already executing without callback access".to_string()
-  })?;
-  action(&mut *runtime)
+  with_runtime_owner(owner, "realm value access", |runtime| action(runtime))
 }
