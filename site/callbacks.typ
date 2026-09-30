@@ -96,7 +96,11 @@ single-job drains into the same FIFO as native callbacks. The pinned realm
 test verifies a compiled reaction, a native callback and a chained compiled
 reaction in their enqueue order, including compiler-free AOT replay. Older
 artifacts without this notification retain batch draining. General rejection
-events remain incomplete. A separate two-graph acceptance test verifies
+events remain incomplete for Wasm-owned Promises. Native Promise resolvers
+now deliver unhandled rejection, first late-handler attachment and duplicate
+settlement notifications through an isolate-local rusty_v8 callback. Public
+API controls check exact Promise/reason identity, absent values for handler
+events, reentrant attachment and isolate isolation. A separate two-graph acceptance test verifies
 compiled reactions interleaved with native callbacks in one shared Store,
 including compiler-free replay of trusted context and source-bound graph
 artifacts. It also checks live namespace values, exception identity and

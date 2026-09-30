@@ -54,6 +54,265 @@ enum DenoOpEvent {
 
 unsafe extern "C" fn noop_callback(_info: *const v8::FunctionCallbackInfo) {}
 
+thread_local! {
+  static PROMISE_REJECTION_EVENTS: RefCell<Vec<(v8::PromiseRejectEvent, usize, Option<usize>)>> = const { RefCell::new(Vec::new()) };
+}
+
+unsafe extern "C" fn record_promise_rejection(
+  message: v8::PromiseRejectMessage,
+) {
+  v8::callback_scope!(unsafe scope, &message);
+  let promise = message.get_promise();
+  let value = message.get_value();
+  // Exercise callback-scope entry and identity-bearing ABI getters, not just
+  // a synthetic event number. Keep no locals alive beyond this callback.
+  assert!(promise.is_promise());
+  let _ = scope.get_continuation_preserved_embedder_data();
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    events.borrow_mut().push((
+      message.get_event(),
+      &*promise as *const v8::Promise as usize,
+      value.map(|value| &*value as *const v8::Value as usize),
+    ))
+  });
+}
+
+unsafe extern "C" fn handle_rejection_during_notification(
+  message: v8::PromiseRejectMessage,
+) {
+  unsafe { record_promise_rejection(message) };
+  if message.get_event() == v8::PromiseRejectEvent::PromiseRejectWithNoHandler {
+    v8::callback_scope!(unsafe scope, &message);
+    let handler = v8::Function::new_raw(scope, noop_callback).unwrap();
+    message.get_promise().catch(scope, handler).unwrap();
+  }
+}
+
+#[test]
+fn native_promise_rejection_callback_can_reenter_and_attach_handler() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(handle_rejection_during_notification);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  let reason = v8::Object::new(scope);
+  resolver.reject(scope, reason.into()).unwrap();
+  assert!(promise.has_handler());
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      events
+        .borrow()
+        .iter()
+        .map(|event| event.0)
+        .collect::<Vec<_>>(),
+      [
+        v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+        v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject
+      ],
+    )
+  });
+  scope.perform_microtask_checkpoint();
+  PROMISE_REJECTION_EVENTS.with(|events| assert_eq!(events.borrow().len(), 2));
+}
+
+#[test]
+fn native_promise_rejection_callback_registration_is_isolate_local() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  for registered in [true, false] {
+    let isolate = &mut v8::Isolate::new(Default::default());
+    if registered {
+      isolate.set_promise_reject_callback(record_promise_rejection);
+    }
+    v8::scope!(let scope, isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let reason = v8::Object::new(scope);
+    resolver.reject(scope, reason.into()).unwrap();
+  }
+  PROMISE_REJECTION_EVENTS.with(|events| assert_eq!(events.borrow().len(), 1));
+}
+
+#[test]
+fn native_promise_rejection_reports_exact_identity_and_late_handler_once() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(record_promise_rejection);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  let reason = v8::Object::new(scope);
+  let identity = &*promise as *const v8::Promise as usize;
+  let reason_identity = &*reason as *const v8::Object as usize;
+  assert_eq!(resolver.reject(scope, reason.into()), Some(true));
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      &*events.borrow(),
+      &[(
+        v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+        identity,
+        Some(reason_identity)
+      ),]
+    )
+  });
+  let handler = v8::Function::new_raw(scope, noop_callback).unwrap();
+  let derived = promise.catch(scope, handler).unwrap();
+  promise.catch(scope, handler).unwrap();
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      &*events.borrow(),
+      &[
+        (
+          v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+          identity,
+          Some(reason_identity)
+        ),
+        (
+          v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+          identity,
+          None
+        ),
+      ]
+    )
+  });
+  assert_eq!(derived.state(), v8::PromiseState::Pending);
+  scope.perform_microtask_checkpoint();
+  assert_eq!(derived.state(), v8::PromiseState::Fulfilled);
+  PROMISE_REJECTION_EVENTS.with(|events| assert_eq!(events.borrow().len(), 2));
+}
+
+#[test]
+fn native_promise_rejection_respects_early_handlers_and_explicit_handling() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(record_promise_rejection);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let handler = v8::Function::new_raw(scope, noop_callback).unwrap();
+  let value = v8::Number::new(scope, 1.0);
+  for explicit in [false, true] {
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    if explicit {
+      promise.mark_as_handled();
+    } else {
+      promise.catch(scope, handler).unwrap();
+    }
+    resolver.reject(scope, value.into()).unwrap();
+  }
+  PROMISE_REJECTION_EVENTS.with(|events| assert!(events.borrow().is_empty()));
+  scope.perform_microtask_checkpoint();
+  PROMISE_REJECTION_EVENTS.with(|events| assert!(events.borrow().is_empty()));
+}
+
+#[test]
+fn native_promise_duplicate_settlement_reports_attempt_without_changing_result()
+{
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(record_promise_rejection);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  let original = v8::Number::new(scope, 1.0);
+  let attempted = v8::Object::new(scope);
+  resolver.resolve(scope, original.into()).unwrap();
+  resolver.reject(scope, attempted.into()).unwrap();
+  resolver.resolve(scope, attempted.into()).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  assert!(promise.result(scope).strict_equals(original.into()));
+  let identity = &*promise as *const v8::Promise as usize;
+  let attempted_identity = &*attempted as *const v8::Object as usize;
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      &*events.borrow(),
+      &[
+        (
+          v8::PromiseRejectEvent::PromiseRejectAfterResolved,
+          identity,
+          Some(attempted_identity)
+        ),
+        (
+          v8::PromiseRejectEvent::PromiseResolveAfterResolved,
+          identity,
+          Some(attempted_identity)
+        ),
+      ]
+    )
+  });
+}
+
+#[test]
+fn native_promise_rejection_propagation_reports_the_derived_promise() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(record_promise_rejection);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  let handler = v8::Function::new_raw(scope, noop_callback).unwrap();
+  // A fulfillment-only handler handles its receiver, but must propagate an
+  // eventual rejection to its otherwise unhandled child at the checkpoint.
+  let child = promise.then(scope, handler).unwrap();
+  let reason = v8::Object::new(scope);
+  resolver.reject(scope, reason.into()).unwrap();
+  PROMISE_REJECTION_EVENTS.with(|events| assert!(events.borrow().is_empty()));
+  scope.perform_microtask_checkpoint();
+  assert_eq!(child.state(), v8::PromiseState::Rejected);
+  assert!(child.result(scope).strict_equals(reason.into()));
+  let identity = &*child as *const v8::Promise as usize;
+  let reason_identity = &*reason as *const v8::Object as usize;
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      &*events.borrow(),
+      &[(
+        v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+        identity,
+        Some(reason_identity)
+      ),]
+    )
+  });
+  child.catch(scope, handler).unwrap();
+  scope.perform_microtask_checkpoint();
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    assert_eq!(
+      &*events.borrow(),
+      &[
+        (
+          v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+          identity,
+          Some(reason_identity)
+        ),
+        (
+          v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+          identity,
+          None
+        ),
+      ]
+    )
+  });
+}
+
 #[cfg(feature = "js2wasm_deno_poc")]
 unsafe extern "C" fn return_reaction_continuation(
   info: *const v8::FunctionCallbackInfo,

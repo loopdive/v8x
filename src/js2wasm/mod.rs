@@ -8,6 +8,7 @@
 
 mod boolean;
 mod private;
+mod promise_reject;
 mod retained_buffer;
 pub(crate) use retained_buffer::RetainedHostBuffer;
 
@@ -370,6 +371,7 @@ struct IsolateState {
   microtasks_policy: crate::MicrotasksPolicy,
   microtasks: VecDeque<Microtask>,
   running_microtasks: bool,
+  promise_reject_callback: Option<crate::isolate::PromiseRejectCallback>,
   continuation_data: *const Value,
   terminating: AtomicBool,
   active_try_catch: *mut TryCatchAbiState,
@@ -1838,6 +1840,7 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     microtasks_policy: crate::MicrotasksPolicy::Auto,
     microtasks: VecDeque::new(),
     running_microtasks: false,
+    promise_reject_callback: None,
     continuation_data: ptr::null(),
     terminating: AtomicBool::new(false),
     active_try_catch: ptr::null_mut(),
@@ -2285,9 +2288,12 @@ pub extern "C" fn v8__Isolate__SetCaptureStackTraceForUncaughtExceptions(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__SetPromiseRejectCallback(
-  _isolate: *mut RealIsolate,
-  _callback: crate::isolate::PromiseRejectCallback,
+  isolate: *mut RealIsolate,
+  callback: crate::isolate::PromiseRejectCallback,
 ) {
+  if !isolate.is_null() {
+    unsafe { isolate_state(isolate) }.promise_reject_callback = Some(callback);
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -5542,18 +5548,29 @@ fn settle_promise_value(
   value: *const Value,
   settlement: PromiseSettlement,
 ) {
-  let reactions = {
+  let isolate = current_isolate();
+  let Some(previous) =
+    (unsafe { promise_state(promise) }).map(|state| state.settlement)
+  else {
+    return;
+  };
+  if previous != PromiseSettlement::Pending {
+    let event = if settlement == PromiseSettlement::Rejected {
+      crate::PromiseRejectEvent::PromiseRejectAfterResolved
+    } else {
+      crate::PromiseRejectEvent::PromiseResolveAfterResolved
+    };
+    promise_reject::notify(isolate, promise, value, event);
+    return;
+  }
+  let (reactions, unhandled) = {
     let Some(state) = (unsafe { promise_state(promise) }) else {
       return;
     };
-    if state.settlement != PromiseSettlement::Pending {
-      return;
-    }
     state.settlement = settlement;
     state.result = value;
-    std::mem::take(&mut state.reactions)
+    (std::mem::take(&mut state.reactions), !state.handled)
   };
-  let isolate = current_isolate();
   if isolate.is_null() {
     return;
   }
@@ -5572,6 +5589,14 @@ fn settle_promise_value(
       derived: reaction.derived,
     }
   }));
+  if settlement == PromiseSettlement::Rejected && unhandled {
+    promise_reject::notify(
+      isolate,
+      promise,
+      value,
+      crate::PromiseRejectEvent::PromiseRejectWithNoHandler,
+    );
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -5694,10 +5719,12 @@ fn promise_then(
   let continuation_data = continuation::get(isolate);
   let derived =
     allocate_promise(isolate, PromiseSettlement::Pending, ptr::null());
-  let (settlement, result) = {
+  let (settlement, result, late_handler) = {
     let Some(state) = (unsafe { promise_state(promise) }) else {
       return ptr::null();
     };
+    let late_handler =
+      !state.handled && state.settlement == PromiseSettlement::Rejected;
     state.handled = true;
     if state.settlement == PromiseSettlement::Pending {
       state.reactions.push(PromiseReaction {
@@ -5708,7 +5735,7 @@ fn promise_then(
       });
       return derived;
     }
-    (state.settlement, state.result)
+    (state.settlement, state.result, late_handler)
   };
   let handler = match settlement {
     PromiseSettlement::Fulfilled => on_fulfilled,
@@ -5724,6 +5751,14 @@ fn promise_then(
       derived,
     },
   );
+  if late_handler {
+    promise_reject::notify(
+      isolate,
+      promise,
+      ptr::null(),
+      crate::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+    );
+  }
   derived
 }
 
