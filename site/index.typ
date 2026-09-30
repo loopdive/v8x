@@ -2,7 +2,7 @@
 
 #set document(
   title: "v8x",
-  description: "v8x makes rusty_v8 engine agnostic: run deno_core and Deno unchanged on JavaScriptCore or QuickJS.",
+  description: "v8x makes rusty_v8 engine agnostic: run deno_core and Deno unchanged on JavaScriptCore, QuickJS, or experimental js2wasm.",
 )
 
 #show: html-shim
@@ -29,7 +29,12 @@ unchanged and runs on the engine you picked.
   [JavaScriptCore (WebKit JSCOnly, built from source)], [`jsc`], [macOS],
   [JavaScriptCore (Apple's system framework)], [`system_jsc`], [macOS],
   [QuickJS-ng (vendored, static)], [`quickjs`], [any],
+  [js2wasm AOT modules on Wasmtime (experimental)], [`engine_js2wasm`], [any],
+  [js2wasm runtime compiler + artifact cache (experimental)], [`engine_js2wasm_runtime`], [any],
 )
+
+The js2wasm backend is under active development. Its CI baseline currently
+passes 132 of 429 `deno_core` tests; unsupported V8 ABI calls fail loudly.
 
 One engine is active at a time. The usual reason to swap is binary size:
 

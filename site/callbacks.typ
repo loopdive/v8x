@@ -11,7 +11,7 @@
 
 = Callbacks and exceptions
 
-Every native callback crosses an engine C frame before it reaches Rust.
+JSC and QuickJS native callbacks cross an engine C frame before reaching Rust.
 The trampoline does five things, in order:
 
 + restore the thread-local isolate and context; many ABI functions receive
@@ -21,6 +21,19 @@ The trampoline does five things, in order:
 + call the Rust callback, catching panics so they never unwind through
   engine frames
 + translate the return-value slot back into an engine value
+
+The experimental js2wasm backend uses Wasmtime host imports instead of an
+engine C trampoline. Values stay rooted in their compiled realm, and Rust
+wrappers retain object identity. Synchronous nested callbacks use the active
+Wasmtime caller to access that realm. Ordinary host callbacks and built-in
+error transport are covered by focused tests; host construction, arbitrary
+exotic values and complete exception identity are not implemented.
+
+A realm-backed callback can have an undefined or non-string JavaScript
+`name` property. Function conversion preserves that property and call identity
+in the realm; it uses an empty native wrapper display name when there is no
+string name to cache. Focused tests cover both cases and ordinary named
+functions.
 
 == Exceptions live in side state
 
@@ -58,3 +71,92 @@ Function templates store the Rust callback and its data, then install the
 trampoline above when materialized.
 
 #next("modules", [Modules: identity across compile, instantiate, evaluate])
+
+
+The js2wasm runtime artifact exposes deferred core-script stages. A focused
+Rust-host fixture verifies that callbacks registered between stages are visible
+to later compiled scripts, and that failed stages cannot be retried. Native
+context internal fields remain in the Rust wrapper when its object enters the
+realm. Native microtasks preserve continuation data across callbacks. These
+checks do not establish complete Deno compatibility.
+
+A pinned, unchanged Deno core fixture now boots through public `Script::Run` and
+executes its hello-world example with real Rust callbacks. Pending ops settle
+through `core.__eventLoopTick` and the native microtask checkpoint, preserving
+scalar, object and rejection-reason identity. Compiled queues publish their
+pending-job count so checkpoints verify quiescence. Native `Promise.then/catch`
+registration on this compiled realm preserves asynchronous callbacks, derived
+Promise results, thrown handlers and native continuation data. Separately
+compiled namespace graphs route pending and settled Promise reactions through
+their ownership-checked intrinsic export in the shared store. Compiled Promise
+handler state is persistent in Wasm and shared by native `HasHandler` and
+`MarkAsHandled`. The pinned realm test checks this state before and after a
+microtask checkpoint. An opt-in compiled enqueue notification now inserts
+single-job drains into the same FIFO as native callbacks. The pinned realm
+test verifies a compiled reaction, a native callback and a chained compiled
+reaction in their enqueue order, including compiler-free AOT replay. Older
+artifacts without this notification retain batch draining. General rejection
+events remain incomplete for Wasm-owned Promises. Native Promise resolvers
+now deliver unhandled rejection, first late-handler attachment and duplicate
+settlement notifications through an isolate-local rusty_v8 callback. Public
+API controls check exact Promise/reason identity, absent values for handler
+events, reentrant attachment and isolate isolation. An event-producing compiled
+test context also delivers unhandled rejection and first late-handler events
+with exact Promise/reason identity. The callback can attach a handler after the
+runtime borrow ends. Both controls pass in compiler-free AOT replay. This
+opt-in transport is included in the runtime compiler pin. A clean complete-core
+artifact passes the compiler-free public API controls without an interpreter
+provider. Compiled notifications share an isolate-local queue. A compiler-free
+two-realm control verifies that callback reentry cannot overtake a previously
+queued handler notification, preserving each realm's Promise and reason
+identity. General thenable and duplicate-resolution coverage remains incomplete.
+A separate two-graph acceptance test verifies
+compiled reactions interleaved with native callbacks in one shared Store,
+including compiler-free replay of trusted context and source-bound graph
+artifacts. It also checks live namespace values, exception identity and
+that no interpreter provider is instantiated. This is a focused acceptance
+test, not complete module or Deno conformance.
+
+Pending reactions within one compiled Promise run in registration order on
+fulfillment and rejection. Multi-reaction lists are reordered at settlement;
+the common single-reaction path needs no copied callback nodes. A native Deno
+pending-op check verifies three Rust reactions in registration order. This is
+not proof of global ordering across all graph and native queues.
+
+Linked graph compilation can select the context's exported exception tag with
+`standaloneGlobalThisImport.exceptionTag`. This shares tag identity without a
+JavaScript host. A compiler control verifies that a provider-thrown payload is
+caught unchanged; separate module-local tags cannot catch that exception.
+
+The Deno host installs `Error.captureStackTrace` before primordial capture. It
+records actual Wasmtime frames and a non-enumerable stack property without
+replacing the error. Source locations, identity-based `constructorOpt` trimming
+and full V8 stack formatting are not implemented.
+
+The compiled value bridge has a string-conversion operation with a success and
+value result. Its focused compiled controls verify Error text, the string hint
+for object coercion, rejection of Symbol values and original thrown-value
+identity. This is not a complete native coercion or Deno conformance result.
+Compiler-free native replay also verifies string coercion reentry into Rust
+and native TryCatch retaining the original Rust-thrown object. The unchanged
+core async stub refusal reaches native code with its Error text intact.
+The compiled upstream error builder preserves the message for its six registered
+builtin error classes when constructors are passed through parameters. The
+unchanged upstream Deno hello-world example also preserves the full native
+serde error diagnostic with the compiler-free AOT artifact.
+
+Native js2wasm functions retain the length supplied by Function and
+FunctionTemplate builders. The property is included when a host callback
+enters the compiled realm. A bootstrap fixture checks its value after transfer.
+
+Host object graph adoption preserves explicit null and object prototypes,
+including shared identity and property cycles. Prototype reads and writes on
+adopted objects use the compiled realm; rejected prototype cycles return false.
+
+Native numeric conversion uses the compiled realm for strings and objects.
+Native arrays acquire that realm's intrinsic iterator on demand. The unchanged
+Deno WebIDL integer and basic sequence conversions pass. A clean core build
+also passes the retained live-mutation iterator control after the compiler's
+first-class values factory was changed to read the original receiver live.
+The bounded compiler-free adapter suite passes 31 tests with six ignored.
+This does not establish full WebIDL or Deno compatibility.

@@ -1,0 +1,107 @@
+[
+  {
+    "engine": "v8",
+    "round": 1,
+    "stderr": "        0.54 real         0.00 user         0.01 sys\n            21200896  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1461  page reclaims\n                  41  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  26  involuntary context switches\n           103970934  instructions retired\n            57571129  cycles elapsed\n             6751432  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 1,
+    "stderr": "        0.29 real         0.02 user         0.00 sys\n            18776064  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1326  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                  17  voluntary context switches\n                  11  involuntary context switches\n           316245621  instructions retired\n           113235173  cycles elapsed\n            11321728  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 1,
+    "stderr": "       13.28 real        12.23 user         0.35 sys\n           352829440  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26139  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 319  involuntary context switches\n        229906298820  instructions retired\n         53000988714  cycles elapsed\n             9847504  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 2,
+    "stderr": "        0.02 real         0.01 user         0.00 sys\n            18759680  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1319  page reclaims\n                  16  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   6  voluntary context switches\n                   9  involuntary context switches\n           307358094  instructions retired\n            91310371  cycles elapsed\n            11305344  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 2,
+    "stderr": "       12.67 real        12.38 user         0.29 sys\n           352862208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26141  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 322  involuntary context switches\n        229840236863  instructions retired\n         52748301834  cycles elapsed\n             9880272  peak memory footprint\n"
+  },
+  {
+    "engine": "v8",
+    "round": 2,
+    "stderr": "        0.01 real         0.00 user         0.00 sys\n            21168128  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1399  page reclaims\n                  98  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   1  voluntary context switches\n                  57  involuntary context switches\n            79713141  instructions retired\n            32542604  cycles elapsed\n             6702280  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 3,
+    "stderr": "       12.77 real        12.45 user         0.31 sys\n           352862208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26141  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 251  involuntary context switches\n        229849124130  instructions retired\n         53028448516  cycles elapsed\n             9880272  peak memory footprint\n"
+  },
+  {
+    "engine": "v8",
+    "round": 3,
+    "stderr": "        0.00 real         0.00 user         0.00 sys\n            21151744  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1401  page reclaims\n                  95  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  36  involuntary context switches\n            78331647  instructions retired\n            31010816  cycles elapsed\n             6718688  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 3,
+    "stderr": "        0.02 real         0.01 user         0.00 sys\n            18497536  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1303  page reclaims\n                  16  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   6  voluntary context switches\n                  10  involuntary context switches\n           306253919  instructions retired\n            90059846  cycles elapsed\n            11059608  peak memory footprint\n"
+  },
+  {
+    "engine": "v8",
+    "round": 4,
+    "stderr": "        0.00 real         0.00 user         0.00 sys\n            21217280  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1459  page reclaims\n                  41  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  23  involuntary context switches\n            75132742  instructions retired\n            27508618  cycles elapsed\n             6767816  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 4,
+    "stderr": "        0.02 real         0.01 user         0.00 sys\n            18792448  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1329  page reclaims\n                   8  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   8  involuntary context switches\n           305817517  instructions retired\n            89023875  cycles elapsed\n            11338112  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 4,
+    "stderr": "       12.77 real        12.44 user         0.32 sys\n           352894976  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26141  page reclaims\n                  12  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   1  voluntary context switches\n                 270  involuntary context switches\n        229857626269  instructions retired\n         53012015066  cycles elapsed\n             9929448  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 5,
+    "stderr": "        0.02 real         0.01 user         0.00 sys\n            18759680  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1316  page reclaims\n                  19  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  10  involuntary context switches\n           306024270  instructions retired\n            88486002  cycles elapsed\n            11305344  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 5,
+    "stderr": "       12.81 real        12.52 user         0.28 sys\n           352894976  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26143  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 259  involuntary context switches\n        229832062680  instructions retired\n         52929185986  cycles elapsed\n             9913040  peak memory footprint\n"
+  },
+  {
+    "engine": "v8",
+    "round": 5,
+    "stderr": "        0.00 real         0.00 user         0.00 sys\n            21118976  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1413  page reclaims\n                  82  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  38  involuntary context switches\n            77966712  instructions retired\n            30723016  cycles elapsed\n             6653128  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 6,
+    "stderr": "       12.82 real        12.51 user         0.30 sys\n           352796672  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26137  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 286  involuntary context switches\n        229844761299  instructions retired\n         52779329706  cycles elapsed\n             9814736  peak memory footprint\n"
+  },
+  {
+    "engine": "v8",
+    "round": 6,
+    "stderr": "        0.01 real         0.00 user         0.00 sys\n            21266432  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1422  page reclaims\n                  82  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  53  involuntary context switches\n            78775262  instructions retired\n            30105297  cycles elapsed\n             6833400  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 6,
+    "stderr": "        0.02 real         0.01 user         0.00 sys\n            18677760  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1314  page reclaims\n                  16  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  11  involuntary context switches\n           307037879  instructions retired\n            90022704  cycles elapsed\n            11223424  peak memory footprint\n"
+  },
+  {
+    "engine": "v8",
+    "round": 7,
+    "stderr": "        0.00 real         0.00 user         0.00 sys\n            21135360  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1455  page reclaims\n                  41  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  22  involuntary context switches\n            75005288  instructions retired\n            27576782  cycles elapsed\n             6685896  peak memory footprint\n"
+  },
+  {
+    "engine": "quickjs",
+    "round": 7,
+    "stderr": "        0.02 real         0.01 user         0.00 sys\n            18710528  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                1324  page reclaims\n                   8  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                   8  involuntary context switches\n           305864986  instructions retired\n            89362576  cycles elapsed\n            11256192  peak memory footprint\n"
+  },
+  {
+    "engine": "js2wasm",
+    "round": 7,
+    "stderr": "       13.02 real        12.69 user         0.32 sys\n           352944128  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26146  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 431  involuntary context switches\n        229871613672  instructions retired\n         52716446001  cycles elapsed\n             9962192  peak memory footprint\n"
+  }
+]

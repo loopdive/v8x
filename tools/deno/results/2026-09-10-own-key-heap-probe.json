@@ -1,0 +1,370 @@
+{
+  "node": "v24.4.1",
+  "source": "\n let target:any = {};\n export function fill(n:number):void {target={};for(let i=0;i<n;i++)target[\"field\"+i]=i;}\n export function scan():number {const keys=Reflect.ownKeys(target);let sum=0;for(let i=0;i<keys.length;i++)sum+=target[keys[i]];return sum;}\n",
+  "artifacts": [
+    {
+      "name": "control",
+      "path": "/private/tmp/js2-deno-main-sync-20260908/.tmp/own-keys-control-O3.wasm",
+      "bytes": 67190,
+      "sha256": "497bdf6f83f8c6158bffa658d1a6ddd925be2c1d7dd475621a66c7c4de197347"
+    },
+    {
+      "name": "candidate",
+      "path": "/private/tmp/js2-deno-main-sync-20260908/.tmp/own-keys-candidate-O3.wasm",
+      "bytes": 67502,
+      "sha256": "a78805994f7a00a8bd7ada9cf5ebef7fad4ad3fa30d28b45b0e2e9236ccd5dc7"
+    }
+  ],
+  "rows": [
+    {
+      "name": "control",
+      "n": 100,
+      "round": 0,
+      "scans": 5,
+      "ms": 0.4566669999999995
+    },
+    {
+      "name": "candidate",
+      "n": 100,
+      "round": 0,
+      "scans": 5,
+      "ms": 0.32045800000000213
+    },
+    {
+      "name": "candidate",
+      "n": 100,
+      "round": 1,
+      "scans": 5,
+      "ms": 0.6163339999999984
+    },
+    {
+      "name": "control",
+      "n": 100,
+      "round": 1,
+      "scans": 5,
+      "ms": 0.4055420000000005
+    },
+    {
+      "name": "control",
+      "n": 100,
+      "round": 2,
+      "scans": 5,
+      "ms": 0.40204200000000156
+    },
+    {
+      "name": "candidate",
+      "n": 100,
+      "round": 2,
+      "scans": 5,
+      "ms": 0.3034579999999991
+    },
+    {
+      "name": "candidate",
+      "n": 100,
+      "round": 3,
+      "scans": 5,
+      "ms": 0.3005420000000001
+    },
+    {
+      "name": "control",
+      "n": 100,
+      "round": 3,
+      "scans": 5,
+      "ms": 0.3385409999999993
+    },
+    {
+      "name": "control",
+      "n": 100,
+      "round": 4,
+      "scans": 5,
+      "ms": 0.33474999999999966
+    },
+    {
+      "name": "candidate",
+      "n": 100,
+      "round": 4,
+      "scans": 5,
+      "ms": 0.2707499999999996
+    },
+    {
+      "name": "control",
+      "n": 200,
+      "round": 0,
+      "scans": 5,
+      "ms": 0.8289159999999995
+    },
+    {
+      "name": "candidate",
+      "n": 200,
+      "round": 0,
+      "scans": 5,
+      "ms": 0.740124999999999
+    },
+    {
+      "name": "candidate",
+      "n": 200,
+      "round": 1,
+      "scans": 5,
+      "ms": 0.5444159999999982
+    },
+    {
+      "name": "control",
+      "n": 200,
+      "round": 1,
+      "scans": 5,
+      "ms": 0.5760000000000005
+    },
+    {
+      "name": "control",
+      "n": 200,
+      "round": 2,
+      "scans": 5,
+      "ms": 0.5138749999999987
+    },
+    {
+      "name": "candidate",
+      "n": 200,
+      "round": 2,
+      "scans": 5,
+      "ms": 0.2503329999999977
+    },
+    {
+      "name": "candidate",
+      "n": 200,
+      "round": 3,
+      "scans": 5,
+      "ms": 0.24166699999999963
+    },
+    {
+      "name": "control",
+      "n": 200,
+      "round": 3,
+      "scans": 5,
+      "ms": 0.50075
+    },
+    {
+      "name": "control",
+      "n": 200,
+      "round": 4,
+      "scans": 5,
+      "ms": 0.4997499999999988
+    },
+    {
+      "name": "candidate",
+      "n": 200,
+      "round": 4,
+      "scans": 5,
+      "ms": 0.24066700000000196
+    },
+    {
+      "name": "control",
+      "n": 400,
+      "round": 0,
+      "scans": 5,
+      "ms": 1.573166999999998
+    },
+    {
+      "name": "candidate",
+      "n": 400,
+      "round": 0,
+      "scans": 5,
+      "ms": 0.4143749999999997
+    },
+    {
+      "name": "candidate",
+      "n": 400,
+      "round": 1,
+      "scans": 5,
+      "ms": 0.4169589999999985
+    },
+    {
+      "name": "control",
+      "n": 400,
+      "round": 1,
+      "scans": 5,
+      "ms": 1.5942500000000024
+    },
+    {
+      "name": "control",
+      "n": 400,
+      "round": 2,
+      "scans": 5,
+      "ms": 1.540416999999998
+    },
+    {
+      "name": "candidate",
+      "n": 400,
+      "round": 2,
+      "scans": 5,
+      "ms": 0.38920800000000355
+    },
+    {
+      "name": "candidate",
+      "n": 400,
+      "round": 3,
+      "scans": 5,
+      "ms": 0.3887499999999946
+    },
+    {
+      "name": "control",
+      "n": 400,
+      "round": 3,
+      "scans": 5,
+      "ms": 1.5318749999999994
+    },
+    {
+      "name": "control",
+      "n": 400,
+      "round": 4,
+      "scans": 5,
+      "ms": 1.5310829999999953
+    },
+    {
+      "name": "candidate",
+      "n": 400,
+      "round": 4,
+      "scans": 5,
+      "ms": 0.38837499999999636
+    },
+    {
+      "name": "control",
+      "n": 800,
+      "round": 0,
+      "scans": 5,
+      "ms": 5.727041
+    },
+    {
+      "name": "candidate",
+      "n": 800,
+      "round": 0,
+      "scans": 5,
+      "ms": 0.902667000000001
+    },
+    {
+      "name": "candidate",
+      "n": 800,
+      "round": 1,
+      "scans": 5,
+      "ms": 0.8921660000000031
+    },
+    {
+      "name": "control",
+      "n": 800,
+      "round": 1,
+      "scans": 5,
+      "ms": 5.730166000000004
+    },
+    {
+      "name": "control",
+      "n": 800,
+      "round": 2,
+      "scans": 5,
+      "ms": 5.749457999999997
+    },
+    {
+      "name": "candidate",
+      "n": 800,
+      "round": 2,
+      "scans": 5,
+      "ms": 0.9013750000000016
+    },
+    {
+      "name": "candidate",
+      "n": 800,
+      "round": 3,
+      "scans": 5,
+      "ms": 0.8968339999999984
+    },
+    {
+      "name": "control",
+      "n": 800,
+      "round": 3,
+      "scans": 5,
+      "ms": 5.729082999999989
+    },
+    {
+      "name": "control",
+      "n": 800,
+      "round": 4,
+      "scans": 5,
+      "ms": 5.733833000000004
+    },
+    {
+      "name": "candidate",
+      "n": 800,
+      "round": 4,
+      "scans": 5,
+      "ms": 0.9026669999999939
+    },
+    {
+      "name": "control",
+      "n": 1600,
+      "round": 0,
+      "scans": 5,
+      "ms": 23.266750000000002
+    },
+    {
+      "name": "candidate",
+      "n": 1600,
+      "round": 0,
+      "scans": 5,
+      "ms": 1.9497089999999986
+    },
+    {
+      "name": "candidate",
+      "n": 1600,
+      "round": 1,
+      "scans": 5,
+      "ms": 2.1314160000000015
+    },
+    {
+      "name": "control",
+      "n": 1600,
+      "round": 1,
+      "scans": 5,
+      "ms": 24.239209000000017
+    },
+    {
+      "name": "control",
+      "n": 1600,
+      "round": 2,
+      "scans": 5,
+      "ms": 23.980583999999993
+    },
+    {
+      "name": "candidate",
+      "n": 1600,
+      "round": 2,
+      "scans": 5,
+      "ms": 1.8573330000000112
+    },
+    {
+      "name": "candidate",
+      "n": 1600,
+      "round": 3,
+      "scans": 5,
+      "ms": 1.8344580000000121
+    },
+    {
+      "name": "control",
+      "n": 1600,
+      "round": 3,
+      "scans": 5,
+      "ms": 24.121417000000008
+    },
+    {
+      "name": "control",
+      "n": 1600,
+      "round": 4,
+      "scans": 5,
+      "ms": 24.170124999999985
+    },
+    {
+      "name": "candidate",
+      "n": 1600,
+      "round": 4,
+      "scans": 5,
+      "ms": 1.877834000000007
+    }
+  ]
+}
