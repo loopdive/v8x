@@ -5,12 +5,35 @@ pub(crate) struct HostCallbackBinding {
   owner: Rc<RefCell<DenoRuntime>>,
   realm_id: usize,
   function: *const crate::Function,
+  continuation_data: Option<*const Value>,
 }
 
 pub(super) fn allocate(
   access: &mut dyn RealmAccess,
   owner: &Rc<RefCell<DenoRuntime>>,
   function: *const crate::Function,
+) -> Result<RealmValue, String> {
+  allocate_with_continuation(access, owner, function, None)
+}
+
+pub(super) fn allocate_reaction(
+  access: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  function: *const crate::Function,
+) -> Result<RealmValue, String> {
+  allocate_with_continuation(
+    access,
+    owner,
+    function,
+    Some(continuation::get(current_isolate())),
+  )
+}
+
+fn allocate_with_continuation(
+  access: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  function: *const crate::Function,
+  continuation_data: Option<*const Value>,
 ) -> Result<RealmValue, String> {
   let isolate = current_isolate();
   if isolate.is_null() {
@@ -25,6 +48,7 @@ pub(super) fn allocate(
     owner: owner.clone(),
     realm_id: access.realm_id(),
     function,
+    continuation_data,
   });
   access.realm_handle("__v8x_value_host_function", &[id as f64])
 }
@@ -102,6 +126,9 @@ pub(crate) fn invoke_host(
         arguments.len()
       );
     }
+    let _continuation = callback
+      .continuation_data
+      .map(|value| continuation::enter(isolate, value));
     let result =
       invoke_native_callback(callback.function, receiver, &arguments, false);
     let exception = v8__TryCatch__Exception(caught.as_ptr());

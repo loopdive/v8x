@@ -109,7 +109,7 @@ js2wasm_spike = ["js2wasm_runtime_compile"]
 # Explicit, artifact-backed Deno Script::Run acceptance test. Keeping this as
 # an opt-in feature makes the external pinned compiler input non-vacuous: the
 # test is either built with its required artifact environment or not built.
-js2wasm_deno_poc = ["js2wasm_runtime_compile"]
+js2wasm_deno_poc = ["engine_js2wasm"]
 # Strict, compiler-free replay of the pinned Deno proof-of-concept. The
 # replay implementation accepts only a locked manifest plus verified Wasmtime
 # precompiled artifacts. Keep this separate from the development compiler

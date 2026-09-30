@@ -23,13 +23,19 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints } from "./context-value-bridge.mjs";
 
-import { stagedCoreSource } from "./staged-core.mjs";
+import { stagedCoreSource, stagedCoreNamespaceSources } from "./staged-core.mjs";
 import { aotHelloWorldSource } from "./aot-hello-world.mjs";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
+const RUNTIME_JS2_REF = "54eaa2239acd5eb1f383a500bd4d4a3b9dbdb3b2";
+export function compilerRefForProfile(profile) {
+  if (profile === "poc") return EXPECTED_JS2_REF;
+  if (profile === "runtime") return RUNTIME_JS2_REF;
+  fail(`unknown compiler profile ${profile}`);
+}
 const EXPECTED_DENO_REF = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const WASMTIME_VERSION = "47.0.3";
 const TARGET_EXPECTATION = Object.freeze({
@@ -49,7 +55,7 @@ const ENGINE_CONFIG = Object.freeze({
 const CANONICALIZATION =
   "UTF-8 recursively lexicographic object keys; array order preserved; no whitespace";
 
-const DENO_INPUTS = Object.freeze([
+export const DENO_INPUTS = Object.freeze([
   {
     gitPath: "libs/core/00_primordials.js",
     path: "00_primordials.js",
@@ -94,7 +100,7 @@ const LOCK_SOURCE_PATHS = DENO_INPUTS.map((input) => input.path);
 
 // This object is intentionally small and frozen. Its recursively sorted JSON
 // is the POC's compile-options commitment; Rust replay requires the digest.
-const COMPILE_OPTIONS = Object.freeze({
+export const COMPILE_OPTIONS = Object.freeze({
   target: "standalone",
   platform: "deno",
   externImportModule: "v8x:deno",
@@ -114,6 +120,32 @@ const COMPILE_OPTIONS_PREIMAGE = Object.freeze({
 });
 const COMPILE_OPTIONS_SHA256 =
   "a31c09c7e31b4852799975e9c8cb8d132aad6ecab79bbf8c98d5848f7c3bde9e";
+
+// The historical POC commitment above is immutable. Runtime artifacts use
+// the verified scheduler ABI and commit these options in their provenance.
+export function runtimeCompileOptions(execution = "aot") {
+  if (execution !== "aot" && execution !== "dynamic") {
+    fail(`unknown runtime execution mode ${execution}`);
+  }
+  return {
+    ...COMPILE_OPTIONS,
+    standaloneMicrotaskNotifyImport: { module: "v8x:deno", name: "__v8x_microtask_notify" },
+    standaloneSymbolState: execution === "aot" ? "export" : { module: "js2wasm:runtime-eval", reexport: true },
+    link: execution === "aot" ? ["v8x:deno"] : ["v8x:deno", "js2wasm:runtime-eval"],
+  };
+}
+
+export function assertRuntimeSchedulerABI(module) {
+  const imports = WebAssembly.Module.imports(module).filter(entry =>
+    entry.module === "v8x:deno" && entry.name === "__v8x_microtask_notify" && entry.kind === "function");
+  if (imports.length !== 1) fail("runtime artifact requires exactly one native microtask notification import");
+  const exports = WebAssembly.Module.exports(module);
+  for (const name of ["__drain_one_microtask", "__drain_microtasks", "__microtasks_pending"]) {
+    if (!exports.some(entry => entry.name === name && entry.kind === "function")) {
+      fail(`runtime artifact lacks scheduler function ${name}`);
+    }
+  }
+}
 
 // This is an ABI bridge, not an implementation of the Deno example. The
 // pinned usage source is embedded below and executed through the interpreter
@@ -507,7 +539,7 @@ function definedLinearMemoryCount(binary, label) {
   return memories;
 }
 
-function assertNoLinearMemories(binary, module, label) {
+export function assertNoLinearMemories(binary, module, label) {
   const imported = WebAssembly.Module.imports(module).filter(
     (entry) => entry.kind === "memory",
   ).length;
@@ -732,7 +764,7 @@ async function main() {
   // commit is compiled into the replay build and verified from the manifest.
   const v8xRef = git(v8x, ["rev-parse", "HEAD"]).trim();
   assertCleanDetachedCheckout("v8x", v8x, v8xRef);
-  assertCleanDetachedCheckout("js2", js2, EXPECTED_JS2_REF);
+  assertCleanDetachedCheckout("js2", js2, compilerRefForProfile(profile));
   assertCleanDetachedCheckout("Deno", deno, EXPECTED_DENO_REF);
   const denoRefFile = readFileSync(
     join(v8x, "tools/deno/DENO_REF"),
@@ -774,6 +806,16 @@ async function main() {
     );
   }
 
+  const graph = await createDenoSourceGraph({ js2, profile, execution, denoSources, lockSources });
+  return packageDenoArtifacts({
+    v8x, js2, deno, output, providerOutput, provenanceOutput, profile, execution,
+    v8xRef, lockSources, selectedInputs, ...graph,
+  });
+}
+
+// Pure source-graph construction is shared by strict production packaging and
+// local native integration tests. It does not certify checkout provenance.
+export async function createDenoSourceGraph({ js2, profile, execution, denoSources, lockSources }) {
   const exactUsage = denoSources.get("hello_world_usage.js");
   const appRoot = profile === "poc" ? "/v8x-deno-poc" : "/v8x-deno-runtime";
   const files = {
@@ -1000,7 +1042,8 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     // imports. The host global becomes authoritative before core captures ops.
     files[`${appRoot}/runtime-seed.ts`] = CONTEXT_VALUE_BRIDGE_SOURCE + RUNTIME_SEED.slice(0, RUNTIME_SEED.indexOf("const extrasBinding =")) +
       "\ndeclare function __v8x_attach_context(): void;\n__v8x_attach_context();\n";
-    files[`${appRoot}/staged-core.ts`] = stagedCoreSource(denoSources);
+    files[`${appRoot}/staged-core.ts`] = stagedCoreSource(denoSources, { nativeNamespace: true });
+    for (const [name, source] of Object.entries(stagedCoreNamespaceSources())) files[`${appRoot}/${name}`] = source;
     // compileMulti evaluates every supplied source file, not only imports.
     // The originals are represented exactly once inside the staged wrappers.
     for (const input of CORE_SCRIPT_INPUTS) delete files[`${appRoot}/core/${input.path}`];
@@ -1012,13 +1055,29 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
       .replace("if (stage !== 0) throw new Error(\"Deno core wrappers stage order mismatch\");", "if (stage !== 0 || scriptPhase() !== 4) throw new Error(\"Deno core wrappers stage order mismatch\");")
       .replace("if (stage !== 1) throw new Error(\"Deno core module stage order mismatch\");", "if (stage !== 1) throw new Error(\"Deno core module stage order mismatch\");\n  const namespace = runModule();\n  moduleCore = namespace.core;\n  moduleInternals = namespace.internals;\n  modulePrimordials = namespace.primordials;");
     files[`${appRoot}/entry.ts`] += contextValueBridgeEntrypoints("./runtime-seed.ts");
+    files[`${appRoot}/entry.ts`] += `
+import * as nativeCoreNamespace from "./core-namespace.ts";
+export function __v8x_deno_core_namespace_handle(): number {
+  if (stage < 2) throw new Error("Deno core namespace requested before module evaluation");
+  return imported__v8x_value_keep(nativeCoreNamespace);
+}
+`;
   } else {
     files[`${appRoot}/entry.ts`] += CONTEXT_VALUE_BRIDGE_SOURCE;
+    files[`${appRoot}/entry.ts`] += `
+import * as nativeCoreNamespace from "./core/mod.js";
+export function __v8x_deno_core_namespace_handle(): number {
+  if (stage < 2) throw new Error("Deno core namespace requested before module evaluation");
+  return __v8x_value_keep(nativeCoreNamespace);
+}
+`;
   }
 
   const graphInputs = [
     ...lockSources,
     ...(profile === "runtime" ? [recordInput("generated/staged-core.ts", Buffer.from(files[`${appRoot}/staged-core.ts`]), { role: "deferred-core-scripts" })] : []),
+    ...(profile === "runtime" ? ["core-bindings.ts", "core-namespace.ts"].map(name =>
+      recordInput(`generated/${name}`, Buffer.from(files[`${appRoot}/${name}`]), { role: "native-core-namespace" })) : []),
     recordInput("generated/runtime-seed.ts", Buffer.from(files[`${appRoot}/runtime-seed.ts`]), {
       role: "abi-bridge",
     }),
@@ -1041,15 +1100,16 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     graphInputs[graphInputs.length - 1] = recordInput("generated/entry.ts", Buffer.from(files[`${appRoot}/entry.ts`]), { role: "closed-world-aot-router" });
     graphInputs.push(recordInput("generated/aot-program.ts", Buffer.from(files[`${appRoot}/aot-program.ts`]), { role: "aot-program" }));
   }
+  return { files, appRoot, graphInputs };
+}
+
+async function packageDenoArtifacts({
+  v8x, js2, deno, output, providerOutput, provenanceOutput, profile, execution,
+  v8xRef, lockSources, selectedInputs, files, appRoot, graphInputs,
+}) {
+  const compilerRef = compilerRefForProfile(profile);
   const sourceGraphSha256 = inputSetDigest(graphInputs);
-  const appCompileOptions = execution === "aot" ? {
-    ...COMPILE_OPTIONS,
-    standaloneSymbolState: "export",
-  } : profile === "runtime" ? {
-    ...COMPILE_OPTIONS,
-    standaloneSymbolState: { module: "js2wasm:runtime-eval", reexport: true },
-    link: ["js2wasm:runtime-eval"],
-  } : COMPILE_OPTIONS;
+  const appCompileOptions = profile === "runtime" ? runtimeCompileOptions(execution) : COMPILE_OPTIONS;
   const compileOptionsPreimage = profile === "poc" ? COMPILE_OPTIONS_PREIMAGE : {
     ...COMPILE_OPTIONS_PREIMAGE,
     ...(execution === "aot" ? { compiler: { api: "compileMulti", provider_kind: "none" }, execution } : {}),
@@ -1073,6 +1133,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   );
   const appBinary = checkedCompile(app, `Deno ${profile} application`);
   const appModule = new WebAssembly.Module(appBinary);
+  if (profile === "runtime") assertRuntimeSchedulerABI(appModule);
   assertNoLinearMemories(
     appBinary,
     appModule,
@@ -1095,6 +1156,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   );
   const requiredAppExports = [
     "__v8x_probe_deno_core_bootstrap",
+    "__v8x_deno_core_namespace_handle",
     "__v8x_context_global_this",
     "__v8x_context_call",
     ...CONTEXT_VALUE_BRIDGE_EXPORTS,
@@ -1110,6 +1172,9 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
           "__v8x_stage_deno_hello_world_usage",
           "__v8x_probe_deno_stage_state",
           "__v8x_probe_deno_runtime_usage_stage",
+          "__drain_one_microtask",
+          "__drain_microtasks",
+          "__microtasks_pending",
         ]
       : []),
   ];
@@ -1125,7 +1190,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     assertRawModuleInitializesWithStubImports(appBinary, profile);
     const provenance = {
       schema_version: 2, kind: "v8x-js2wasm-deno-aot-raw-inputs", profile, execution,
-      revisions: { v8x: v8xRef, js2: EXPECTED_JS2_REF, deno: EXPECTED_DENO_REF },
+      revisions: { v8x: v8xRef, js2: compilerRef, deno: EXPECTED_DENO_REF },
       sources: lockSources, source_graph: { sha256: sourceGraphSha256, inputs: graphInputs },
       compile_options: { canonical_json: canonicalCompileOptions, sha256: computedCompileOptionsDigest },
       runtime_eval_provider: null, imports,
@@ -1232,7 +1297,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     ...(profile === "runtime" ? { profile } : {}),
     revisions: {
       v8x: v8xRef,
-      js2: EXPECTED_JS2_REF,
+      js2: compilerRef,
       deno: EXPECTED_DENO_REF,
     },
     sources: lockSources.map(lockedInputRecord),
@@ -1260,7 +1325,7 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
     ...(profile === "runtime" ? { profile } : {}),
     revisions: {
       v8x: { ref: v8xRef, clean: true, detached: true },
-      js2: { ref: EXPECTED_JS2_REF, clean: true, detached: true },
+      js2: { ref: compilerRef, clean: true, detached: true },
       deno: { ref: EXPECTED_DENO_REF, clean: true, detached: true },
     },
     sources: lockSources,
@@ -1322,7 +1387,9 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
   );
 }
 
-main().catch((error) => {
-  console.error(error?.stack ?? error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(error?.stack ?? error);
+    process.exitCode = 1;
+  });
+}

@@ -215,7 +215,7 @@ V8X_JS2WASM_DENO_CORE_AOT_OUTPUT="$APP_AOT" \
 V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION="$APP_ATTESTATION" \
 CARGO_TARGET_DIR="$OUT_DIR/trusted-packaging-target" \
   "$CARGO_BIN" test --manifest-path "$V8X_DIR/Cargo.toml" \
-    --release --locked --no-default-features --features js2wasm_deno_poc \
+    --release --locked --no-default-features --features js2wasm_deno_poc,js2wasm_runtime_compile \
     --test js2wasm_spike precompiles_exact_deno_core_artifact -- --exact
 
 V8X_JS2WASM_RUNTIME_EVAL_WASM="$RAW_PROVIDER" \
@@ -223,7 +223,7 @@ V8X_JS2WASM_RUNTIME_EVAL_AOT_OUTPUT="$PROVIDER_AOT" \
 V8X_JS2WASM_RUNTIME_EVAL_AOT_ATTESTATION="$PROVIDER_ATTESTATION" \
 CARGO_TARGET_DIR="$OUT_DIR/trusted-packaging-target" \
   "$CARGO_BIN" test --manifest-path "$V8X_DIR/Cargo.toml" \
-    --release --locked --no-default-features --features js2wasm_deno_poc \
+    --release --locked --no-default-features --features js2wasm_deno_poc,js2wasm_runtime_compile \
     --test js2wasm_spike \
     precompiles_exact_runtime_eval_provider_artifact -- --exact
 
@@ -232,7 +232,7 @@ V8X_JS2WASM_DENO_CORE_AOT_MODULE="$APP_AOT" \
 V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE="$PROVIDER_AOT" \
 CARGO_TARGET_DIR="$OUT_DIR/trusted-packaging-target" \
   "$CARGO_BIN" test --manifest-path "$V8X_DIR/Cargo.toml" \
-    --release --locked --no-default-features --features js2wasm_deno_poc \
+    --release --locked --no-default-features --features js2wasm_deno_poc,js2wasm_runtime_compile \
     --test js2wasm_spike \
     boots_exact_deno_core_artifact_in_two_wasmtime_stores -- --exact
 [[ -s "$APP_AOT" && -s "$PROVIDER_AOT" && -s "$APP_ATTESTATION" && -s "$PROVIDER_ATTESTATION" ]] || \

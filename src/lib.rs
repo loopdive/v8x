@@ -139,17 +139,23 @@ pub use js2wasm_spike::js2wasm_test_graph_packages;
 pub use js2wasm_spike::{
   js2wasm_precompile_deno_core_for_test,
   js2wasm_precompile_runtime_eval_provider_for_test,
-  js2wasm_test_context_store, js2wasm_test_context_store_failure,
-  js2wasm_test_realm_values,
+  js2wasm_test_compiler_source_identity, js2wasm_test_context_store,
+  js2wasm_test_context_store_failure, js2wasm_test_realm_values,
 };
 
 #[cfg(feature = "engine_js2wasm")]
 mod js2wasm;
+#[cfg(all(
+  feature = "engine_js2wasm",
+  not(feature = "js2wasm_deno_poc_replay")
+))]
+#[doc(hidden)]
+pub use js2wasm::realm_objects::js2wasm_attach_precompiled_realm_for_test;
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
 pub use js2wasm::realm_objects::{
-  js2wasm_attach_realm_for_test, js2wasm_attach_graph_for_test, js2wasm_bootstrap_context_for_test,
-  js2wasm_run_core_script_for_test,
+  js2wasm_attach_graph_for_test, js2wasm_attach_realm_for_test,
+  js2wasm_bootstrap_context_for_test, js2wasm_run_core_script_for_test,
 };
 
 #[cfg(feature = "engine_quickjs")]

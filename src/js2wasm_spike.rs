@@ -29,6 +29,8 @@ compile_error!(
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+#[path = "js2wasm_graph_calls.rs"]
+mod graph_calls;
 #[path = "js2wasm_graph_packages.rs"]
 mod graph_packages;
 #[path = "js2wasm_realm_values.rs"]
@@ -44,6 +46,8 @@ pub fn js2wasm_test_graph_packages() {
 use realm_values::CallerRealm;
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub use realm_values::js2wasm_test_realm_values;
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+pub(crate) use realm_values::load_precompiled_realm_for_test;
 pub(crate) use realm_values::{RealmAccess, RealmValue};
 #[cfg(feature = "js2wasm_runtime_compile")]
 pub(crate) use realm_values::{
@@ -59,7 +63,7 @@ pub use context_store_tests::{
   failed_graph_initialization_preserves_primary_and_retains_graph as js2wasm_test_context_store_failure,
   graphs_share_store_without_replacing_primary_instance as js2wasm_test_context_store,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -131,7 +135,10 @@ const RUNTIME_EVAL_PROVIDER_EXPORTS: &[&str] = &[
 ];
 #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 const RUNTIME_EVAL_AOT_MODULE_ENV: &str = "V8X_JS2WASM_RUNTIME_EVAL_AOT_MODULE";
-#[cfg(any(feature = "js2wasm_deno_poc", feature = "js2wasm_deno_poc_replay"))]
+#[cfg(any(
+  all(feature = "js2wasm_deno_poc", feature = "js2wasm_runtime_compile"),
+  feature = "js2wasm_deno_poc_replay"
+))]
 const DENO_POC_WASM_BACKTRACE_DETAILS_DISABLED: &str = "disable";
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 const DENO_POC_MANIFEST_ENV: &str = "V8X_JS2WASM_DENO_POC_MANIFEST";
@@ -241,10 +248,10 @@ const DENO_SCRIPT_RESULT_CODE_UNIT: &str =
   "__v8x_script_result_utf16_code_unit";
 #[cfg(feature = "js2wasm_runtime_compile")]
 const DENO_CORE_AOT_OUTPUT_ENV: &str = "V8X_JS2WASM_DENO_CORE_AOT_OUTPUT";
-#[cfg(feature = "js2wasm_deno_poc")]
+#[cfg(all(feature = "js2wasm_deno_poc", feature = "js2wasm_runtime_compile"))]
 const DENO_CORE_AOT_ATTESTATION_ENV: &str =
   "V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION";
-#[cfg(feature = "js2wasm_deno_poc")]
+#[cfg(all(feature = "js2wasm_deno_poc", feature = "js2wasm_runtime_compile"))]
 const RUNTIME_EVAL_AOT_ATTESTATION_ENV: &str =
   "V8X_JS2WASM_RUNTIME_EVAL_AOT_ATTESTATION";
 #[cfg(feature = "js2wasm_runtime_compile")]
@@ -262,6 +269,7 @@ const DEFERRED_BOOTSTRAP_IMPORTS: &[(&str, &str)] = &[
 ];
 
 const DENO_HOST_IMPORTS: &[&str] = &[
+  "__v8x_microtask_notify",
   "__v8x_attach_context",
   "__v8x_host_call",
   CWD_LENGTH_IMPORT,
@@ -983,6 +991,7 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  standalone_microtasks: VecDeque<wasmtime::Func>,
   realm_profile: realm_values::RealmCallProfile,
   // Numeric handles refer to immutable strings strongly rooted by this realm.
   // The cache is bounded and never shared across Stores.
@@ -991,6 +1000,7 @@ struct DenoHostState {
   limiter: DenoHeapLimiter,
   realm_id: usize,
   realm_instance: Option<Instance>,
+  aot_call_graphs: Vec<Instance>,
   realm_owner_identity: usize,
   heap_isolate: usize,
   cwd: Vec<u16>,
@@ -1533,6 +1543,32 @@ impl SharedDenoRuntime {
     linker
       .func_wrap(
         DENO_IMPORT_MODULE,
+        "__v8x_microtask_notify",
+        |mut caller: Caller<'_, DenoHostState>| -> wasmtime::Result<()> {
+          let drain = caller
+            .get_export("__drain_one_microtask")
+            .and_then(|export| export.into_func())
+            .ok_or_else(|| {
+              wasmtime::Error::msg("notifying graph lacks single-job drain ABI")
+            })?;
+          drain.typed::<(), ()>(&caller)?;
+          let state = caller.data_mut();
+          if state.heap_isolate == 0 {
+            state.standalone_microtasks.push_back(drain);
+          } else {
+            crate::js2wasm::schedule_compiled_microtask(
+              state.heap_isolate as *mut crate::RealIsolate,
+              state.realm_id,
+              drain,
+            );
+          }
+          Ok(())
+        },
+      )
+      .map_err(|error| format!("bind microtask notification: {error:#}"))?;
+    linker
+      .func_wrap(
+        DENO_IMPORT_MODULE,
         "__v8x_attach_context",
         |caller: Caller<'_, DenoHostState>| -> wasmtime::Result<()> {
           let owner =
@@ -1900,6 +1936,7 @@ impl SharedDenoRuntime {
           && import.name() == "__v8x_runtime_eval_json");
       let context_import = import.module() == CONTEXT_IMPORT_MODULE
         && match import.ty() {
+          wasmtime::ExternType::Tag(_) => import.name() == "__exn_tag",
           wasmtime::ExternType::Func(_) => {
             CONTEXT_IMPORTS.contains(&import.name())
           }
@@ -2398,6 +2435,35 @@ pub(crate) struct DenoRuntime {
 }
 
 impl DenoRuntime {
+  pub(crate) fn realm_id(&self) -> usize {
+    self.realm_id
+  }
+
+  pub(crate) fn run_microtask(
+    &mut self,
+    drain: wasmtime::Func,
+  ) -> Result<(), String> {
+    drain
+      .typed::<(), ()>(&self.store)
+      .map_err(|error| format!("type compiled single-job drain: {error:#}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("run compiled microtask: {error:#}"))
+  }
+
+  pub(crate) fn drain_microtasks(&mut self) -> Result<bool, String> {
+    let mut did_work = false;
+    while let Some(drain) =
+      self.store.data_mut().standalone_microtasks.pop_front()
+    {
+      self.run_microtask(drain)?;
+      did_work = true;
+    }
+    Ok(
+      graph_calls::drain_microtasks(&mut self.store, self.realm_instance)?
+        || did_work,
+    )
+  }
+  #[cfg_attr(not(feature = "js2wasm_runtime_compile"), allow(dead_code))]
   fn instantiate(
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
@@ -2439,16 +2505,23 @@ impl DenoRuntime {
     heap_isolate: usize,
   ) -> Result<Self, String> {
     let _phase = DenoPhaseTimer::new("store-and-instances");
+    let realm_id = NEXT_REALM_ID
+      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+        id.checked_add(1)
+      })
+      .map_err(|_| "Wasmtime realm identity space exhausted".to_string())?;
     let cwd = cwd.to_string_lossy().encode_utf16().collect();
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        standalone_microtasks: VecDeque::new(),
         string_handles: HashMap::new(),
         realm_profile: realm_values::RealmCallProfile::new(),
         host_buffers: Vec::new(),
         limiter: DenoHeapLimiter { heap_isolate },
-        realm_id: 0,
+        realm_id,
         realm_instance: None,
+        aot_call_graphs: Vec::new(),
         realm_owner_identity: 0,
         heap_isolate,
         cwd,
@@ -2474,12 +2547,6 @@ impl DenoRuntime {
       None,
     )?;
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
-    let realm_id = NEXT_REALM_ID
-      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-        id.checked_add(1)
-      })
-      .map_err(|_| "Wasmtime realm identity space exhausted".to_string())?;
-    store.data_mut().realm_id = realm_id;
     store.data_mut().realm_instance = Some(instance);
     Ok(Self {
       realm_id,
@@ -2527,8 +2594,14 @@ impl DenoRuntime {
         instance
       }
       PreparedModule::RuntimeEval(module) => {
-        let provider = if let Some(provider) = *existing_provider {
-          provider
+        let needs_eval = module.imports().any(|import| {
+          import.module() == RUNTIME_EVAL_IMPORT_MODULE
+            || import.module() == RUNTIME_EVAL_JSON_IMPORT_MODULE
+        });
+        let provider = if !needs_eval && context_instance.is_some() {
+          None
+        } else if let Some(provider) = *existing_provider {
+          Some(provider)
         } else {
           let provider_module = shared.runtime_eval_provider()?;
           let provider = shared
@@ -2542,9 +2615,11 @@ impl DenoRuntime {
             .fetch_add(1, Ordering::Relaxed);
           // Retain the realm even if linking or instantiating the app fails.
           *existing_provider = Some(provider);
-          provider
+          Some(provider)
         };
-        let realm = context_instance.unwrap_or(provider);
+        let realm = context_instance
+          .or(provider)
+          .ok_or_else(|| "linked graph has no context realm".to_string())?;
         // Context imports must resolve to the retained core instance when
         // bootstrapped. The interpreter receives that realm as an argument.
         // Do
@@ -2552,6 +2627,9 @@ impl DenoRuntime {
         for import in module.imports() {
           if import.module() == CONTEXT_IMPORT_MODULE
             && match import.ty() {
+              wasmtime::ExternType::Tag(_) => {
+                realm.get_tag(&mut *store, import.name()).is_none()
+              }
               wasmtime::ExternType::Func(_) => {
                 realm.get_func(&mut *store, import.name()).is_none()
               }
@@ -2569,16 +2647,18 @@ impl DenoRuntime {
         }
         let mut linker = shared.linker.clone();
         linker.allow_shadowing(true);
-        linker
-          .instance(&mut *store, RUNTIME_EVAL_IMPORT_MODULE, provider)
-          .map_err(|error| {
-            format!("bind js2wasm runtime-eval provider exports: {error:#}")
-          })?;
-        linker
-          .instance(&mut *store, RUNTIME_EVAL_JSON_IMPORT_MODULE, provider)
-          .map_err(|error| {
-            format!("bind js2wasm runtime-eval JSON export: {error:#}")
-          })?;
+        if let Some(provider) = provider {
+          linker
+            .instance(&mut *store, RUNTIME_EVAL_IMPORT_MODULE, provider)
+            .map_err(|error| {
+              format!("bind js2wasm runtime-eval provider exports: {error:#}")
+            })?;
+          linker
+            .instance(&mut *store, RUNTIME_EVAL_JSON_IMPORT_MODULE, provider)
+            .map_err(|error| {
+              format!("bind js2wasm runtime-eval JSON export: {error:#}")
+            })?;
+        }
         linker
           .instance(&mut *store, CONTEXT_IMPORT_MODULE, realm)
           .map_err(|error| {
@@ -2614,6 +2694,7 @@ impl DenoRuntime {
     // Keep the graph alive even if initialization throws after publishing
     // values. Restore the primary instance used by the Deno core bridge.
     self.graph_instances.push(instance);
+    self.store.data_mut().aot_call_graphs.push(instance);
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
     let primary = std::mem::replace(&mut self.instance, instance);
     let result = (|| {
@@ -2759,7 +2840,9 @@ impl DenoRuntime {
       .map_err(|error| format!("type {DENO_SCRIPT_RESULT_LENGTH}: {error}"))?
       .call(&mut self.store, ())
       .map_err(|error| {
-        format!("call {DENO_SCRIPT_RESULT_LENGTH}: {error:#}")
+        format!(
+          "call {DENO_SCRIPT_RESULT_LENGTH} (script status {status}): {error:#}"
+        )
       })?;
     if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
       return Err(format!("classic-script result length is invalid: {length}"));
@@ -3214,6 +3297,49 @@ fn hash_file_if_present(
 }
 
 #[cfg(feature = "js2wasm_runtime_compile")]
+fn hash_compiler_source_tree(
+  hasher: &mut Sha256,
+  path: &Path,
+  visited: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+  let canonical = fs::canonicalize(path).map_err(|error| {
+    format!("resolve compiler source {}: {error}", path.display())
+  })?;
+  update_graph_digest(hasher, path.to_string_lossy().as_bytes());
+  if !visited.insert(canonical) {
+    return Ok(());
+  }
+  let metadata = fs::metadata(path).map_err(|error| {
+    format!("inspect compiler source {}: {error}", path.display())
+  })?;
+  if metadata.is_file() {
+    let bytes = fs::read(path).map_err(|error| {
+      format!("read compiler source {}: {error}", path.display())
+    })?;
+    update_graph_digest(hasher, &bytes);
+    return Ok(());
+  }
+  if !metadata.is_dir() {
+    return Err(format!(
+      "compiler source is not a regular file or directory: {}",
+      path.display()
+    ));
+  }
+  let mut children = fs::read_dir(path)
+    .map_err(|error| {
+      format!("list compiler sources {}: {error}", path.display())
+    })?
+    .map(|entry| entry.map(|entry| entry.path()))
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| error.to_string())?;
+  children.sort();
+  for child in children {
+    hash_compiler_source_tree(hasher, &child, visited)?;
+  }
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
 fn runtime_compiler_identity() -> Result<String, String> {
   if let Some(identity) = std::env::var_os(RUNTIME_COMPILER_ID_ENV) {
     return Ok(identity.to_string_lossy().into_owned());
@@ -3243,6 +3369,20 @@ fn runtime_compiler_identity() -> Result<String, String> {
     let workdir = PathBuf::from(workdir);
     for name in ["package.json", "pnpm-lock.yaml", "package-lock.json"] {
       hash_file_if_present(&mut hasher, &workdir.join(name))?;
+    }
+    // A source-checkout compiler changes without changing its package version
+    // or sidecar script. Cached graphs must not silently reuse old codegen.
+    let sources = workdir.join("src");
+    match fs::metadata(&sources) {
+      Ok(_) => hash_compiler_source_tree(
+        &mut hasher,
+        &sources,
+        &mut std::collections::HashSet::new(),
+      )?,
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => {
+        return Err(format!("inspect compiler source root: {error}"));
+      }
     }
   }
   Ok(format!("{:x}", hasher.finalize()))
@@ -3309,7 +3449,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
   }
 }
 
-#[cfg(feature = "js2wasm_deno_poc")]
+#[cfg(all(feature = "js2wasm_deno_poc", feature = "js2wasm_runtime_compile"))]
 fn persist_deno_poc_precompile_pair(
   artifact_output_env: &str,
   attestation_output_env: &str,
@@ -3571,6 +3711,67 @@ impl TempDir {
 impl Drop for TempDir {
   fn drop(&mut self) {
     let _ = fs::remove_dir_all(&self.path);
+  }
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_test_compiler_source_identity() {
+  compiler_source_identity_tests::tracks_nested_codegen_changes_and_file_additions();
+  #[cfg(unix)]
+  compiler_source_identity_tests::follows_source_symlinks_without_looping_and_rejects_missing_inputs();
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+mod compiler_source_identity_tests {
+  use super::*;
+
+  fn digest(path: &Path) -> Result<Vec<u8>, String> {
+    let mut hasher = Sha256::new();
+    hash_compiler_source_tree(&mut hasher, path, &mut HashSet::new())?;
+    Ok(hasher.finalize().to_vec())
+  }
+
+  pub(super) fn tracks_nested_codegen_changes_and_file_additions() {
+    let temp = TempDir::new().unwrap();
+    let directory = temp.path.join("codegen");
+    fs::create_dir(&directory).unwrap();
+    let source = directory.join("prototype.ts");
+    fs::write(&source, "old emitter").unwrap();
+    let original = digest(&temp.path).unwrap();
+    assert_eq!(digest(&temp.path).unwrap(), original);
+    fs::write(&source, "new emitter").unwrap();
+    assert_ne!(digest(&temp.path).unwrap(), original);
+    fs::write(&source, "old emitter").unwrap();
+    assert_eq!(digest(&temp.path).unwrap(), original);
+    let added = directory.join("new-helper.ts");
+    fs::write(&added, "new helper").unwrap();
+    assert_ne!(digest(&temp.path).unwrap(), original);
+    fs::remove_file(&added).unwrap();
+    assert_eq!(digest(&temp.path).unwrap(), original);
+  }
+
+  #[cfg(unix)]
+  pub(super) fn follows_source_symlinks_without_looping_and_rejects_missing_inputs()
+   {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path.join("emitter.ts");
+    fs::write(&source, "old").unwrap();
+    std::os::unix::fs::symlink(&temp.path, temp.path.join("cycle")).unwrap();
+    std::os::unix::fs::symlink(&source, temp.path.join("alias.ts")).unwrap();
+    let original = digest(&temp.path).unwrap();
+    fs::write(&source, "new").unwrap();
+    assert_ne!(digest(&temp.path).unwrap(), original);
+    std::os::unix::fs::symlink(
+      temp.path.join("missing"),
+      temp.path.join("broken.ts"),
+    )
+    .unwrap();
+    assert!(
+      digest(&temp.path)
+        .unwrap_err()
+        .contains("resolve compiler source")
+    );
   }
 }
 

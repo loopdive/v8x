@@ -4,7 +4,10 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(any(
+  feature = "js2wasm_runtime_compile",
+  not(feature = "js2wasm_deno_poc_replay")
+))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -31,7 +34,7 @@ function cwd(): string {
 export const Deno = { cwd };
 "#;
 
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(any(feature = "js2wasm_runtime_compile", feature = "js2wasm_deno_poc"))]
 #[derive(Debug, PartialEq)]
 enum DenoOpEvent {
   Print {
@@ -51,6 +54,116 @@ enum DenoOpEvent {
 
 unsafe extern "C" fn noop_callback(_info: *const v8::FunctionCallbackInfo) {}
 
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn return_reaction_continuation(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let parts = unsafe { &*info }.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let value = scope.get_continuation_preserved_embedder_data();
+  let mut returned = parts.return_value;
+  returned.set(value);
+  let mutation = v8::Number::new(scope, 99.0);
+  scope.set_continuation_preserved_embedder_data(mutation.into());
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+thread_local! {
+  static DENO_PENDING_OP_IDS: std::cell::RefCell<Vec<(i32, Option<f64>)>> = const { std::cell::RefCell::new(Vec::new()) };
+  static DENO_REACTION_ORDER: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn record_reaction_order(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let order = args.data().number_value(scope).unwrap();
+  DENO_REACTION_ORDER.with(|events| events.borrow_mut().push(order));
+  let mut returned = parts.return_value;
+  returned.set(args.get(0));
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_pending_probe_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let args = v8::FunctionCallbackArguments::from_function_callback_info(info);
+  v8::callback_scope!(unsafe scope, info);
+  let id = args.get(0).number_value(scope);
+  DENO_PENDING_OP_IDS.with(|ids| ids.borrow_mut().push((args.length(), id)));
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_async_probe_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let args = v8::FunctionCallbackArguments::from_function_callback_info(info);
+  let mut rv = v8::ReturnValue::from_function_callback_info(info);
+  v8::callback_scope!(unsafe scope, info);
+  assert_eq!(args.length(), 1, "Deno async stub supplies a promise id");
+  assert!(args.get(0).is_number());
+  if args.data().is_object() {
+    rv.set(args.data());
+  } else {
+    let result = v8::Integer::new(scope, 42);
+    rv.set(result.into());
+  }
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_op_extras_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  DENO_STARTUP_OP_EVENTS.with(|events| events.borrow_mut().push("extras"));
+  let parts = unsafe { &*info }.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let context = scope.get_current_context();
+  let extras = context.get_extras_binding_object(scope);
+  let mut returned = parts.return_value;
+  returned.set(extras.into());
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_op_return_data_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  DENO_STARTUP_OP_EVENTS.with(|events| events.borrow_mut().push("import-meta"));
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let mut returned = parts.return_value;
+  returned.set(args.data());
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_op_capture_bootstrap_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  DENO_STARTUP_OP_EVENTS
+    .with(|events| events.borrow_mut().push("capture-bootstrap"));
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  assert_eq!(args.length(), 1);
+  assert!(args.get(0).is_object());
+  let global = scope.get_current_context().global(scope);
+  let key = v8::String::new(scope, "__capturedBootstrap").unwrap();
+  assert_eq!(global.set(scope, key.into(), args.get(0)), Some(true));
+}
+
 unsafe extern "C" fn count_backing_store_deletion(
   _data: *mut std::ffi::c_void,
   _byte_length: usize,
@@ -69,14 +182,20 @@ thread_local! {
     const { RefCell::new(None) };
   static MICROTASK_EVENTS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
   static PROMISE_EVENTS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+  static ORDERED_MICROTASK_EVENTS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(any(feature = "js2wasm_runtime_compile", feature = "js2wasm_deno_poc"))]
 thread_local! {
   static DENO_OP_EVENTS: RefCell<Vec<DenoOpEvent>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(feature = "js2wasm_deno_poc")]
+thread_local! {
+  static DENO_STARTUP_OP_EVENTS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(feature = "js2wasm_runtime_compile", feature = "js2wasm_deno_poc"))]
 unsafe extern "C" fn deno_op_print_callback(
   info: *const v8::FunctionCallbackInfo,
 ) {
@@ -91,20 +210,22 @@ unsafe extern "C" fn deno_op_print_callback(
   assert!(message.is_string());
   let message = v8::Local::<v8::String>::try_from(message).unwrap();
   let is_error = args.get(1);
-  assert!(is_error.is_boolean());
+  // The unchanged JS print wrapper forwards an omitted isErr as undefined.
+  // Deno's boolean op argument uses JS truthiness, not a Boolean-only carrier.
+  let is_error = is_error.boolean_value(scope);
   let data = unsafe {
     v8::Local::<v8::External>::cast_unchecked(args.data()).value() as usize
   };
   DENO_OP_EVENTS.with(|events| {
     events.borrow_mut().push(DenoOpEvent::Print {
       message: message.to_rust_string_lossy(scope),
-      is_error: is_error.is_true(),
+      is_error,
       data,
     });
   });
 }
 
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(any(feature = "js2wasm_runtime_compile", feature = "js2wasm_deno_poc"))]
 unsafe extern "C" fn deno_op_sum_callback(
   info: *const v8::FunctionCallbackInfo,
 ) {
@@ -241,7 +362,7 @@ fn origin<'s>(
   )
 }
 
-#[cfg(feature = "js2wasm_runtime_compile")]
+#[cfg(any(feature = "js2wasm_runtime_compile", feature = "js2wasm_deno_poc"))]
 fn classic_origin<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   name: v8::Local<'s, v8::Value>,
@@ -452,6 +573,17 @@ fn evaluates_synthetic_module_once_with_stable_namespace_and_promise() {
   let exported_label = namespace.get(scope, label_name.into()).unwrap();
   assert!(std::ptr::eq(&*exported_op, &*op_value));
   assert!(std::ptr::eq(&*exported_label, &*label_value));
+  let replacement = v8::Number::new(scope, 17.0);
+  assert_eq!(
+    namespace.set(scope, op_name.into(), replacement.into()),
+    Some(false)
+  );
+  assert!(
+    namespace
+      .get(scope, op_name.into())
+      .unwrap()
+      .strict_equals(op_value)
+  );
 
   let repeated_value = module.evaluate(scope).unwrap();
   assert!(std::ptr::eq(&*evaluation_value, &*repeated_value));
@@ -592,6 +724,322 @@ export { core, internals, primordials };\n",
 
   let ordinary_object: v8::Local<v8::Value> = v8::Object::new(scope).into();
   assert!(!ordinary_object.is_module_namespace_object());
+}
+
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[test]
+#[ignore = "requires trusted context and source-bound graph artifacts, or build-time compilation"]
+fn source_namespace_exposes_live_values_and_callable_identity() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("context-value bridge artifact");
+  if Path::new(&path)
+    .extension()
+    .is_some_and(|value| value == "cwasm")
+  {
+    v8::js2wasm_attach_precompiled_realm_for_test(&context, Path::new(&path))
+      .unwrap();
+  } else {
+    #[cfg(feature = "js2wasm_runtime_compile")]
+    v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
+    #[cfg(not(feature = "js2wasm_runtime_compile"))]
+    panic!("compiler-free namespace test requires a trusted .cwasm context");
+  }
+  let before = v8::js2wasm_runtime_stats().unwrap();
+  let text = v8::String::new(scope,
+    "export let value=41; export function bump(){value++;} export const marker=Object.freeze({token:17}); export function fail(){throw marker;} export const proto={inherited:7}; export const otherProto={inherited:8}; const box={answer:42,set blocked(value){throw marker;}}; Object.setPrototypeOf(box,proto); export default box; export const settled=Promise.resolve(42); let resolvePending; export const pending=new Promise(resolve=>{resolvePending=resolve;}); export function settle(){resolvePending(42);}").unwrap();
+  let resource = v8::String::new(scope, "ext:namespace/live.js").unwrap();
+  let script_origin = origin(scope, resource.into());
+  let mut source = v8::script_compiler::Source::new(text, Some(&script_origin));
+  let module = v8::script_compiler::compile_module(scope, &mut source).unwrap();
+  assert!(
+    module
+      .instantiate_module(scope, resolve_dependency)
+      .unwrap()
+  );
+  let before_namespace = module.get_module_namespace();
+  let result = module.evaluate(scope).expect("module evaluation");
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  let namespace = module.get_module_namespace();
+  assert!(std::ptr::eq(&*before_namespace, &*namespace));
+  assert!(namespace.is_module_namespace_object());
+  let namespace = v8::Local::<v8::Object>::try_from(namespace).unwrap();
+  let value_key = v8::String::new(scope, "value").unwrap();
+  assert_eq!(
+    namespace
+      .get(scope, value_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(41.0)
+  );
+  let bump_key = v8::String::new(scope, "bump").unwrap();
+  let bump = namespace.get(scope, bump_key.into()).unwrap();
+  let again = namespace.get(scope, bump_key.into()).unwrap();
+  assert!(std::ptr::eq(&*bump, &*again));
+  let bump = v8::Local::<v8::Function>::try_from(bump).unwrap();
+  let undefined = v8::undefined(scope);
+  let completion = bump.call(scope, undefined.into(), &[]).unwrap();
+  assert!(
+    completion.is_undefined(),
+    "void completion is a successful call"
+  );
+  assert_eq!(
+    namespace
+      .get(scope, value_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let replacement = v8::Number::new(scope, 0.0);
+  assert_eq!(
+    namespace.set(scope, value_key.into(), replacement.into()),
+    Some(false)
+  );
+  assert_eq!(
+    namespace
+      .get(scope, value_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let default_key = v8::String::new(scope, "default").unwrap();
+  let default = namespace.get(scope, default_key.into()).unwrap();
+  let default = v8::Local::<v8::Object>::try_from(default).unwrap();
+  let answer_key = v8::String::new(scope, "answer").unwrap();
+  assert_eq!(
+    default
+      .get(scope, answer_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let assigned = v8::Number::new(scope, 43.0);
+  assert_eq!(
+    default.set(scope, answer_key.into(), assigned.into()),
+    Some(true)
+  );
+  assert_eq!(
+    default
+      .get(scope, answer_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(43.0)
+  );
+  let proto_key = v8::String::new(scope, "proto").unwrap();
+  let proto = namespace.get(scope, proto_key.into()).unwrap();
+  assert!(
+    default.get_prototype(scope).unwrap().strict_equals(proto),
+    "graph prototype identity"
+  );
+  let inherited_key = v8::String::new(scope, "inherited").unwrap();
+  assert_eq!(
+    default
+      .get(scope, inherited_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(7.0)
+  );
+  let other_key = v8::String::new(scope, "otherProto").unwrap();
+  let other = namespace.get(scope, other_key.into()).unwrap();
+  assert_eq!(default.set_prototype(scope, other), Some(true));
+  assert!(default.get_prototype(scope).unwrap().strict_equals(other));
+  assert_eq!(
+    default
+      .get(scope, inherited_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(8.0)
+  );
+  let other_object = v8::Local::<v8::Object>::try_from(other).unwrap();
+  let updated = v8::Number::new(scope, 9.0);
+  assert_eq!(
+    other_object.set(scope, inherited_key.into(), updated.into()),
+    Some(true)
+  );
+  assert_eq!(
+    default
+      .get(scope, inherited_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(9.0),
+    "live prototype fields are not copied"
+  );
+  assert_eq!(
+    other_object.set_prototype(scope, default.into()),
+    Some(false),
+    "prototype cycle refusal"
+  );
+  let marker_key = v8::String::new(scope, "marker").unwrap();
+  for name in ["settled", "pending"] {
+    let key = v8::String::new(scope, name).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(
+      namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let handler = v8::Function::builder_raw(realm_host_leaf)
+      .build(scope)
+      .unwrap();
+    let derived = promise
+      .then(scope, handler)
+      .expect("reaction on separately compiled graph Promise");
+    assert_eq!(derived.state(), v8::PromiseState::Pending);
+    if name == "pending" {
+      let key = v8::String::new(scope, "settle").unwrap();
+      let settle = v8::Local::<v8::Function>::try_from(
+        namespace.get(scope, key.into()).unwrap(),
+      )
+      .unwrap();
+      assert!(
+        settle
+          .call(scope, undefined.into(), &[])
+          .unwrap()
+          .is_undefined()
+      );
+      assert_eq!(derived.state(), v8::PromiseState::Pending);
+    }
+    scope.perform_microtask_checkpoint();
+    assert_eq!(derived.state(), v8::PromiseState::Fulfilled);
+    assert_eq!(derived.result(scope).number_value(scope), Some(43.0));
+    let twice = derived.then(scope, handler).unwrap();
+    let thrower = v8::Function::builder_raw(realm_host_throw)
+      .build(scope)
+      .unwrap();
+    let rejected = twice.then(scope, thrower).unwrap();
+    let recover = v8::Function::builder_raw(noop_callback)
+      .build(scope)
+      .unwrap();
+    let recovered = rejected.catch(scope, recover).unwrap();
+    assert_eq!(twice.state(), v8::PromiseState::Pending);
+    assert_eq!(recovered.state(), v8::PromiseState::Pending);
+    scope.perform_microtask_checkpoint();
+    assert_eq!(twice.state(), v8::PromiseState::Fulfilled);
+    assert_eq!(twice.result(scope).number_value(scope), Some(44.0));
+    assert_eq!(rejected.state(), v8::PromiseState::Rejected);
+    assert_eq!(recovered.state(), v8::PromiseState::Fulfilled);
+    assert!(recovered.result(scope).is_undefined());
+  }
+  // Two graph-owned Promise queues plus native work must share enqueue order.
+  let second_text =
+    v8::String::new(scope, "export const settled=Promise.resolve(42);")
+      .unwrap();
+  let second_resource =
+    v8::String::new(scope, "ext:namespace/second.js").unwrap();
+  let second_origin = origin(scope, second_resource.into());
+  let mut second_source =
+    v8::script_compiler::Source::new(second_text, Some(&second_origin));
+  let second_module =
+    v8::script_compiler::compile_module(scope, &mut second_source).unwrap();
+  assert!(
+    second_module
+      .instantiate_module(scope, resolve_dependency)
+      .unwrap()
+  );
+  let second_completion = second_module.evaluate(scope).unwrap();
+  assert_eq!(
+    v8::Local::<v8::Promise>::try_from(second_completion)
+      .unwrap()
+      .state(),
+    v8::PromiseState::Fulfilled
+  );
+  let second_namespace =
+    v8::Local::<v8::Object>::try_from(second_module.get_module_namespace())
+      .unwrap();
+  ORDERED_MICROTASK_EVENTS.with(|events| events.borrow_mut().clear());
+  let settled_key = v8::String::new(scope, "settled").unwrap();
+  for (graph, marker) in [(namespace, 1), (second_namespace, 2)] {
+    let promise = v8::Local::<v8::Promise>::try_from(
+      graph.get(scope, settled_key.into()).unwrap(),
+    )
+    .unwrap();
+    let data = v8::Integer::new(scope, marker);
+    let callback = v8::Function::builder_raw(record_ordered_microtask)
+      .data(data.into())
+      .build(scope)
+      .unwrap();
+    let chained = promise.then(scope, callback).unwrap();
+    let data = v8::Integer::new(scope, marker + 10);
+    let callback = v8::Function::builder_raw(record_ordered_microtask)
+      .data(data.into())
+      .build(scope)
+      .unwrap();
+    assert_eq!(
+      chained.then(scope, callback).unwrap().state(),
+      v8::PromiseState::Pending
+    );
+  }
+  let data = v8::Integer::new(scope, 3);
+  let native = v8::Function::builder_raw(record_ordered_microtask)
+    .data(data.into())
+    .build(scope)
+    .unwrap();
+  scope.enqueue_microtask(native);
+  assert!(ORDERED_MICROTASK_EVENTS.with(|events| events.borrow().is_empty()));
+  scope.perform_microtask_checkpoint();
+  assert_eq!(
+    ORDERED_MICROTASK_EVENTS.with(|events| events.borrow().clone()),
+    [1, 2, 3, 11, 12]
+  );
+  scope.perform_microtask_checkpoint();
+  assert_eq!(
+    ORDERED_MICROTASK_EVENTS.with(|events| events.borrow().clone()),
+    [1, 2, 3, 11, 12]
+  );
+
+  let marker = namespace.get(scope, marker_key.into()).unwrap();
+  let frozen = v8::Local::<v8::Object>::try_from(marker).unwrap();
+  let token_key = v8::String::new(scope, "token").unwrap();
+  assert_eq!(
+    frozen.set(scope, token_key.into(), assigned.into()),
+    Some(false)
+  );
+  assert_eq!(
+    frozen
+      .get(scope, token_key.into())
+      .unwrap()
+      .number_value(scope),
+    Some(17.0)
+  );
+  let blocked_key = v8::String::new(scope, "blocked").unwrap();
+  {
+    v8::tc_scope!(let caught, scope);
+    assert_eq!(
+      default.set(caught, blocked_key.into(), assigned.into()),
+      None
+    );
+    assert!(caught.has_caught());
+    assert!(
+      caught.exception().unwrap().strict_equals(marker),
+      "setter exception identity"
+    );
+  }
+  let fail_key = v8::String::new(scope, "fail").unwrap();
+  let fail = namespace.get(scope, fail_key.into()).unwrap();
+  let fail = v8::Local::<v8::Function>::try_from(fail).unwrap();
+  {
+    v8::tc_scope!(let caught, scope);
+    assert!(fail.call(caught, undefined.into(), &[]).is_none());
+    assert!(caught.has_caught());
+    assert!(
+      caught.exception().unwrap().strict_equals(marker),
+      "original thrown object identity"
+    );
+  }
+  let after = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(
+    after.runtime_eval_instantiations, before.runtime_eval_instantiations,
+    "AOT namespace graph must not instantiate an interpreter provider"
+  );
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[test]
+fn compiler_source_cache_identity_tracks_codegen_and_symlinks() {
+  v8::js2wasm_test_compiler_source_identity();
 }
 
 #[test]
@@ -1268,7 +1716,7 @@ fn precompiles_exact_runtime_eval_provider_artifact() {
 }
 
 #[test]
-#[cfg(feature = "js2wasm_deno_poc")]
+#[cfg(all(feature = "js2wasm_deno_poc", feature = "js2wasm_runtime_compile"))]
 fn boots_exact_deno_core_artifact_in_two_wasmtime_stores() {
   let artifact = std::env::var_os("V8X_JS2WASM_DENO_CORE_WASM").expect(
     "set V8X_JS2WASM_DENO_CORE_WASM to the raw pinned bootstrap module",
@@ -1281,6 +1729,7 @@ fn boots_exact_deno_core_artifact_in_two_wasmtime_stores() {
 #[cfg(feature = "js2wasm_deno_poc")]
 fn routes_exact_deno_core_scripts_through_public_script_run() {
   initialize();
+  DENO_STARTUP_OP_EVENTS.with(|events| events.borrow_mut().clear());
   DENO_OP_EVENTS.with(|events| events.borrow_mut().clear());
   let before = v8::js2wasm_runtime_stats().unwrap();
   let fixture_dir =
@@ -1356,7 +1805,60 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
     "02_timers.js",
     "01_core.js",
   ] {
+    if name == "01_core.js" {
+      let bootstrap_key = v8::String::new(scope, "__bootstrap").unwrap();
+      let primordials_key = v8::String::new(scope, "primordials").unwrap();
+      let queue_key = v8::String::new(scope, "queueMicrotask").unwrap();
+      let bootstrap = v8::Local::<v8::Object>::try_from(
+        global.get(scope, bootstrap_key.into()).unwrap(),
+      )
+      .unwrap();
+      let primordials = v8::Local::<v8::Object>::try_from(
+        bootstrap.get(scope, primordials_key.into()).unwrap(),
+      )
+      .unwrap();
+      let queue = primordials.get(scope, queue_key.into()).unwrap();
+      assert!(
+        queue.is_undefined(),
+        "primordial queueMicrotask must be uninitialized before core; function={}, object={}, number={}",
+        queue.is_function(),
+        queue.is_object(),
+        queue.is_number()
+      );
+    }
     if name == "02_timers.js" {
+      // Mirror the core host operations required during 01_core startup.
+      // Register real callbacks, not artifact-local fallbacks: attachment
+      // deliberately replaces the scaffold's Deno object with this host graph.
+      let extras_op =
+        v8::Function::new_raw(scope, deno_op_extras_callback).unwrap();
+      let extras_key =
+        v8::String::new(scope, "op_get_extras_binding_object").unwrap();
+      assert_eq!(
+        ops.set(scope, extras_key.into(), extras_op.into()),
+        Some(true)
+      );
+      let import_meta_prototype = v8::Object::new(scope);
+      let meta_op =
+        v8::FunctionTemplate::builder_raw(deno_op_return_data_callback)
+          .data(import_meta_prototype.into())
+          .constructor_behavior(v8::ConstructorBehavior::Throw)
+          .build(scope)
+          .get_function(scope)
+          .unwrap();
+      let meta_key =
+        v8::String::new(scope, "op_get_ext_import_meta_proto").unwrap();
+      assert_eq!(ops.set(scope, meta_key.into(), meta_op.into()), Some(true));
+      let capture_op =
+        v8::Function::new_raw(scope, deno_op_capture_bootstrap_callback)
+          .unwrap();
+      let capture_key =
+        v8::String::new(scope, "op_set_captured_bootstrap").unwrap();
+      assert_eq!(
+        ops.set(scope, capture_key.into(), capture_op.into()),
+        Some(true)
+      );
+
       let print_data = v8::External::new(scope, print_data);
       let print_template =
         v8::FunctionTemplate::builder_raw(deno_op_print_callback)
@@ -1397,8 +1899,17 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
     let script_origin = classic_origin(scope, resource);
     let script = v8::Script::compile(scope, source, Some(&script_origin))
       .unwrap_or_else(|| panic!("compile {specifier}"));
-    assert!(script.run(scope).is_some(), "run {specifier}");
+    assert!(
+      script.run(scope).is_some(),
+      "run {specifier}; startup ops: {:?}",
+      DENO_STARTUP_OP_EVENTS.with(|events| events.borrow().clone())
+    );
   }
+
+  assert_eq!(
+    DENO_STARTUP_OP_EVENTS.with(|events| events.borrow().clone()),
+    ["extras", "import-meta", "capture-bootstrap"]
+  );
 
   let (print_op, sum_op) = deno_op_handles.unwrap();
   let print_op = v8::Local::new(scope, &print_op);
@@ -1418,14 +1929,300 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
   let stub_key = v8::String::new(scope, "setUpAsyncStub").unwrap();
   let stub = core.get(scope, stub_key.into()).unwrap();
   let stub = v8::Local::<v8::Function>::try_from(stub).unwrap();
-  let op = v8::Function::new_raw(scope, noop_callback).unwrap();
+  let op = v8::Function::builder_raw(deno_async_probe_callback)
+    .length(1)
+    .build(scope)
+    .unwrap();
   let op_value: v8::Local<v8::Value> = op.into();
   let name = v8::String::new(scope, "op_async_probe").unwrap();
   let undefined = v8::undefined(scope);
   let returned = stub
     .call(scope, undefined.into(), &[name.into(), op_value])
     .unwrap();
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
   assert!(std::ptr::eq(&*returned, &*op_value));
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    assert!(!returned.strict_equals(op_value));
+    let wrapper = v8::Local::<v8::Function>::try_from(returned).unwrap();
+    let result = wrapper.call(scope, undefined.into(), &[]).unwrap();
+    assert!(
+      result.is_promise(),
+      "async wrapper result: undefined={}, number={}, object={}, function={}",
+      result.is_undefined(),
+      result.is_number(),
+      result.is_object(),
+      result.is_function()
+    );
+    let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+    assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+    assert_eq!(promise.result(scope).number_value(scope), Some(42.0));
+    assert!(!promise.has_handler());
+    promise.mark_as_handled();
+    assert!(promise.has_handler());
+    let handler = v8::Function::builder_raw(realm_host_leaf)
+      .build(scope)
+      .unwrap();
+    let derived = promise
+      .then(scope, handler)
+      .expect("native then on compiled Promise");
+    assert!(!derived.strict_equals(promise.into()));
+    assert_eq!(derived.state(), v8::PromiseState::Pending);
+    assert!(!derived.has_handler());
+    // A compiled reaction queued first must precede a native job. Its chained
+    // reaction is queued while executing and must follow that native job.
+    ORDERED_MICROTASK_EVENTS.with(|events| events.borrow_mut().clear());
+    let first_marker = v8::Integer::new(scope, 1);
+    let first = v8::Function::builder_raw(record_ordered_microtask)
+      .data(first_marker.into())
+      .build(scope)
+      .unwrap();
+    let chained = promise.then(scope, first).unwrap();
+    let last_marker = v8::Integer::new(scope, 3);
+    let last = v8::Function::builder_raw(record_ordered_microtask)
+      .data(last_marker.into())
+      .build(scope)
+      .unwrap();
+    let completed = chained.then(scope, last).unwrap();
+    let middle_marker = v8::Integer::new(scope, 2);
+    let middle = v8::Function::builder_raw(record_ordered_microtask)
+      .data(middle_marker.into())
+      .build(scope)
+      .unwrap();
+    scope.enqueue_microtask(middle);
+    assert!(ORDERED_MICROTASK_EVENTS.with(|events| events.borrow().is_empty()));
+    scope.perform_microtask_checkpoint();
+    assert_eq!(
+      ORDERED_MICROTASK_EVENTS.with(|events| events.borrow().clone()),
+      [1, 2, 3]
+    );
+    assert_eq!(completed.state(), v8::PromiseState::Fulfilled);
+    scope.perform_microtask_checkpoint();
+    assert_eq!(derived.state(), v8::PromiseState::Fulfilled);
+    assert_eq!(derived.result(scope).number_value(scope), Some(43.0));
+    assert!(promise.has_handler());
+    assert!(!derived.has_handler());
+    let captured = v8::Object::new(scope);
+    let current = v8::Object::new(scope);
+    scope.set_continuation_preserved_embedder_data(captured.into());
+    let handler = v8::Function::builder_raw(return_reaction_continuation)
+      .build(scope)
+      .unwrap();
+    let with_context = promise.then(scope, handler).unwrap();
+    scope.set_continuation_preserved_embedder_data(current.into());
+    scope.perform_microtask_checkpoint();
+    assert!(with_context.result(scope).strict_equals(captured.into()));
+    assert!(
+      scope
+        .get_continuation_preserved_embedder_data()
+        .strict_equals(current.into())
+    );
+    scope.set_continuation_preserved_embedder_data(undefined.into());
+
+    let thrower = v8::Function::builder_raw(realm_host_throw)
+      .build(scope)
+      .unwrap();
+    let rejected = promise.then(scope, thrower).unwrap();
+    let recovered = rejected
+      .catch(scope, handler)
+      .expect("native catch on compiled Promise");
+    assert_eq!(rejected.state(), v8::PromiseState::Pending);
+    assert_eq!(recovered.state(), v8::PromiseState::Pending);
+    scope.perform_microtask_checkpoint();
+    assert_eq!(rejected.state(), v8::PromiseState::Rejected);
+    assert_eq!(recovered.state(), v8::PromiseState::Fulfilled);
+    assert!(recovered.result(scope).is_undefined());
+
+    // Fulfilled object results must retain their original Rust identity.
+    let marker = v8::Object::new(scope);
+    let object_op = v8::Function::builder_raw(deno_async_probe_callback)
+      .length(1)
+      .data(marker.into())
+      .build(scope)
+      .unwrap();
+    let object_wrapper = stub
+      .call(scope, undefined.into(), &[name.into(), object_op.into()])
+      .unwrap();
+    let object_wrapper =
+      v8::Local::<v8::Function>::try_from(object_wrapper).unwrap();
+    let object_result =
+      object_wrapper.call(scope, undefined.into(), &[]).unwrap();
+    let object_result =
+      v8::Local::<v8::Promise>::try_from(object_result).unwrap();
+    assert_eq!(object_result.state(), v8::PromiseState::Fulfilled);
+    assert!(object_result.result(scope).strict_equals(marker.into()));
+
+    // A pending native op must stay pending, not be snapshotted as fulfilled.
+    let has_key = v8::String::new(scope, "hasPromise").unwrap();
+    let has = core.get(scope, has_key.into()).unwrap();
+    let has = v8::Local::<v8::Function>::try_from(has).unwrap();
+    for index in [0, 4095] {
+      let index = v8::Integer::new(scope, index);
+      v8::tc_scope!(let catch, scope);
+      let state = has.call(catch, undefined.into(), &[index.into()]);
+      let exception = catch
+        .exception()
+        .and_then(|value| value.to_string(catch))
+        .map(|value| value.to_rust_string_lossy(catch));
+      let state = state
+        .unwrap_or_else(|| panic!("read initial pending ring: {exception:?}"));
+      assert!(
+        !state.boolean_value(catch),
+        "initial pending ring must be empty"
+      );
+    }
+    DENO_PENDING_OP_IDS.with(|ids| ids.borrow_mut().clear());
+    let pending_op = v8::Function::builder_raw(deno_pending_probe_callback)
+      .length(1)
+      .build(scope)
+      .unwrap();
+    let pending_wrapper = stub
+      .call(scope, undefined.into(), &[name.into(), pending_op.into()])
+      .unwrap();
+    let pending_wrapper =
+      v8::Local::<v8::Function>::try_from(pending_wrapper).unwrap();
+    {
+      v8::tc_scope!(let catch, scope);
+      let pending = pending_wrapper.call(catch, undefined.into(), &[]);
+      assert_eq!(
+        DENO_PENDING_OP_IDS.with(|ids| ids.borrow().clone()),
+        [(1, Some(0.0))],
+        "immediate ops do not consume a pending promise id"
+      );
+      let exception = catch
+        .exception()
+        .and_then(|value| value.to_string(catch))
+        .map(|value| value.to_rust_string_lossy(catch));
+      let pending = pending.unwrap_or_else(|| {
+        panic!("pending async wrapper failed: {exception:?}")
+      });
+      let pending = v8::Local::<v8::Promise>::try_from(pending).unwrap();
+      assert_eq!(pending.state(), v8::PromiseState::Pending);
+      assert!(!pending.has_handler());
+      let handler = v8::Function::builder_raw(realm_host_leaf)
+        .build(catch)
+        .unwrap();
+      let chained = pending
+        .then(catch, handler)
+        .expect("native then on pending compiled Promise");
+      assert_eq!(chained.state(), v8::PromiseState::Pending);
+      assert!(pending.has_handler());
+      DENO_REACTION_ORDER.with(|events| events.borrow_mut().clear());
+      for order in [1, 2, 3] {
+        let data = v8::Integer::new(catch, order);
+        let handler = v8::Function::builder_raw(record_reaction_order)
+          .data(data.into())
+          .build(catch)
+          .unwrap();
+        let derived = pending.then(catch, handler).unwrap();
+        assert_eq!(derived.state(), v8::PromiseState::Pending);
+      }
+      let resolve_key = v8::String::new(catch, "__eventLoopTick").unwrap();
+      let resolve = v8::Local::<v8::Function>::try_from(
+        core.get(catch, resolve_key.into()).unwrap(),
+      )
+      .unwrap();
+      let id = v8::Integer::new(catch, 0);
+      let value = v8::Number::new(catch, 42.0);
+      let ok = v8::Boolean::new(catch, true);
+      assert!(
+        resolve
+          .call(
+            catch,
+            undefined.into(),
+            &[id.into(), ok.into(), value.into()]
+          )
+          .unwrap()
+          .is_undefined()
+      );
+      assert_eq!(
+        pending.state(),
+        v8::PromiseState::Pending,
+        "the catch-derived op promise must wait for its reaction job"
+      );
+      catch.perform_microtask_checkpoint();
+      assert_eq!(
+        DENO_REACTION_ORDER.with(|events| events.borrow().clone()),
+        [1.0, 2.0, 3.0]
+      );
+      assert_eq!(pending.state(), v8::PromiseState::Fulfilled);
+      assert_eq!(pending.result(catch).number_value(catch), Some(42.0));
+      assert_eq!(chained.state(), v8::PromiseState::Fulfilled);
+      assert_eq!(chained.result(catch).number_value(catch), Some(43.0));
+      assert!(!catch.has_caught());
+      // The live native Promise wrapper must retain object/rejection identity
+      // after settlement, not replace either with serialized copies.
+      let marker = v8::Object::new(catch);
+      let message = v8::String::new(catch, "pending op rejected").unwrap();
+      let reason = v8::Exception::type_error(catch, message);
+      for (id, value, success, expected) in [
+        (1, marker.into(), true, v8::PromiseState::Fulfilled),
+        (2, reason, false, v8::PromiseState::Rejected),
+      ] {
+        let result =
+          pending_wrapper.call(catch, undefined.into(), &[]).unwrap();
+        let result = v8::Local::<v8::Promise>::try_from(result).unwrap();
+        assert_eq!(result.state(), v8::PromiseState::Pending);
+        let id_value = v8::Integer::new(catch, id);
+        let success = v8::Boolean::new(catch, success);
+        assert!(
+          resolve
+            .call(
+              catch,
+              undefined.into(),
+              &[id_value.into(), success.into(), value]
+            )
+            .unwrap()
+            .is_undefined()
+        );
+        assert_eq!(result.state(), v8::PromiseState::Pending);
+        catch.perform_microtask_checkpoint();
+        assert_eq!(result.state(), expected);
+        let actual = result.result(catch);
+        let display = actual
+          .to_string(catch)
+          .map(|value| value.to_rust_string_lossy(catch));
+        let object = v8::Local::<v8::Object>::try_from(actual).ok();
+        let mut details = Vec::new();
+        if let Some(object) = object {
+          for key in ["name", "message"] {
+            let property = v8::String::new(catch, key).unwrap();
+            details.push(
+              object
+                .get(catch, property.into())
+                .and_then(|value| value.to_string(catch))
+                .map(|value| value.to_rust_string_lossy(catch)),
+            );
+          }
+        }
+        assert!(
+          actual.strict_equals(value),
+          "pending op {id} changed result identity: {display:?} {details:?}"
+        );
+        if id == 2 {
+          let error = v8::Local::<v8::Object>::try_from(actual).unwrap();
+          let stack_key = v8::String::new(catch, "stack").unwrap();
+          let stack = error.get(catch, stack_key.into()).unwrap();
+          assert!(stack.is_string(), "rejection must capture an actual stack");
+          let stack =
+            stack.to_string(catch).unwrap().to_rust_string_lossy(catch);
+          assert!(
+            stack.starts_with("TypeError: pending op rejected"),
+            "{stack}"
+          );
+          assert!(
+            stack.contains("wasm-function["),
+            "captured stack has no actual Wasm frames: {stack}"
+          );
+        }
+        assert!(!catch.has_caught());
+      }
+      assert_eq!(
+        DENO_PENDING_OP_IDS.with(|ids| ids.borrow().clone()),
+        [(1, Some(0.0)), (1, Some(1.0)), (1, Some(2.0))]
+      );
+    }
+  }
 
   let module_source = fs::read_to_string(fixture_dir.join("mod.js")).unwrap();
   let module_source = v8::String::new(scope, &module_source).unwrap();
@@ -1450,6 +2247,70 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
   assert_eq!(module.get_status(), v8::ModuleStatus::Evaluated);
   let namespace_after = module.get_module_namespace();
   assert!(std::ptr::eq(&*namespace_before, &*namespace_after));
+
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    let namespace = v8::Local::<v8::Object>::try_from(namespace_after).unwrap();
+    assert!(namespace.get_prototype(scope).unwrap().is_null());
+    let bootstrap_key = v8::String::new(scope, "__bootstrap").unwrap();
+    let bootstrap = v8::Local::<v8::Object>::try_from(
+      global.get(scope, bootstrap_key.into()).unwrap(),
+    )
+    .unwrap();
+    for name in ["core", "internals", "primordials"] {
+      let key = v8::String::new(scope, name).unwrap();
+      let exported = namespace.get(scope, key.into()).unwrap();
+      assert!(exported.is_object(), "Deno namespace export {name}");
+      assert!(
+        exported.strict_equals(bootstrap.get(scope, key.into()).unwrap()),
+        "Deno namespace export identity {name}"
+      );
+      let replacement = v8::Object::new(scope);
+      assert_eq!(
+        namespace.set(scope, key.into(), replacement.into()),
+        Some(false)
+      );
+      assert!(
+        namespace
+          .get(scope, key.into())
+          .unwrap()
+          .strict_equals(exported)
+      );
+    }
+
+    // Deno's exported continuation helpers must call the real host extras,
+    // sharing object identity with the native API rather than private stubs.
+    let get_key = v8::String::new(scope, "getAsyncContext").unwrap();
+    let set_key = v8::String::new(scope, "setAsyncContext").unwrap();
+    let get = v8::Local::<v8::Function>::try_from(
+      core.get(scope, get_key.into()).unwrap(),
+    )
+    .unwrap();
+    let set = v8::Local::<v8::Function>::try_from(
+      core.get(scope, set_key.into()).unwrap(),
+    )
+    .unwrap();
+    let marker = v8::Object::new(scope);
+    let receiver = v8::undefined(scope);
+    assert!(
+      set
+        .call(scope, receiver.into(), &[marker.into()])
+        .unwrap()
+        .is_undefined()
+    );
+    assert!(
+      get
+        .call(scope, receiver.into(), &[])
+        .unwrap()
+        .strict_equals(marker.into())
+    );
+    assert!(
+      scope
+        .get_continuation_preserved_embedder_data()
+        .strict_equals(marker.into())
+    );
+    scope.set_continuation_preserved_embedder_data(receiver.into());
+  }
 
   let usage_source =
     fs::read_to_string(fixture_dir.join("hello_world_usage.js")).unwrap();
@@ -1904,6 +2765,21 @@ unsafe extern "C" fn realm_host_leaf(info: *const v8::FunctionCallbackInfo) {
   let value = args.get(0).number_value(scope).unwrap();
   let mut result = parts.return_value;
   result.set_double(value + 1.0);
+}
+
+unsafe extern "C" fn record_ordered_microtask(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let marker = args.data().number_value(scope).unwrap() as i32;
+  ORDERED_MICROTASK_EVENTS.with(|events| events.borrow_mut().push(marker));
+  let mut result = parts.return_value;
+  result.set(args.get(0));
 }
 
 unsafe extern "C" fn realm_host_mutate(info: *const v8::FunctionCallbackInfo) {
@@ -3014,10 +3890,17 @@ fn integer_value_preserves_numeric_boundaries() {
   let context = v8::Context::new(scope, Default::default());
   let scope = &mut v8::ContextScope::new(scope, context);
   for (number, expected) in [
-    (3.0, 3), (3.9, 3), (-3.9, -3), (0.0, 0), (-0.0, 0),
-    (f64::NAN, 0), (f64::INFINITY, i64::MAX),
-    (f64::NEG_INFINITY, i64::MIN), (f64::MAX, i64::MAX),
-    (-f64::MAX, i64::MIN), (9_223_372_036_854_774_784.0, 9_223_372_036_854_774_784),
+    (3.0, 3),
+    (3.9, 3),
+    (-3.9, -3),
+    (0.0, 0),
+    (-0.0, 0),
+    (f64::NAN, 0),
+    (f64::INFINITY, i64::MAX),
+    (f64::NEG_INFINITY, i64::MIN),
+    (f64::MAX, i64::MAX),
+    (-f64::MAX, i64::MIN),
+    (9_223_372_036_854_774_784.0, 9_223_372_036_854_774_784),
     (-9_223_372_036_854_774_784.0, -9_223_372_036_854_774_784),
   ] {
     let value = v8::Number::new(scope, number);
@@ -3028,7 +3911,8 @@ fn integer_value_preserves_numeric_boundaries() {
     (v8::Boolean::new(scope, false).into(), 0),
     (v8::null(scope).into(), 0),
     (v8::undefined(scope).into(), 0),
-  ] as [(v8::Local<v8::Value>, i64); 4] {
+  ] as [(v8::Local<v8::Value>, i64); 4]
+  {
     assert_eq!(value.integer_value(scope), Some(expected));
   }
 }
@@ -3049,7 +3933,10 @@ fn integer_value_rejects_symbol_and_bigint_with_type_error() {
     assert_eq!(value.integer_value(caught), None);
     assert!(caught.has_caught());
     let exception = caught.exception().unwrap();
-    let text = exception.to_string(caught).unwrap().to_rust_string_lossy(caught);
+    let text = exception
+      .to_string(caught)
+      .unwrap()
+      .to_rust_string_lossy(caught);
     assert!(text.starts_with("TypeError:"), "{text}");
   }
 }
@@ -3063,22 +3950,30 @@ fn integer_value_coerces_in_realm_and_preserves_exception_identity() {
   v8::scope!(let scope, isolate);
   let context = v8::Context::new(scope, Default::default());
   let scope = &mut v8::ContextScope::new(scope, context);
-  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM").expect("context fixture");
+  let path = std::env::var_os("V8X_JS2WASM_CONTEXT_VALUES_WASM")
+    .expect("context fixture");
   v8::js2wasm_attach_realm_for_test(&context, Path::new(&path)).unwrap();
-  for (text, expected) in [("",0),(" 42.9 ",42),("-3.9",-3),("0x10",16),("0b11",3),("no",0)] {
+  for (text, expected) in [
+    ("", 0),
+    (" 42.9 ", 42),
+    ("-3.9", -3),
+    ("0x10", 16),
+    ("0b11", 3),
+    ("no", 0),
+  ] {
     let value = v8::String::new(scope, text).unwrap();
     assert_eq!(value.integer_value(scope), Some(expected), "{text:?}");
   }
   let global = context.global(scope);
   let key = v8::String::new(scope, "coercionObject").unwrap();
-  let object = global.get(scope,key.into()).unwrap();
-  assert_eq!(object.integer_value(scope),Some(42));
+  let object = global.get(scope, key.into()).unwrap();
+  assert_eq!(object.integer_value(scope), Some(42));
   let key = v8::String::new(scope, "coercionError").unwrap();
-  let token = global.get(scope,key.into()).unwrap();
+  let token = global.get(scope, key.into()).unwrap();
   let key = v8::String::new(scope, "throwingCoercion").unwrap();
-  let throwing = global.get(scope,key.into()).unwrap();
+  let throwing = global.get(scope, key.into()).unwrap();
   v8::tc_scope!(let caught, scope);
-  assert_eq!(throwing.integer_value(caught),None);
+  assert_eq!(throwing.integer_value(caught), None);
   assert!(caught.has_caught());
   assert!(caught.exception().unwrap().strict_equals(token));
 }

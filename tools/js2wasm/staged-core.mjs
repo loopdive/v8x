@@ -5,7 +5,7 @@ export const CORE_SCRIPT_ORDER = [
   "00_primordials.js", "00_infra.js", "02_timers.js", "01_core.js",
 ];
 
-export function stagedCoreSource(sources) {
+export function stagedCoreSource(sources, { nativeNamespace = false } = {}) {
   const scripts = CORE_SCRIPT_ORDER.map((path, index) => {
     const source = sources.get(path);
     if (typeof source !== "string") throw new Error("missing core script: " + path);
@@ -16,7 +16,13 @@ export function stagedCoreSource(sources) {
   if (typeof moduleSource !== "string" || moduleSource.split(exports).length !== 2) {
     throw new Error("unsupported core module export shape");
   }
-  return scripts.join("\n") + `
+  const imports = nativeNamespace
+    ? 'import { initializeCoreNamespace } from "./core-bindings.ts";\nimport * as coreNamespace from "./core-namespace.ts";\n'
+    : "";
+  const publication = nativeNamespace
+    ? "initializeCoreNamespace(core, internals, primordials); return coreNamespace;"
+    : "return { core, internals, primordials };";
+  return imports + scripts.join("\n") + `
 let phase = 0;
 let moduleStarted = false;
 export function scriptPhase(): number { return phase; }
@@ -34,5 +40,25 @@ export function runScript(index: number): number {
 export function runModule(): any {
   if (phase !== 4 || moduleStarted) throw new Error("Deno module order mismatch");
   moduleStarted = true;
-  ` + moduleSource.replace(exports, "return { core, internals, primordials };") + "\n}\n";
+  ` + moduleSource.replace(exports, publication) + "\n}\n";
+}
+
+// The public namespace re-exports only the original three names. Its private
+// initialization function lives in a separate module, so it cannot leak into
+// Reflect.ownKeys on the public namespace. Bindings remain compiler-native.
+export function stagedCoreNamespaceSources() {
+  return {
+    "core-bindings.ts": `
+export let core: any;
+export let internals: any;
+export let primordials: any;
+let initialized = false;
+export function initializeCoreNamespace(c: any, i: any, p: any): void {
+  if (initialized) throw new Error("Deno core namespace already initialized");
+  core = c; internals = i; primordials = p;
+  initialized = true;
+}
+`,
+    "core-namespace.ts": 'export { core, internals, primordials } from "./core-bindings.ts";\n',
+  };
 }

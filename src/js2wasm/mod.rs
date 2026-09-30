@@ -7,8 +7,8 @@
 #![allow(non_snake_case, unused)]
 
 mod boolean;
-mod retained_buffer;
 mod private;
+mod retained_buffer;
 pub(crate) use retained_buffer::RetainedHostBuffer;
 
 // These helpers are engine-independent despite living under the QuickJS
@@ -48,7 +48,7 @@ use crate::{
 #[cfg(feature = "js2wasm_deno_poc_replay")]
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
@@ -145,6 +145,11 @@ struct PromiseResolverState {
 
 enum Microtask {
   Function(*const crate::Function, *const Value),
+  Compiled {
+    realm_id: usize,
+    drain: wasmtime::Func,
+    continuation_data: *const Value,
+  },
   PromiseReaction {
     continuation_data: *const Value,
     handler: *const crate::Function,
@@ -358,9 +363,12 @@ struct IsolateState {
   realm_callbacks: Vec<realm_objects::HostCallbackBinding>,
   values: Vec<*mut HeapValue>,
   contexts: Vec<*const Context>,
+  // Context lifetime follows isolate allocation lifetime. This separate list
+  // avoids scanning every allocated value at each microtask checkpoint.
+  owned_contexts: Vec<*const Context>,
   data_slots: [*mut c_void; 4],
   microtasks_policy: crate::MicrotasksPolicy,
-  microtasks: Vec<Microtask>,
+  microtasks: VecDeque<Microtask>,
   running_microtasks: bool,
   continuation_data: *const Value,
   terminating: AtomicBool,
@@ -1825,9 +1833,10 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     realm_callbacks: Vec::new(),
     values: Vec::new(),
     contexts: Vec::new(),
+    owned_contexts: Vec::new(),
     data_slots: [ptr::null_mut(); 4],
     microtasks_policy: crate::MicrotasksPolicy::Auto,
-    microtasks: Vec::new(),
+    microtasks: VecDeque::new(),
     running_microtasks: false,
     continuation_data: ptr::null(),
     terminating: AtomicBool::new(false),
@@ -2067,8 +2076,23 @@ pub extern "C" fn v8__Isolate__EnqueueMicrotask(
   unsafe {
     isolate_state(isolate)
       .microtasks
-      .push(Microtask::Function(function, continuation_data))
+      .push_back(Microtask::Function(function, continuation_data))
   };
+}
+
+pub(crate) fn schedule_compiled_microtask(
+  isolate: *mut RealIsolate,
+  realm_id: usize,
+  drain: wasmtime::Func,
+) {
+  let continuation_data = continuation::get(isolate);
+  unsafe { isolate_state(isolate) }
+    .microtasks
+    .push_back(Microtask::Compiled {
+      realm_id,
+      drain,
+      continuation_data,
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -2085,22 +2109,129 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
   state.running_microtasks = true;
 
   loop {
+    if unsafe { isolate_state(isolate) }.microtasks.is_empty() {
+      // End all heap/context borrows before entering Wasmtime: a promise job
+      // may call Rust callbacks that allocate objects or re-enter this API.
+      let runtimes = {
+        let state = unsafe { isolate_state(isolate) };
+        let mut runtimes = Vec::new();
+        for value in &state.owned_contexts {
+          let Some(HeapValue::Context(context)) =
+            (unsafe { heap_value(*value) })
+          else {
+            continue;
+          };
+          for runtime in [&context.deno_core_bootstrap, &context.module_runtime]
+            .into_iter()
+            .flatten()
+          {
+            if runtimes.iter().any(|(_, prior)| Rc::ptr_eq(prior, runtime)) {
+              continue;
+            }
+            runtimes.push((*value, runtime.clone()));
+          }
+        }
+        runtimes
+      };
+      let mut did_work = false;
+      for (context, runtime) in runtimes {
+        v8__Context__Enter(context);
+        let result = runtime
+          .try_borrow_mut()
+          .map_err(|_| {
+            "compiled microtask runtime is already executing".to_string()
+          })
+          .and_then(|mut runtime| {
+            runtime.configure_heap_limit(isolate);
+            runtime.drain_microtasks()
+          });
+        v8__Context__Exit(context);
+        match result {
+          Ok(work) => did_work |= work,
+          Err(error) => {
+            eprintln!("v8x/js2wasm: microtask checkpoint failed: {error}");
+            unsafe { isolate_state(isolate) }.running_microtasks = false;
+            return;
+          }
+        }
+      }
+      if !did_work && unsafe { isolate_state(isolate) }.microtasks.is_empty() {
+        unsafe { isolate_state(isolate) }.running_microtasks = false;
+        break;
+      }
+      if unsafe { isolate_state(isolate) }.microtasks.is_empty() {
+        continue;
+      }
+    }
     let task = {
       let state = unsafe { isolate_state(isolate) };
       if state.microtasks.is_empty() {
         state.running_microtasks = false;
         break;
       }
-      state.microtasks.remove(0)
+      state
+        .microtasks
+        .pop_front()
+        .expect("non-empty microtask queue")
     };
     let continuation_data = match &task {
       Microtask::Function(_, value) => *value,
+      Microtask::Compiled {
+        continuation_data, ..
+      } => *continuation_data,
       Microtask::PromiseReaction {
         continuation_data, ..
       } => *continuation_data,
     };
     let _restore = continuation::enter(isolate, continuation_data);
     match task {
+      Microtask::Compiled {
+        realm_id, drain, ..
+      } => {
+        let runtime = {
+          let state = unsafe { isolate_state(isolate) };
+          state.owned_contexts.iter().find_map(|value| {
+            let Some(HeapValue::Context(context)) =
+              (unsafe { heap_value(*value) })
+            else {
+              return None;
+            };
+            [&context.deno_core_bootstrap, &context.module_runtime]
+              .into_iter()
+              .flatten()
+              .find_map(|runtime| {
+                runtime.try_borrow().ok().and_then(|borrow| {
+                  (borrow.realm_id() == realm_id)
+                    .then(|| (*value, runtime.clone()))
+                })
+              })
+          })
+        };
+        let Some((context, runtime)) = runtime else {
+          // A reentrant checkpoint cannot steal a job from its executing Store.
+          unsafe { isolate_state(isolate) }.microtasks.push_front(
+            Microtask::Compiled {
+              realm_id,
+              drain,
+              continuation_data,
+            },
+          );
+          unsafe { isolate_state(isolate) }.running_microtasks = false;
+          eprintln!("v8x/js2wasm: compiled microtask realm is unavailable");
+          return;
+        };
+        v8__Context__Enter(context);
+        let result = runtime
+          .try_borrow_mut()
+          .map_err(|_| {
+            "compiled microtask runtime is already executing".to_string()
+          })
+          .and_then(|mut runtime| runtime.run_microtask(drain));
+        v8__Context__Exit(context);
+        if let Err(error) = result {
+          eprintln!("v8x/js2wasm: compiled microtask failed: {error}");
+        }
+      }
       Microtask::Function(function, _) => {
         let receiver = v8__Undefined(isolate).cast();
         let _ = invoke_function(function, receiver, 0, ptr::null(), false);
@@ -2766,7 +2897,7 @@ pub extern "C" fn v8__Context__New(
       attributes: 0,
     });
   }
-  allocate(
+  let context = allocate(
     isolate,
     HeapValue::Context(ContextState {
       global,
@@ -2776,7 +2907,11 @@ pub extern "C" fn v8__Context__New(
       module_runtime: None,
       deno_core_bootstrap_phase: 0,
     }),
-  )
+  );
+  unsafe { isolate_state(isolate) }
+    .owned_contexts
+    .push(context);
+  context
 }
 
 #[unsafe(no_mangle)]
@@ -3284,8 +3419,9 @@ pub extern "C" fn v8__Object__SetPrototype(
   }
   if let Some(result) = realm_objects::set_prototype(object, prototype) {
     return match result {
-      Ok(true) => MaybeBool::JustTrue,
-      Ok(false) => MaybeBool::JustFalse,
+      Ok(Some(true)) => MaybeBool::JustTrue,
+      Ok(Some(false)) => MaybeBool::JustFalse,
+      Ok(None) => MaybeBool::Nothing,
       Err(error) => {
         realm_objects::report(error);
         MaybeBool::Nothing
@@ -3491,9 +3627,16 @@ pub extern "C" fn v8__Object__Set(
   key: *const Value,
   value: *const Value,
 ) -> MaybeBool {
+  // Module namespace [[Set]] always refuses, including synthetic/prelinked
+  // namespaces whose backing realm has no graph-local setter dispatch.
+  if v8__Value__IsModuleNamespaceObject(object.cast()) {
+    return MaybeBool::JustFalse;
+  }
   if let Some(result) = realm_objects::set(object, key, value) {
     return match result {
-      Ok(()) => MaybeBool::JustTrue,
+      Ok(Some(true)) => MaybeBool::JustTrue,
+      Ok(Some(false)) => MaybeBool::JustFalse,
+      Ok(None) => MaybeBool::Nothing,
       Err(error) => {
         realm_objects::report(error);
         MaybeBool::Nothing
@@ -4808,8 +4951,10 @@ pub extern "C" fn v8__Value__IntegerValue(
     Some(HeapValue::Boolean(boolean)) => Some(i64::from(*boolean)),
     Some(HeapValue::Null | HeapValue::Undefined) => Some(0),
     Some(HeapValue::Symbol(_) | HeapValue::BigInt(_)) => {
-      let message = new_string(current_isolate(),
-        "Cannot convert a Symbol or BigInt value to a number".to_string());
+      let message = new_string(
+        current_isolate(),
+        "Cannot convert a Symbol or BigInt value to a number".to_string(),
+      );
       record_exception(current_isolate(), allocate_error(message, "TypeError"));
       None
     }
@@ -5449,6 +5594,15 @@ pub extern "C" fn v8__Promise__Resolver__Reject(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Promise__State(promise: *const Promise) -> PromiseState {
+  if let Some(result) = realm_objects::promise_snapshot(promise) {
+    return match result {
+      Ok((state, _)) => state,
+      Err(error) => {
+        realm_objects::report(error);
+        PromiseState::Pending
+      }
+    };
+  }
   match unsafe { promise_state(promise) }
     .map(|state| state.settlement)
     .unwrap_or(PromiseSettlement::Pending)
@@ -5461,11 +5615,26 @@ pub extern "C" fn v8__Promise__State(promise: *const Promise) -> PromiseState {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Promise__HasHandler(promise: *const Promise) -> bool {
+  if let Some(result) = realm_objects::promise_handler(promise, false) {
+    return match result {
+      Ok(handled) => handled,
+      Err(error) => {
+        realm_objects::report(error);
+        false
+      }
+    };
+  }
   unsafe { promise_state(promise) }.is_some_and(|state| state.handled)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Promise__MarkAsHandled(promise: *const Promise) {
+  if let Some(result) = realm_objects::promise_handler(promise, true) {
+    if let Err(error) = result {
+      realm_objects::report(error);
+    }
+    return;
+  }
   if let Some(state) = unsafe { promise_state(promise) } {
     state.handled = true;
   }
@@ -5473,6 +5642,15 @@ pub extern "C" fn v8__Promise__MarkAsHandled(promise: *const Promise) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Promise__Result(promise: *const Promise) -> *const Value {
+  if let Some(result) = realm_objects::promise_snapshot(promise) {
+    return match result {
+      Ok((_, value)) => value,
+      Err(error) => {
+        realm_objects::report(error);
+        ptr::null()
+      }
+    };
+  }
   let Some(state) = (unsafe { promise_state(promise) }) else {
     return ptr::null();
   };
@@ -5500,6 +5678,14 @@ fn promise_then(
     {
       return ptr::null();
     }
+  }
+  if let Some(result) =
+    realm_objects::promise_then(promise, on_fulfilled, on_rejected)
+  {
+    return result.unwrap_or_else(|error| {
+      realm_objects::report(error);
+      ptr::null()
+    });
   }
   let isolate = current_isolate();
   if isolate.is_null() {
@@ -5529,7 +5715,7 @@ fn promise_then(
     PromiseSettlement::Rejected => on_rejected,
     PromiseSettlement::Pending => ptr::null(),
   };
-  unsafe { isolate_state(isolate) }.microtasks.push(
+  unsafe { isolate_state(isolate) }.microtasks.push_back(
     Microtask::PromiseReaction {
       continuation_data,
       handler,
@@ -5660,7 +5846,11 @@ fn set_named_property<T>(
 ) -> Result<(), String> {
   let key = new_string(current_isolate(), name.to_string());
   if let Some(result) = realm_objects::set(object.cast(), key.cast(), value) {
-    return result;
+    return match result? {
+      Some(true) => Ok(()),
+      Some(false) => Err(format!("{name} property write was rejected")),
+      None => Err(format!("{name} property write threw")),
+    };
   }
   let Some(properties) = properties_mut(object) else {
     return Err(format!("{name} receiver is not a Rust-owned v8x object"));
@@ -7595,6 +7785,35 @@ fn mark_evaluated(module: *const Module, seen: &mut HashSet<usize>) {
   }
 }
 
+fn publish_source_namespaces(
+  module: *const Module,
+  owner: &Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
+  seen: &mut HashSet<usize>,
+) -> Result<(), String> {
+  if !seen.insert(module as usize) {
+    return Ok(());
+  }
+  let (namespace, specifier, dependencies) = unsafe { module_state(module) }
+    .map(|state| {
+      (
+        state.namespace,
+        state.specifier.clone(),
+        state.dependencies.clone(),
+      )
+    })
+    .ok_or_else(|| {
+      "source module disappeared during namespace publication".to_string()
+    })?;
+  realm_objects::bind_source_namespace(namespace, owner, &specifier)?;
+  for dependency in dependencies {
+    publish_source_namespaces(dependency, owner, seen)?;
+  }
+  if let Some(state) = unsafe { module_state(module) } {
+    state.runtime = Some(owner.clone());
+  }
+  Ok(())
+}
+
 fn current_recorded_exception() -> *const Value {
   let isolate = current_isolate();
   if isolate.is_null() {
@@ -7725,6 +7944,24 @@ fn evaluate_prelinked_deno_module(
       fail_module_evaluation(module, &error);
       return ptr::null();
     }
+    let publication = (|| {
+      let owner = deno_core_runtime(context)?;
+      let namespace = unsafe { module_state(module) }
+        .ok_or_else(|| {
+          "Deno core module disappeared during namespace publication"
+            .to_string()
+        })?
+        .namespace;
+      realm_objects::bind_prelinked_core_namespace(namespace, &owner)?;
+      if let Some(state) = unsafe { module_state(module) } {
+        state.runtime = Some(owner);
+      }
+      Ok::<(), String>(())
+    })();
+    if let Err(error) = publication {
+      fail_module_evaluation(module, &error);
+      return ptr::null();
+    }
   }
 
   let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
@@ -7823,7 +8060,13 @@ pub extern "C" fn v8__Module__Evaluate(
     state.module_runtime = Some(runtime.clone());
   }
   if let Some(state) = unsafe { module_state(module) } {
-    state.runtime = Some(runtime);
+    state.runtime = Some(runtime.clone());
+  }
+  if let Err(error) =
+    publish_source_namespaces(module, &runtime, &mut HashSet::new())
+  {
+    fail_module_evaluation(module, &error);
+    return ptr::null();
   }
   let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
   let promise = allocate_fulfilled_promise(current_isolate(), undefined).cast();

@@ -71,7 +71,20 @@ The runtime-profile Deno artifact publishes its context owner before module
 initialization and attaches host globals before core wrappers capture them.
 Focused multi-module tests cover host callbacks during initialization and
 retention of the original realm after a failed initializer. This is not yet
-verification of a complete Deno boot.
+verification of a complete Deno runtime. A pinned unchanged core/hello-world
+fixture also exercises native pending-op settlement and rejection identity.
+The `js2wasm_deno_poc` feature selects that acceptance fixture without enabling
+a runtime compiler; build-time precompilation additionally requires
+`js2wasm_runtime_compile`. Arbitrary new programs and full Deno compatibility
+remain separate requirements.
+
+The runtime artifact builder now requests the compiled enqueue notification
+and rejects output without the single-job drain and pending-count functions.
+AOT mode links only native host capabilities; an interpreter provider remains
+an explicit dynamic-code fallback. The historical POC compile commitment is
+unchanged. The runtime compiler pin now includes this scheduler ABI.
+Clean-checkout production packaging and release validation remain required.
+The development fixture is not a substitute for that release gate.
 
 Separately evaluated extension and application graphs can be packaged with
 `V8X_JS2WASM_ARTIFACT_OUTPUT_DIR` during build-time execution. Compiler-free

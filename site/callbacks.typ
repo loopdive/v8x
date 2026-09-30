@@ -78,7 +78,46 @@ Rust-host fixture verifies that callbacks registered between stages are visible
 to later compiled scripts, and that failed stages cannot be retried. Native
 context internal fields remain in the Rust wrapper when its object enters the
 realm. Native microtasks preserve continuation data across callbacks. These
-checks do not establish complete Deno bootstrap or compiled-Promise support.
+checks do not establish complete Deno compatibility.
+
+A pinned, unchanged Deno core fixture now boots through public `Script::Run` and
+executes its hello-world example with real Rust callbacks. Pending ops settle
+through `core.__eventLoopTick` and the native microtask checkpoint, preserving
+scalar, object and rejection-reason identity. Compiled queues publish their
+pending-job count so checkpoints verify quiescence. Native `Promise.then/catch`
+registration on this compiled realm preserves asynchronous callbacks, derived
+Promise results, thrown handlers and native continuation data. Separately
+compiled namespace graphs route pending and settled Promise reactions through
+their ownership-checked intrinsic export in the shared store. Compiled Promise
+handler state is persistent in Wasm and shared by native `HasHandler` and
+`MarkAsHandled`. The pinned realm test checks this state before and after a
+microtask checkpoint. An opt-in compiled enqueue notification now inserts
+single-job drains into the same FIFO as native callbacks. The pinned realm
+test verifies a compiled reaction, a native callback and a chained compiled
+reaction in their enqueue order, including compiler-free AOT replay. Older
+artifacts without this notification retain batch draining. General rejection
+events remain incomplete. A separate two-graph acceptance test verifies
+compiled reactions interleaved with native callbacks in one shared Store,
+including compiler-free replay of trusted context and source-bound graph
+artifacts. It also checks live namespace values, exception identity and
+that no interpreter provider is instantiated. This is a focused acceptance
+test, not complete module or Deno conformance.
+
+Pending reactions within one compiled Promise run in registration order on
+fulfillment and rejection. Multi-reaction lists are reordered at settlement;
+the common single-reaction path needs no copied callback nodes. A native Deno
+pending-op check verifies three Rust reactions in registration order. This is
+not proof of global ordering across all graph and native queues.
+
+Linked graph compilation can select the context's exported exception tag with
+`standaloneGlobalThisImport.exceptionTag`. This shares tag identity without a
+JavaScript host. A compiler control verifies that a provider-thrown payload is
+caught unchanged; separate module-local tags cannot catch that exception.
+
+The Deno host installs `Error.captureStackTrace` before primordial capture. It
+records actual Wasmtime frames and a non-enumerable stack property without
+replacing the error. Source locations, identity-based `constructorOpt` trimming
+and full V8 stack formatting are not implemented.
 
 Native js2wasm functions retain the length supplied by Function and
 FunctionTemplate builders. The property is included when a host callback

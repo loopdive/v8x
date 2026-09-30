@@ -32,6 +32,9 @@ function __v8xKeepValue(value: any): number {
 // Compiler-owned seam: identity in a single module, a canonical callable
 // adapter when the runtime-eval provider can observe the host closure.
 function __runtime_eval_wrap_aot_callable(value: any): any { return value; }
+// Private same-store Wasm ABI. Numeric handles remain the public host seam.
+export function __v8x_value_unwrap(id: number): any { return __v8xValueAt(id); }
+export function __v8x_value_keep(value: any): number { return __v8xKeepValue(value); }
 export function __v8x_value_host_function(id: number): number {
   return __v8xKeepValue(__runtime_eval_wrap_aot_callable(function(this: any, ...args: any[]): any {
     if (new.target) throw new TypeError("constructing a host callback is not implemented");
@@ -178,6 +181,11 @@ export function __v8x_value_typed_array(buffer: number, kind: number, offset: nu
 }
 export function __v8x_value_object(): number { return __v8xKeepValue({}); }
 export function __v8x_value_array(): number { return __v8xKeepValue([]); }
+// Use the intrinsic, not an observable own then on the receiver. Reactions
+// and the derived Promise stay compiled and run through the existing queue.
+export function __v8x_value_promise_then(promise: number, fulfilled: number, rejected: number): number {
+  return __v8xKeepValue(Promise.prototype.then.call(__v8xValueAt(promise), __v8xValueAt(fulfilled), __v8xValueAt(rejected)));
+}
 export function __v8x_value_get_prototype(owner: number): number {
   return __v8xKeepValue(Object.getPrototypeOf(__v8xValueAt(owner)));
 }
@@ -226,6 +234,8 @@ export function __v8x_value_string_append(id: number, unit: number): number {
 `;
 
 export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
+  "__v8x_value_unwrap",
+  "__v8x_value_keep",
   "__v8x_value_global",
   "__v8x_value_host_function",
   "__v8x_value_error",
@@ -247,6 +257,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_typed_array",
   "__v8x_value_object",
   "__v8x_value_array",
+  "__v8x_value_promise_then",
   "__v8x_value_get_prototype",
   "__v8x_value_set_prototype",
   "__v8x_value_get",
@@ -270,7 +281,7 @@ export function contextValueBridgeEntrypoints(modulePath) {
   }
   return signatures.map(([,name,parameters,result]) => {
     const args = parameters ? parameters.split(",").map(p => {
-      const match = /^\s*(\w+): number\s*$/.exec(p);
+      const match = /^\s*(\w+): (?:number|any)\s*$/.exec(p);
       if (!match) throw new Error("unsupported context bridge parameter: " + p);
       return match[1];
     }).join(", ") : "";

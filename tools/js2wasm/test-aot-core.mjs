@@ -1,16 +1,25 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { assertRuntimeSchedulerABI, assertNoLinearMemories } from "./build-deno-core-artifact.mjs";
 
 const path = process.env.DENO_AOT_WASM;
 if (!path) throw new Error("DENO_AOT_WASM must name the generated AOT core");
-const module = new WebAssembly.Module(readFileSync(path));
+const binary = readFileSync(path);
+const module = new WebAssembly.Module(binary);
 test("AOT core has native host imports only, with no provider or memory", () => {
+  assertRuntimeSchedulerABI(module);
+  assertNoLinearMemories(binary, module, "AOT test fixture");
   const imports = WebAssembly.Module.imports(module);
-  assert.equal(imports.length, 16);
+  assert.equal(imports.length, 17);
+  assert.equal(imports.filter(entry => entry.name === "__v8x_microtask_notify").length, 1);
   for (const entry of imports) {
     assert.equal(entry.module, "v8x:deno");
     assert.equal(entry.kind, "function");
+  }
+  const exports = new Set(WebAssembly.Module.exports(module).map(entry => entry.name));
+  for (const name of ["__drain_one_microtask", "__drain_microtasks", "__microtasks_pending"]) {
+    assert(exports.has(name), `missing scheduler export ${name}`);
   }
 });
 test("compiled unknown-script path refuses without invoking native ops", () => {
