@@ -203,7 +203,12 @@ fn main() {
   // src/lib.rs `#[path]`-includes its modules, so the vendored Rust API surface
   // must be materialized for either backend. (Engines are set up separately,
   // only for the QuickJS path.)
-  setup_vendor(&manifest_dir, "rusty_v8");
+  let vendor_mode = if env::var_os("CARGO_FEATURE_ENGINE_JS2WASM").is_some() {
+    "js2wasm"
+  } else {
+    "rusty_v8"
+  };
+  setup_vendor(&manifest_dir, vendor_mode);
 
   // The vendored crate's `binding.rs` does
   // `include!(env!("RUSTY_V8_SRC_BINDING_PATH"))` to pull in the bindgen
@@ -323,7 +328,11 @@ fn setup_vendor(manifest_dir: &Path, mode: &str) {
     return;
   }
   apply_patch_series(manifest_dir, "vendor/rusty_v8", "rusty_v8");
-  ensure_rusty_v8_icu(manifest_dir);
+  // Chromium's test data is not used by the js2wasm adapter. Call the manual
+  // rusty_v8 setup mode when running upstream tests that embed this file.
+  if mode != "js2wasm" {
+    ensure_rusty_v8_icu(manifest_dir);
+  }
   if mode == "quickjs" {
     apply_patch_series(manifest_dir, "vendor/quickjs-ng", "quickjs");
     apply_patch_series(manifest_dir, "vendor/wamr", "wamr");
