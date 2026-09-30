@@ -2880,6 +2880,35 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
       );
     }
 
+    // The actual upstream error builder must retain the native message after
+    // its registered constructor is passed through a JavaScript parameter.
+    let builder_key = v8::String::new(scope, "buildCustomError").unwrap();
+    let builder = v8::Local::<v8::Function>::try_from(
+      core.get(scope, builder_key.into()).unwrap(),
+    )
+    .unwrap();
+    for name in [
+      "Error",
+      "TypeError",
+      "RangeError",
+      "ReferenceError",
+      "SyntaxError",
+      "URIError",
+    ] {
+      v8::tc_scope!(let catch, scope);
+      let class = v8::String::new(catch, name).unwrap();
+      let message = v8::String::new(catch, "native op failure").unwrap();
+      let receiver = v8::undefined(catch);
+      let error =
+        builder.call(catch, receiver.into(), &[class.into(), message.into()]);
+      assert!(!catch.has_caught(), "upstream {name} builder threw");
+      let error = error.expect("upstream error builder must return a value");
+      assert_eq!(
+        error.to_string(catch).unwrap().to_rust_string_lossy(catch),
+        format!("{name}: native op failure"),
+      );
+    }
+
     // Deno's exported continuation helpers must call the real host extras,
     // sharing object identity with the native API rather than private stubs.
     let get_key = v8::String::new(scope, "getAsyncContext").unwrap();
