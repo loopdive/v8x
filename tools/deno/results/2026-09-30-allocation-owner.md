@@ -9,8 +9,9 @@ graphs. Context import validation admits those two functions.
 The compiler pin is `cc835a68c8c02255569b72271dd2527e076351c6`.
 It includes the imported-binding `typeof` fix and the merge of upstream main
 at `1df04af5b77a7867c418df02e6ecd4beee33ec48`. Focused compiler controls
-pass 5/5 after that merge. Clean artifacts for this new pin are not yet verified;
-the measurements below describe the previous build.
+pass 5/5 after that merge. Another 15/15 allocation-owner, realm and namespace
+controls pass. The original measurements below describe the previous build;
+the clean refresh is recorded separately below.
 The historical POC compiler/options commitment remains unchanged. AOT runtime
 packaging still emits no interpreter; explicitly requested dynamic providers
 receive compatible stamped layouts.
@@ -70,6 +71,34 @@ artifact sizes, not per-instance memory measurements.
 Clean packaging of the fixed application compiler, the full unchanged Deno
 test harness, general classic Script execution and performance measurements
 remain open. No Deno source or vendored upstream tests were changed.
+
+## Clean fixed-compiler refresh
+
+Clean detached inputs in `/private/tmp/deno-import-release-build.AWkP87`:
+compiler `cc835a68c8c02255569b72271dd2527e076351c6`, adapter
+`a4748fd143971462ffdfb274e2045ef680e8d9cb`, Deno
+`1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. The compiler's subsequent
+remote-merge reconciliation `c6fc8aa81fa4dbfb418d5a986faebcceb0f10e90`
+has the identical Git tree, `e76a5a4f9c7a38f36d633ab11ec039bf70350b7f`.
+
+The runtime-profile AOT build emits no runtime-eval provider. Its raw core
+is 2,781,977 bytes, SHA-256
+`44ac7273811b24b3428b5168ba775e7707a3478e259160f8b5daf919d8c89251`.
+Wasmtime precompilation passes 1/1 in 306.70 seconds; output is 52,197,048
+bytes, SHA-256
+`397aa2387ae42b241e881705b8450a2a87ed4677af58df095907ac7caa7c9f92`.
+The accompanying attestation binds both hashes, the engine configuration,
+Wasmtime 47.0.3 and the aarch64-apple-darwin target.
+
+Application packaging using that same clean compiler passes 1/1 in 27.27
+seconds. Its source-bound graph is stored under `module-graphs/` with its
+graph-hash sidecar. Replaying the compiler-free binary
+`js2wasm_spike-a7f0ba6d34fa178f` against these fresh artifacts, with compiler,
+compiler-script, compiler-ID, workdir and compiler-cache environment variables
+removed, passes 30/30 with six ignored and zero filtered in 1.72 seconds.
+The core-import application explicitly requires a fulfilled evaluation promise
+and exported answer 6. Ignored tests are not credited. This remains a bounded
+adapter suite, not the full unchanged Deno harness or complete Deno integration.
 
 ```sh
 node --experimental-wasm-exnref --import "$JS2_CHECKOUT/node_modules/tsx/dist/loader.mjs" tools/js2wasm/test-context-value-bridge.mjs "$JS2_CHECKOUT" .tmp/owned-values-context.wasm --allocation-owner
