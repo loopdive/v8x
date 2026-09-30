@@ -247,4 +247,15 @@ const callbackResult=e.__v8x_value_call(e.__v8x_value_get(global,str("exerciseHo
 assert.equal(e.__v8x_value_as_number(callbackResult),1,"nested host callback result");
 activeHostCall=undefined;
 console.log("PASS: exact host callback receiver identity and nested reentry");
+activeHostCall = (id) => {
+  assert.equal(id,1003);
+  const error=e.__v8x_value_error(str("TypeError"),str("host failure"));
+  return -error-1;
+};
+const throwArgs=e.__v8x_value_array();
+e.__v8x_value_set(throwArgs,str("0"),e.__v8x_value_host_function(1003));
+const throwResult=e.__v8x_value_call(e.__v8x_value_get(global,str("exerciseThrow")),global,throwArgs);
+assert.equal(e.__v8x_value_as_number(throwResult),1,"construct rejection and caught host exception");
+activeHostCall=undefined;
+console.log("PASS: host construction rejection and caught exception");
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
