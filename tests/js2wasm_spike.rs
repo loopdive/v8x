@@ -539,6 +539,7 @@ unsafe extern "C" fn return_reaction_continuation(
 thread_local! {
   static DENO_PENDING_OP_IDS: std::cell::RefCell<Vec<(i32, Option<f64>)>> = const { std::cell::RefCell::new(Vec::new()) };
   static DENO_ASYNC_ARGUMENT_COUNTS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+  static DENO_STRING_COERCION_EVENTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
   static DENO_REACTION_ORDER: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -607,6 +608,31 @@ unsafe extern "C" fn deno_async_arguments_callback(
   }
   assert!(args.get(args.length() - 1).strict_equals(args.data()));
   rv.set(args.data());
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_string_coercion_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let args = v8::FunctionCallbackArguments::from_function_callback_info(info);
+  v8::callback_scope!(unsafe scope, info);
+  assert_eq!(args.length(), 0);
+  assert!(args.this().strict_equals(args.data()));
+  DENO_STRING_COERCION_EVENTS.with(|events| events.borrow_mut().push("string"));
+  let result = v8::String::new(scope, "native string coercion").unwrap();
+  v8::ReturnValue::from_function_callback_info(info).set(result.into());
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_string_coercion_throw(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let args = v8::FunctionCallbackArguments::from_function_callback_info(info);
+  v8::callback_scope!(unsafe scope, info);
+  DENO_STRING_COERCION_EVENTS.with(|events| events.borrow_mut().push("throw"));
+  scope.throw_exception(args.data());
 }
 
 #[cfg(feature = "js2wasm_deno_poc")]
@@ -2578,6 +2604,17 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
 
     // Fulfilled object results must retain their original Rust identity.
     let marker = v8::Object::new(scope);
+    DENO_STRING_COERCION_EVENTS.with(|events| events.borrow_mut().clear());
+    let string_key = v8::String::new(scope, "toString").unwrap();
+    let string_method =
+      v8::Function::builder_raw(deno_string_coercion_callback)
+        .data(marker.into())
+        .build(scope)
+        .unwrap();
+    assert_eq!(
+      marker.set(scope, string_key.into(), string_method.into()),
+      Some(true)
+    );
     let object_op = v8::Function::builder_raw(deno_async_probe_callback)
       .length(1)
       .data(marker.into())
@@ -2594,6 +2631,28 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
       v8::Local::<v8::Promise>::try_from(object_result).unwrap();
     assert_eq!(object_result.state(), v8::PromiseState::Fulfilled);
     assert!(object_result.result(scope).strict_equals(marker.into()));
+    assert_eq!(
+      marker.to_string(scope).unwrap().to_rust_string_lossy(scope),
+      "native string coercion"
+    );
+    let reason = v8::Object::new(scope);
+    let throw_method = v8::Function::builder_raw(deno_string_coercion_throw)
+      .data(reason.into())
+      .build(scope)
+      .unwrap();
+    assert_eq!(
+      marker.set(scope, string_key.into(), throw_method.into()),
+      Some(true)
+    );
+    {
+      v8::tc_scope!(let catch, scope);
+      assert!(marker.to_string(catch).is_none());
+      assert!(catch.exception().unwrap().strict_equals(reason.into()));
+    }
+    assert_eq!(
+      DENO_STRING_COERCION_EVENTS.with(|events| events.borrow().clone()),
+      ["string", "throw"]
+    );
 
     // A pending native op must stay pending, not be snapshotted as fulfilled.
     let has_key = v8::String::new(scope, "hasPromise").unwrap();

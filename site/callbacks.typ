@@ -137,6 +137,9 @@ The compiled value bridge has a string-conversion operation with a success and
 value result. Its focused compiled controls verify Error text, the string hint
 for object coercion, rejection of Symbol values and original thrown-value
 identity. This is not a complete native coercion or Deno conformance result.
+Compiler-free native replay also verifies string coercion reentry into Rust
+and native TryCatch retaining the original Rust-thrown object. The unchanged
+core async stub refusal reaches native code with its Error text intact.
 
 Native js2wasm functions retain the length supplied by Function and
 FunctionTemplate builders. The property is included when a host callback
