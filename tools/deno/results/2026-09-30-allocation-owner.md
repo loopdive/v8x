@@ -11,7 +11,7 @@ It adds receiver-backed live iteration and the separate first-class values
 factory repair. The initial compiler repair passes 118/118 focused checks;
 the first-class control now passes with all seven direct controls. Its broader
 file passes 11/12 on both baseline and candidate, retaining an already-stale
-species assertion. Native replay remains pending a second clean rebuild.
+species assertion. Native replay now passes with the second clean rebuild.
 The first rebuild at `10588f480b59bb19ae72a8d6bdedf641a4301915` precompiled
 successfully in 303.68 seconds, but still failed the native mutation control.
 It is preserved at `/private/tmp/deno-live-iterator-build.Z5JeM5`; the
@@ -24,12 +24,17 @@ and adapter `2a1ca8426b59596df4d3ad8111aa08b5273c8260` are under
 `deno-core.wasm` is 2,780,949 bytes, SHA-256
 `187d6698a1744005f2e3ed35ad505f6e2bcfec619ad3800bb213ef2337310a2e`.
 The generated schema-2 provenance records these pins and no runtime provider.
-Native precompilation has been launched, but its completion and native replay
-remain unverified at this checkpoint. Resume the existing process, do not
-rebuild solely because observation timed out. After it completes, regenerate
-the source-bound application package with the same clean compiler and replay
-the full bounded compiler-free target, including the retained mutation test.
-Then rerun the unchanged WebIDL population. First-class keys/entries, general
+Native precompilation passes 1/1 in 279.04 seconds. Native core is 52,164,280
+bytes, SHA-256
+`44fd2f70daf0d403c015555df771f394ba2f449cf1a4692cb2ede625df9fcb5d`.
+Application packaging passes 1/1 in 28.30 seconds. The compiler-free binary
+`js2wasm_spike-8b524eb9ef0b52c1` passes 31/31 runnable tests with six ignored
+and zero filtered in 1.98 seconds, using this attested core and freshly
+source-bound graph package, without compiler configuration. This includes the
+retained mutation assertion and core-import application. The earlier failing
+build below is historical evidence, not the current outcome.
+The unchanged WebIDL population still needs replay against this artifact.
+First-class keys/entries, general
 classic Script execution and complete Deno integration remain required work.
 The previous compiler pin was `cc835a68c8c02255569b72271dd2527e076351c6`.
 It includes the imported-binding `typeof` fix and the merge of upstream main

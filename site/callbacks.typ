@@ -155,7 +155,8 @@ adopted objects use the compiled realm; rejected prototype cycles return false.
 
 Native numeric conversion uses the compiled realm for strings and objects.
 Native arrays acquire that realm's intrinsic iterator on demand. The unchanged
-Deno WebIDL integer and basic sequence conversions pass, but the live-mutation
-iterator control currently fails: an iterator can read stale elements after an
-indexed write. This path is incomplete and does not establish full WebIDL or
-Deno compatibility.
+Deno WebIDL integer and basic sequence conversions pass. A clean core build
+also passes the retained live-mutation iterator control after the compiler's
+first-class values factory was changed to read the original receiver live.
+The bounded compiler-free adapter suite passes 31 tests with six ignored.
+This does not establish full WebIDL or Deno compatibility.
