@@ -13,7 +13,7 @@ test("event dispatcher roots both values through the supplied realm keeper", () 
 
 test("runtime compiler pin advances independently of the historical POC", () => {
   assert.equal(compilerRefForProfile("poc"), "8fd489a918dee3be51bb1e75d191f9815a830eb0");
-  assert.equal(compilerRefForProfile("runtime"), "10588f480b59bb19ae72a8d6bdedf641a4301915");
+  assert.equal(compilerRefForProfile("runtime"), "b37d12382a9a2632130c8b9b2088a1f14470a0fa");
   assert.throws(() => compilerRefForProfile("unknown"), /unknown compiler profile/);
 });
 

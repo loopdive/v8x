@@ -6,9 +6,16 @@ and canonical Wasm type identity. The core instance exports its ownership
 predicate and `Reflect.get` entrypoint for separately compiled application
 graphs. Context import validation admits those two functions.
 
-The current compiler pin is `10588f480b59bb19ae72a8d6bdedf641a4301915`.
-It adds receiver-backed live iteration, with 118/118 focused compiler checks.
-Native replay of that repair is pending the clean artifact rebuild.
+The current compiler pin is `b37d12382a9a2632130c8b9b2088a1f14470a0fa`.
+It adds receiver-backed live iteration and the separate first-class values
+factory repair. The initial compiler repair passes 118/118 focused checks;
+the first-class control now passes with all seven direct controls. Its broader
+file passes 11/12 on both baseline and candidate, retaining an already-stale
+species assertion. Native replay remains pending a second clean rebuild.
+The first rebuild at `10588f480b59bb19ae72a8d6bdedf641a4301915` precompiled
+successfully in 303.68 seconds, but still failed the native mutation control.
+It is preserved at `/private/tmp/deno-live-iterator-build.Z5JeM5`; the
+first-class values factory had its own independent snapshot path.
 The previous compiler pin was `cc835a68c8c02255569b72271dd2527e076351c6`.
 It includes the imported-binding `typeof` fix and the merge of upstream main
 at `1df04af5b77a7867c418df02e6ecd4beee33ec48`. Focused compiler controls

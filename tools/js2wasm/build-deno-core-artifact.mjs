@@ -30,7 +30,7 @@ const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
-const RUNTIME_JS2_REF = "10588f480b59bb19ae72a8d6bdedf641a4301915";
+const RUNTIME_JS2_REF = "b37d12382a9a2632130c8b9b2088a1f14470a0fa";
 export function compilerRefForProfile(profile) {
   if (profile === "poc") return EXPECTED_JS2_REF;
   if (profile === "runtime") return RUNTIME_JS2_REF;
