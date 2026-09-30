@@ -898,11 +898,19 @@ fn resolve_dependency<'s>(
 ) -> Option<v8::Local<'s, v8::Module>> {
   v8::callback_scope!(unsafe scope, context);
   let specifier = specifier.to_rust_string_lossy(scope);
+  let core_source;
   let source = match specifier.as_str() {
     DEPENDENCY => {
       "export function add(left: number, right: number): number { return left + right; }"
     }
     DENO => DENO_SOURCE,
+    "ext:core/mod.js" => {
+      let fixtures = std::env::var_os("V8X_JS2WASM_DENO_CORE_FIXTURES")
+        .expect("pinned core fixtures for application import");
+      core_source = fs::read_to_string(Path::new(&fixtures).join("mod.js"))
+        .expect("unchanged core module fixture");
+      &core_source
+    }
     _ => panic!("unexpected module dependency {specifier}"),
   };
   let source = v8::String::new(scope, source).unwrap();
@@ -2853,6 +2861,48 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
   #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
   {
     let namespace = v8::Local::<v8::Object>::try_from(namespace_after).unwrap();
+    // Unlike the upstream test that drops its evaluation future, explicitly
+    // inspect the application's evaluation promise and exported result.
+    let application = v8::String::new(scope, r#"
+      import { core, primordials, internals } from "ext:core/mod.js";
+      if (typeof core === "undefined") throw new Error("core missing");
+      if (typeof primordials === "undefined") throw new Error("primordials missing");
+      if (typeof internals === "undefined") throw new Error("internals missing");
+      export const answer = primordials.ArrayPrototypeReduce([1, 2, 3], (sum, value) => sum + value, 0);
+    "#).unwrap();
+    let resource =
+      v8::String::new(scope, "ext:application/core-import.js").unwrap();
+    let application_origin = origin(scope, resource.into());
+    let mut source =
+      v8::script_compiler::Source::new(application, Some(&application_origin));
+    let application =
+      v8::script_compiler::compile_module(scope, &mut source).unwrap();
+    assert!(
+      application
+        .instantiate_module(scope, resolve_dependency)
+        .unwrap()
+    );
+    let evaluated = application
+      .evaluate(scope)
+      .expect("core-import application evaluation");
+    let evaluated = v8::Local::<v8::Promise>::try_from(evaluated).unwrap();
+    assert_eq!(
+      evaluated.state(),
+      v8::PromiseState::Fulfilled,
+      "core-import application rejected"
+    );
+    assert_eq!(application.get_status(), v8::ModuleStatus::Evaluated);
+    let application_namespace =
+      v8::Local::<v8::Object>::try_from(application.get_module_namespace())
+        .unwrap();
+    let answer = v8::String::new(scope, "answer").unwrap();
+    assert_eq!(
+      application_namespace
+        .get(scope, answer.into())
+        .unwrap()
+        .number_value(scope),
+      Some(6.0)
+    );
     assert!(namespace.get_prototype(scope).unwrap().is_null());
     let bootstrap_key = v8::String::new(scope, "__bootstrap").unwrap();
     let bootstrap = v8::Local::<v8::Object>::try_from(
@@ -3024,7 +3074,10 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
   });
 
   let after = v8::js2wasm_runtime_stats().unwrap();
+  #[cfg(feature = "js2wasm_deno_poc_replay")]
   assert_eq!(after.instantiations - before.instantiations, 1);
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  assert_eq!(after.instantiations - before.instantiations, 2);
 }
 #[test]
 #[cfg(feature = "js2wasm_runtime_compile")]
