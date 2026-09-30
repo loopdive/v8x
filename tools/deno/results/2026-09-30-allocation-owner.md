@@ -6,7 +6,11 @@ and canonical Wasm type identity. The core instance exports its ownership
 predicate and `Reflect.get` entrypoint for separately compiled application
 graphs. Context import validation admits those two functions.
 
-The compiler pin is `694a8a51df50aef18cf2747acd8020b7024af574`.
+The compiler pin is `cc835a68c8c02255569b72271dd2527e076351c6`.
+It includes the imported-binding `typeof` fix and the merge of upstream main
+at `1df04af5b77a7867c418df02e6ecd4beee33ec48`. Focused compiler controls
+pass 5/5 after that merge. Clean artifacts for this new pin are not yet verified;
+the measurements below describe the previous build.
 The historical POC compiler/options commitment remains unchanged. AOT runtime
 packaging still emits no interpreter; explicitly requested dynamic providers
 receive compatible stamped layouts.
