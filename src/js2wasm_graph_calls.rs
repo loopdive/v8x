@@ -163,17 +163,55 @@ pub(super) fn promise_handler(
 }
 
 pub(super) fn call(
-  context: impl AsContextMut<Data = DenoHostState>,
+  mut context: impl AsContextMut<Data = DenoHostState>,
   realm: Instance,
   handles: [f64; 3],
 ) -> Result<Option<(bool, f64)>, String> {
-  dispatch(
-    context,
+  if let Some(completion) = dispatch(
+    &mut context,
     realm,
     &handles,
     "__v8x_graph_can_call_export",
     "__v8x_graph_call_export",
-  )
+  )? {
+    return Ok(Some(completion));
+  }
+  // Bootstrap callables live in the realm itself, not a registered application
+  // graph. Retain their thrown JS value just like graph dispatch does. Rendering
+  // the Wasmtime error into a new Error loses both object identity and message.
+  let mut scope = RootScope::new(&mut context);
+  let Some(call) = realm.get_func(&mut scope, "__v8x_value_call") else {
+    return Ok(None);
+  };
+  let args = handles.map(|handle| Val::F64(handle.to_bits()));
+  let mut result = [Val::F64(0)];
+  let success = match call.call(&mut scope, &args, &mut result) {
+    Ok(()) => true,
+    Err(error) => {
+      let exception = scope
+        .as_context_mut()
+        .take_pending_exception()
+        .ok_or_else(|| format!("realm callable trapped: {error:#}"))?;
+      let fields = exception
+        .fields(&mut scope)
+        .map_err(|error| format!("read realm exception: {error:#}"))?
+        .collect::<Vec<_>>();
+      let [payload @ Val::ExternRef(_)] = fields.as_slice() else {
+        return Err("realm exception must carry one JS value".into());
+      };
+      let keep = realm
+        .get_func(&mut scope, "__v8x_value_keep")
+        .ok_or("realm lacks exception value keep ABI")?;
+      keep
+        .call(&mut scope, &[*payload], &mut result)
+        .map_err(|error| format!("retain realm exception: {error:#}"))?;
+      false
+    }
+  };
+  Ok(Some((
+    success,
+    result[0].f64().ok_or("invalid realm completion handle")?,
+  )))
 }
 
 pub(super) fn promise_then(

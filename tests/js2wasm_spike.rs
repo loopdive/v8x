@@ -538,6 +538,7 @@ unsafe extern "C" fn return_reaction_continuation(
 #[cfg(feature = "js2wasm_deno_poc")]
 thread_local! {
   static DENO_PENDING_OP_IDS: std::cell::RefCell<Vec<(i32, Option<f64>)>> = const { std::cell::RefCell::new(Vec::new()) };
+  static DENO_ASYNC_ARGUMENT_COUNTS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
   static DENO_REACTION_ORDER: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -584,6 +585,28 @@ unsafe extern "C" fn deno_async_probe_callback(
     let result = v8::Integer::new(scope, 42);
     rv.set(result.into());
   }
+}
+
+#[cfg(feature = "js2wasm_deno_poc")]
+unsafe extern "C" fn deno_async_arguments_callback(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let args = v8::FunctionCallbackArguments::from_function_callback_info(info);
+  let mut rv = v8::ReturnValue::from_function_callback_info(info);
+  v8::callback_scope!(unsafe scope, info);
+  DENO_ASYNC_ARGUMENT_COUNTS
+    .with(|counts| counts.borrow_mut().push(args.length()));
+  assert!(
+    args.get(0).is_number(),
+    "promise id precedes user arguments"
+  );
+  assert!(args.this().strict_equals(args.data()));
+  for index in 1..args.length() - 1 {
+    assert_eq!(args.get(index).number_value(scope), Some(index as f64));
+  }
+  assert!(args.get(args.length() - 1).strict_equals(args.data()));
+  rv.set(args.data());
 }
 
 #[cfg(feature = "js2wasm_deno_poc")]
@@ -2425,6 +2448,58 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
     let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
     assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
     assert_eq!(promise.result(scope).number_value(scope), Some(42.0));
+    // Exercise every generated argument-bearing branch of upstream's async
+    // stub, not just async_op_0. Receiver and final argument must preserve
+    // their Rust object identity through compiled Function.prototype.call.
+    DENO_ASYNC_ARGUMENT_COUNTS.with(|counts| counts.borrow_mut().clear());
+    for arity in 1..=9 {
+      let marker = v8::Object::new(scope);
+      let op = v8::Function::builder_raw(deno_async_arguments_callback)
+        .length(arity + 1)
+        .data(marker.into())
+        .build(scope)
+        .unwrap();
+      let wrapped = stub
+        .call(scope, undefined.into(), &[name.into(), op.into()])
+        .unwrap();
+      let wrapped = v8::Local::<v8::Function>::try_from(wrapped).unwrap();
+      let mut arguments: Vec<v8::Local<v8::Value>> = (1..arity)
+        .map(|index| v8::Integer::new(scope, index).into())
+        .collect();
+      arguments.push(marker.into());
+      let result = wrapped.call(scope, marker.into(), &arguments).unwrap();
+      let result = v8::Local::<v8::Promise>::try_from(result).unwrap();
+      assert_eq!(result.state(), v8::PromiseState::Fulfilled);
+      assert!(result.result(scope).strict_equals(marker.into()));
+    }
+    assert_eq!(
+      DENO_ASYNC_ARGUMENT_COUNTS.with(|counts| counts.borrow().clone()),
+      (2..=10).collect::<Vec<_>>()
+    );
+    // Preserve upstream's deliberate arity ceiling. Unsupported signatures
+    // must throw before calling the Rust op, not truncate its arguments.
+    let oversized = v8::Function::builder_raw(deno_async_arguments_callback)
+      .length(11)
+      .build(scope)
+      .unwrap();
+    {
+      v8::tc_scope!(let catch, scope);
+      assert!(
+        stub
+          .call(catch, undefined.into(), &[name.into(), oversized.into()])
+          .is_none()
+      );
+      let error = catch.exception().unwrap().to_string(catch).unwrap();
+      let error = error.to_rust_string_lossy(catch);
+      assert!(
+        error.contains("Too many arguments"),
+        "unexpected error: {error}"
+      );
+    }
+    assert_eq!(
+      DENO_ASYNC_ARGUMENT_COUNTS.with(|counts| counts.borrow().len()),
+      9
+    );
     assert!(!promise.has_handler());
     promise.mark_as_handled();
     assert!(promise.has_handler());
