@@ -16,6 +16,21 @@ The first rebuild at `10588f480b59bb19ae72a8d6bdedf641a4301915` precompiled
 successfully in 303.68 seconds, but still failed the native mutation control.
 It is preserved at `/private/tmp/deno-live-iterator-build.Z5JeM5`; the
 first-class values factory had its own independent snapshot path.
+
+Second-build checkpoint: all ten focused compiler files pass 119/119 with
+both repairs. Clean detached compiler `b37d12382a9a2632130c8b9b2088a1f14470a0fa`
+and adapter `2a1ca8426b59596df4d3ad8111aa08b5273c8260` are under
+`/private/tmp/deno-reflective-iterator-build.zaaiw7`. Raw core packaging passes;
+`deno-core.wasm` is 2,780,949 bytes, SHA-256
+`187d6698a1744005f2e3ed35ad505f6e2bcfec619ad3800bb213ef2337310a2e`.
+The generated schema-2 provenance records these pins and no runtime provider.
+Native precompilation has been launched, but its completion and native replay
+remain unverified at this checkpoint. Resume the existing process, do not
+rebuild solely because observation timed out. After it completes, regenerate
+the source-bound application package with the same clean compiler and replay
+the full bounded compiler-free target, including the retained mutation test.
+Then rerun the unchanged WebIDL population. First-class keys/entries, general
+classic Script execution and complete Deno integration remain required work.
 The previous compiler pin was `cc835a68c8c02255569b72271dd2527e076351c6`.
 It includes the imported-binding `typeof` fix and the merge of upstream main
 at `1df04af5b77a7867c418df02e6ecd4beee33ec48`. Focused compiler controls
