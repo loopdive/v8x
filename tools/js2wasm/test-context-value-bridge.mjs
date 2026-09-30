@@ -91,7 +91,8 @@ const result = bootstrap ? await compileMulti({
 assert.equal(result.success, true, JSON.stringify(result.errors));
 assert.deepEqual(WebAssembly.Module.imports(new WebAssembly.Module(result.binary)).map(i => i.name).sort(),
   (bootstrap ? ["__v8x_attach_context", "__v8x_host_call"] : ["__v8x_host_call"]).sort());
-const {instance} = await WebAssembly.instantiate(result.binary, {"v8x:deno": {__v8x_attach_context() { e.__v8x_value_set(e.__v8x_value_global(),str("hostNumber"),e.__v8x_value_number(42)); e.__v8x_value_set(e.__v8x_value_global(),str("hostCallback"),e.__v8x_value_host_function(0)); }, __v8x_host_call(id, receiver, args) { if (!bootstrap || id !== 0) throw new Error("unexpected callback in scalar fixture"); return e.__v8x_value_number(e.__v8x_value_as_number(e.__v8x_value_get(args,str("0"))) + 1); }}});
+let activeHostCall;
+const {instance} = await WebAssembly.instantiate(result.binary, {"v8x:deno": {__v8x_attach_context() { e.__v8x_value_set(e.__v8x_value_global(),str("hostNumber"),e.__v8x_value_number(42)); e.__v8x_value_set(e.__v8x_value_global(),str("hostCallback"),e.__v8x_value_host_function(0)); }, __v8x_host_call(id, receiver, args) { if (activeHostCall) return activeHostCall(id,receiver,args); if (!bootstrap || id !== 0) throw new Error("unexpected callback in scalar fixture"); return e.__v8x_value_number(e.__v8x_value_as_number(e.__v8x_value_get(args,str("0"))) + 1); }}});
 const e = instance.exports;
 const str = (s) => { let id=e.__v8x_value_string_empty(); for(let i=0;i<s.length;i++) id=e.__v8x_value_string_append(id,s.charCodeAt(i)); return id; };
 if (bootstrap) e.__module_init();
@@ -224,4 +225,26 @@ for (let flags = 0; flags <= 7; flags++)
   e.__v8x_value_define_data(e.__v8x_value_object(), integerKey, positiveZero, flags);
 assert.throws(() => e.__v8x_value_define_data(obj, integerKey, positiveZero, 8));
 console.log("PASS: integer validation, NaN/infinities/signed zero, and descriptor flags");
+activeHostCall = (id, receiver, args) => {
+  const arg = i => e.__v8x_value_get(args,str(String(i)));
+  if (id === 1002) return e.__v8x_value_number(e.__v8x_value_as_number(arg(0))+1);
+  assert.equal(id,1001);
+  const object = arg(0);
+  assert.equal(receiver,object,"callback receiver and argument zero share a handle");
+  const array = arg(1);
+  const sum = [0,1,2].reduce((sum,i)=>sum+e.__v8x_value_as_number(e.__v8x_value_get(array,str(String(i)))),0);
+  const next=e.__v8x_value_as_number(e.__v8x_value_get(object,str("value")))+sum;
+  const nestedArgs=e.__v8x_value_array();
+  e.__v8x_value_set(nestedArgs,str("0"),e.__v8x_value_number(next));
+  const final=e.__v8x_value_call(arg(2),global,nestedArgs);
+  e.__v8x_value_set(object,str("value"),final);
+  return object;
+};
+const callbackArgs=e.__v8x_value_array();
+e.__v8x_value_set(callbackArgs,str("0"),e.__v8x_value_host_function(1001));
+e.__v8x_value_set(callbackArgs,str("1"),e.__v8x_value_host_function(1002));
+const callbackResult=e.__v8x_value_call(e.__v8x_value_get(global,str("exerciseHost")),global,callbackArgs);
+assert.equal(e.__v8x_value_as_number(callbackResult),1,"nested host callback result");
+activeHostCall=undefined;
+console.log("PASS: exact host callback receiver identity and nested reentry");
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
