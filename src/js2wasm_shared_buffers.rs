@@ -23,6 +23,16 @@ pub(super) fn packet(
   }
   let mut roots = RootScope::new(store);
   let mut store = roots.as_context_mut();
+  // Concrete vectors subtype a length-only root; stamped modules insert the
+  // owner token at field 1, before the concrete vector's data array.
+  let data_field = if instance
+    .get_func(&mut store, "__v8x_context_owns")
+    .is_some()
+  {
+    2
+  } else {
+    1
+  };
   (|| -> wasmtime::Result<f64> {
     let create_name = if instance
       .get_func(&mut store, "__v8x_value_packet_create")
@@ -51,7 +61,7 @@ pub(super) fn packet(
     if vector.field(&mut store, 0)?.i32() != Some(input.len() as i32) {
       return Err(wasmtime::Error::msg("invalid packet length ABI"));
     }
-    let data = vector.field(&mut store, 1)?;
+    let data = vector.field(&mut store, data_field)?;
     let array = data
       .anyref()
       .and_then(|v| v.copied())
@@ -117,6 +127,14 @@ pub(super) fn adopt(
 ) -> Result<f64, String> {
   let mut roots = RootScope::new(store);
   let mut store = roots.as_context_mut();
+  let data_field = if instance
+    .get_func(&mut store, "__v8x_context_owns")
+    .is_some()
+  {
+    2
+  } else {
+    1
+  };
   if let Some(binding) = store
     .data()
     .host_buffers
@@ -147,7 +165,7 @@ pub(super) fn adopt(
     if vector.field(&mut store, 0)?.i32() != Some(host.len() as i32) {
       return Err(wasmtime::Error::msg("incompatible host buffer length ABI"));
     }
-    let data = vector.field(&mut store, 1)?;
+    let data = vector.field(&mut store, data_field)?;
     let array = data
       .anyref()
       .and_then(|v| v.copied())

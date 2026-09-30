@@ -27,7 +27,11 @@ export function __v8x_context_global_this(): any { return globalThis; }
 export function __v8x_context_call(callable:any, receiver:any, args:any):any {
   return callable.apply(receiver,args);
 }
+export function __v8x_context_get(object:any, key:any, receiver:any):any {
+  return Reflect.get(object,key,receiver);
+}
 `, { target:"standalone", platform:"deno", hostBridge:"always", externImportModule:"v8x:deno",
+  standaloneAllocationOwnerExport:"__v8x_context_owns",
   link:["v8x:deno"],
   standaloneMicrotaskNotifyImport:{module:"v8x:deno",name:"__v8x_microtask_notify"},
 });

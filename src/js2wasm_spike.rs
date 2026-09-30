@@ -111,8 +111,12 @@ const DENO_TEST_FN_RESULT_CODE_UNIT_IMPORT: &str =
 const DENO_IMPORT_MODULE: &str = "v8x:deno";
 const RUNTIME_EVAL_IMPORT_MODULE: &str = "js2wasm:runtime-eval";
 const CONTEXT_IMPORT_MODULE: &str = "v8x:context";
-const CONTEXT_IMPORTS: &[&str] =
-  &["__v8x_context_global_this", "__v8x_context_call"];
+const CONTEXT_IMPORTS: &[&str] = &[
+  "__v8x_context_global_this",
+  "__v8x_context_call",
+  "__v8x_context_owns",
+  "__v8x_context_get",
+];
 const CONTEXT_SYMBOL_GLOBALS: &[&str] = &[
   "__symbol_counter",
   "__symbol_desc_table",

@@ -1,7 +1,7 @@
 // Copyright 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { COMPILE_OPTIONS, runtimeCompileOptions, assertRuntimeSchedulerABI, compilerRefForProfile } from "./build-deno-core-artifact.mjs";
+import { COMPILE_OPTIONS, runtimeCompileOptions, assertRuntimeSchedulerABI, assertRuntimeAllocationOwnerABI, compilerRefForProfile } from "./build-deno-core-artifact.mjs";
 import { contextPromiseRejectionDispatcherSource } from "./context-value-bridge.mjs";
 
 test("event dispatcher roots both values through the supplied realm keeper", () => {
@@ -13,7 +13,7 @@ test("event dispatcher roots both values through the supplied realm keeper", () 
 
 test("runtime compiler pin advances independently of the historical POC", () => {
   assert.equal(compilerRefForProfile("poc"), "8fd489a918dee3be51bb1e75d191f9815a830eb0");
-  assert.equal(compilerRefForProfile("runtime"), "e6a8f950b10165106d37b80e7bcc247f802a2128");
+  assert.equal(compilerRefForProfile("runtime"), "694a8a51df50aef18cf2747acd8020b7024af574");
   assert.throws(() => compilerRefForProfile("unknown"), /unknown compiler profile/);
 });
 
@@ -24,11 +24,17 @@ test("historical POC options remain unchanged", () => {
   });
   assert(Object.isFrozen(COMPILE_OPTIONS));
 });
+test("unstamped or uninspectable modules cannot pass the owner ABI gate", () => {
+  const empty = new WebAssembly.Module(Uint8Array.of(0,97,115,109,1,0,0,0));
+  assert.throws(() => assertRuntimeAllocationOwnerABI(empty), /lacks allocation-owner function __v8x_context_owns/);
+  assert.throws(() => assertRuntimeAllocationOwnerABI({}), TypeError);
+});
 test("AOT runtime links only native scheduler capabilities and exports Symbol state", () => {
   const options = runtimeCompileOptions("aot");
   assert.deepEqual(options.link, ["v8x:deno"]);
   assert.deepEqual(options.standaloneMicrotaskNotifyImport, { module: "v8x:deno", name: "__v8x_microtask_notify" });
   assert.equal(options.standaloneSymbolState, "export");
+  assert.equal(options.standaloneAllocationOwnerExport, "__v8x_context_owns");
   assert.equal(options.deferTopLevelInit, true);
 });
 test("explicit dynamic fallback retains the scheduler and shared provider state", () => {

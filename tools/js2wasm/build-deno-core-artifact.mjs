@@ -30,7 +30,7 @@ const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
-const RUNTIME_JS2_REF = "e6a8f950b10165106d37b80e7bcc247f802a2128";
+const RUNTIME_JS2_REF = "694a8a51df50aef18cf2747acd8020b7024af574";
 export function compilerRefForProfile(profile) {
   if (profile === "poc") return EXPECTED_JS2_REF;
   if (profile === "runtime") return RUNTIME_JS2_REF;
@@ -129,6 +129,7 @@ export function runtimeCompileOptions(execution = "aot") {
   }
   return {
     ...COMPILE_OPTIONS,
+    standaloneAllocationOwnerExport: "__v8x_context_owns",
     standaloneMicrotaskNotifyImport: { module: "v8x:deno", name: "__v8x_microtask_notify" },
     standaloneSymbolState: execution === "aot" ? "export" : { module: "js2wasm:runtime-eval", reexport: true },
     link: execution === "aot" ? ["v8x:deno"] : ["v8x:deno", "js2wasm:runtime-eval"],
@@ -143,6 +144,15 @@ export function assertRuntimeSchedulerABI(module) {
   for (const name of ["__drain_one_microtask", "__drain_microtasks", "__microtasks_pending"]) {
     if (!exports.some(entry => entry.name === name && entry.kind === "function")) {
       fail(`runtime artifact lacks scheduler function ${name}`);
+    }
+  }
+}
+
+export function assertRuntimeAllocationOwnerABI(module) {
+  const exports = WebAssembly.Module.exports(module);
+  for (const name of ["__v8x_context_owns", "__v8x_context_get"]) {
+    if (!exports.some(entry => entry.name === name && entry.kind === "function")) {
+      fail(`runtime artifact lacks allocation-owner function ${name}`);
     }
   }
 }
@@ -1038,6 +1048,11 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
 `;
 
   if (profile === "runtime") {
+    files[`${appRoot}/entry.ts`] += `
+export function __v8x_context_get(object: any, key: any, receiver: any): any {
+  return Reflect.get(object, key, receiver);
+}
+`;
     // Root handles must exist before the host hook, which precedes all core
     // imports. The host global becomes authoritative before core captures ops.
     files[`${appRoot}/runtime-seed.ts`] = CONTEXT_VALUE_BRIDGE_SOURCE + RUNTIME_SEED.slice(0, RUNTIME_SEED.indexOf("const extrasBinding =")) +
@@ -1134,7 +1149,10 @@ async function packageDenoArtifacts({
   );
   const appBinary = checkedCompile(app, `Deno ${profile} application`);
   const appModule = new WebAssembly.Module(appBinary);
-  if (profile === "runtime") assertRuntimeSchedulerABI(appModule);
+  if (profile === "runtime") {
+    assertRuntimeSchedulerABI(appModule);
+    assertRuntimeAllocationOwnerABI(appModule);
+  }
   assertNoLinearMemories(
     appBinary,
     appModule,
@@ -1166,6 +1184,8 @@ async function packageDenoArtifacts({
     "__v8x_script_result_utf16_code_unit",
     ...(profile === "runtime"
       ? [
+          "__v8x_context_owns",
+          "__v8x_context_get",
           "__v8x_run_deno_core_script",
           "__v8x_deno_script_phase",
           "__v8x_stage_deno_core_wrappers",
@@ -1219,7 +1239,10 @@ async function packageDenoArtifacts({
   const providerSource = provider.buildRuntimeEvalProviderSource();
   const providerCompileOptions = {
     ...provider.RUNTIME_EVAL_PROVIDER_COMPILE_OPTIONS,
-    ...(profile === "runtime" ? { standaloneSymbolState: "export" } : {}),
+    ...(profile === "runtime" ? {
+      standaloneSymbolState: "export",
+      standaloneAllocationOwnerExport: "__v8x_provider_owns",
+    } : {}),
   };
   const providerResult = await compiler.compile(providerSource, providerCompileOptions);
   const providerBinary = checkedCompile(

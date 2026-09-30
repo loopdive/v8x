@@ -7,6 +7,7 @@ if (!process.argv[2]) throw new Error("usage: test-context-value-bridge.mjs JS2_
 const { compile, compileMulti } = await import(pathToFileURL(join(resolve(process.argv[2]), "src/index.ts")).href);
 import { CONTEXT_VALUE_BRIDGE_SOURCE, contextValueBridgeEntrypoints } from "./context-value-bridge.mjs";
 const bootstrap = process.argv[4] === "bootstrap";
+const allocationOwner = process.argv.includes("--allocation-owner");
 const bootstrapSource = bootstrap ? `
 declare function __v8x_attach_context(): void;
 __v8x_attach_context();
@@ -98,6 +99,7 @@ Object.defineProperty(numericNameFunction, "name", { value: 17, configurable: tr
 };
 `;
 const options = { target: "standalone", platform: "deno", hostBridge: "always", deferTopLevelInit: bootstrap, externImportModule: "v8x:deno" };
+if (allocationOwner) options.standaloneAllocationOwnerExport = "__v8x_context_owns";
 const result = bootstrap ? await compileMulti({
   "/v8x-test/runtime-seed.ts": CONTEXT_VALUE_BRIDGE_SOURCE + "\ndeclare function __v8x_attach_context(): void;\n__v8x_attach_context();\n",
   "/v8x-test/core.ts": bootstrapSource.replace("declare function __v8x_attach_context(): void;\n__v8x_attach_context();", ""),

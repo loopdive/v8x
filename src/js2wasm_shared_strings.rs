@@ -10,6 +10,18 @@ pub(super) fn read(
 ) -> Result<Option<Vec<u16>>, String> {
   let mut roots = RootScope::new(store);
   let mut store = roots.as_context_mut();
+  // Allocation-stamped modules insert an immutable owner token after the
+  // AnyString root's length field. Historical POC artifacts are unstamped.
+  // The generated predicate is the explicit opt-in ABI marker, not a guess
+  // based on the runtime value's shape.
+  let suffix_field = if instance
+    .get_func(&mut store, "__v8x_context_owns")
+    .is_some()
+  {
+    2
+  } else {
+    1
+  };
   let Some(export) =
     instance.get_func(&mut store, "__v8x_value_string_storage")
   else {
@@ -39,8 +51,8 @@ pub(super) fn read(
       if node.field(&mut store, 0)?.i32() != Some(expected as i32) {
         return Err(wasmtime::Error::msg("inconsistent string node length"));
       }
-      let second = node.field(&mut store, 1)?;
-      let third = node.field(&mut store, 2)?;
+      let second = node.field(&mut store, suffix_field)?;
+      let third = node.field(&mut store, suffix_field + 1)?;
       if let Some(offset) = second.i32() {
         // NativeString (including its hashed subtype): len, offset, i16 array.
         let data = third
