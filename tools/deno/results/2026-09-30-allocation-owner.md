@@ -100,6 +100,55 @@ The core-import application explicitly requires a fulfilled evaluation promise
 and exported answer 6. Ignored tests are not credited. This remains a bounded
 adapter suite, not the full unchanged Deno harness or complete Deno integration.
 
+## Unchanged core sweep and WebIDL checkpoint
+
+The compiler-free unchanged Deno core population contains 431 tests, including
+two upstream ignored tests. The baseline Nextest sweep against the clean core
+artifacts completed 211 passing and 216 failing tests. Two lazy TCP-driver
+tests remain running after sandbox denial of local sockets; this is not a
+completed full-suite result. All six TCP-driver cases pass when rerun with
+local networking permitted. No test process was stopped.
+
+Failure text in the baseline includes 147 unknown-classic-script refusals and
+32 missing application-graph binding errors. These signatures identify where
+execution stopped, not independent root-cause populations. Snapshot and
+inspector APIs also remain unimplemented. General Script execution remains
+necessary for full integration; accepting arbitrary source or dropping its
+semantics is not a fix.
+
+Native NumberValue now shares ToNumber conversion with IntegerValue, using
+the existing compiled realm for strings and objects. Primitive controls cover
+NaN, negative zero, booleans, null and Symbol/BigInt rejection. Native arrays
+are lazily adopted into the supplied context's realm on intrinsic iterator
+lookup, retaining the native object binding and respecting an explicit
+iterator property instead of implementing a second iterator in Rust.
+
+After these adapter changes, unchanged `webidl::tests::integers`, `sequence`
+and `constrained_sequence_one_of` each pass 1/1; all three failed before the
+changes. The whole unchanged WebIDL population passes 13/17. The remaining
+four stop at unknown-classic-script refusal, before their intended assertion.
+No Deno source or tests were changed.
+
+The initial bounded adapter run passed 31/31, with six ignored. A strengthened
+live-iteration control exposes an additional defect and now yields 30 passing,
+one failing and six ignored. Reading index 1 immediately after an adopted
+array's SetIndex correctly returns 3, but the already-created iterator returns
+the old 2. The failing assertion is deliberately retained, not weakened or
+ignored. The compiler's iterator normalization contains snapshot-copy paths
+in `src/codegen/iterator-native.ts`; attribution to the precise carrier path
+still requires a compiler-level control. This checkpoint is not merge-ready.
+Next work is to preserve the actual iterated receiver and read its current
+elements on each step, then rebuild the clean AOT artifacts and rerun both
+adapter and unchanged upstream controls. No interpreter was added.
+
+Current replay inputs are the clean artifact directory above, adapter test
+binary `js2wasm_spike-8b524eb9ef0b52c1` built with no default features and
+`js2wasm_deno_poc,js2wasm_gc_copying,js2wasm_diagnostic_abi`, and unchanged
+Deno binary `deno_core-87206ac56a2fccad`, built with
+`RUSTFLAGS='--cfg tokio_unstable'`. Artifact environment variables select the
+attested core, pinned fixtures and source-bound module-graph directory; no
+runtime compiler feature is enabled.
+
 ```sh
 node --experimental-wasm-exnref --import "$JS2_CHECKOUT/node_modules/tsx/dist/loader.mjs" tools/js2wasm/test-context-value-bridge.mjs "$JS2_CHECKOUT" .tmp/owned-values-context.wasm --allocation-owner
 V8X_JS2WASM_CONTEXT_VALUES_WASM=.tmp/owned-values-context.wasm cargo test --no-default-features --features js2wasm_deno_poc,js2wasm_gc_copying,simdutf,js2wasm_runtime_compile --test js2wasm_spike transfers_context_values_through_embedded_wasmtime -- --ignored --exact --nocapture

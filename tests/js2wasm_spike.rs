@@ -2451,6 +2451,81 @@ fn routes_exact_deno_core_scripts_through_public_script_run() {
   assert!(std::ptr::eq(&*installed_sum, &*sum_op));
   assert!(!std::ptr::eq(&*installed_print, &*installed_sum));
 
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  for (text, expected) in
+    [("3", 3.0_f64), ("", 0.0), ("0x10", 16.0), ("-0", -0.0)]
+  {
+    let value = v8::String::new(scope, text).unwrap();
+    let actual = value
+      .number_value(scope)
+      .expect("ToNumber string conversion");
+    assert_eq!(actual.to_bits(), expected.to_bits(), "{text:?}");
+  }
+  #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+  {
+    let invalid = v8::String::new(scope, "test").unwrap();
+    assert!(invalid.number_value(scope).unwrap().is_nan());
+
+    let first = v8::Number::new(scope, 1.0);
+    let second = v8::String::new(scope, "2").unwrap();
+    let array =
+      v8::Array::new_with_elements(scope, &[first.into(), second.into()]);
+    let iterator_key = v8::Symbol::get_iterator(scope);
+    let method = array.get(scope, iterator_key.into()).unwrap();
+    let method = v8::Local::<v8::Function>::try_from(method).unwrap();
+    let iterator = method.call(scope, array.into(), &[]).unwrap();
+    let iterator = iterator.to_object(scope).unwrap();
+    let next_key = v8::String::new(scope, "next").unwrap();
+    let next = iterator.get(scope, next_key.into()).unwrap();
+    let next = v8::Local::<v8::Function>::try_from(next).unwrap();
+    // Iteration stays live after adoption, rather than reading a detached copy.
+    let replacement = v8::String::new(scope, "3").unwrap();
+    assert_eq!(array.set_index(scope, 1, replacement.into()), Some(true));
+    assert_eq!(
+      array.get_index(scope, 1).unwrap().number_value(scope),
+      Some(3.0)
+    );
+    let value_key = v8::String::new(scope, "value").unwrap();
+    let done_key = v8::String::new(scope, "done").unwrap();
+    for expected in [1.0, 3.0] {
+      let result = next.call(scope, iterator.into(), &[]).unwrap();
+      let result = result.to_object(scope).unwrap();
+      assert!(
+        !result
+          .get(scope, done_key.into())
+          .unwrap()
+          .boolean_value(scope)
+      );
+      assert_eq!(
+        result
+          .get(scope, value_key.into())
+          .unwrap()
+          .number_value(scope),
+        Some(expected)
+      );
+    }
+    let result = next.call(scope, iterator.into(), &[]).unwrap();
+    let result = result.to_object(scope).unwrap();
+    assert!(
+      result
+        .get(scope, done_key.into())
+        .unwrap()
+        .boolean_value(scope)
+    );
+    let overridden = v8::Array::new(scope, 0);
+    let undefined = v8::undefined(scope);
+    assert_eq!(
+      overridden.set(scope, iterator_key.into(), undefined.into()),
+      Some(true)
+    );
+    assert!(
+      overridden
+        .get(scope, iterator_key.into())
+        .unwrap()
+        .is_undefined()
+    );
+  }
+
   let stub_key = v8::String::new(scope, "setUpAsyncStub").unwrap();
   let stub = core.get(scope, stub_key.into()).unwrap();
   let stub = v8::Local::<v8::Function>::try_from(stub).unwrap();
@@ -4563,6 +4638,45 @@ fn runtime_eval_preserves_context_symbol_identity() {
       value.is_true(),
       "dynamic evaluation result: {source}: {description}"
     );
+  }
+}
+
+#[test]
+fn number_value_converts_primitives_and_rejects_non_numeric_types() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  for (value, expected) in [
+    (v8::Boolean::new(scope, true).into(), 1.0),
+    (v8::Boolean::new(scope, false).into(), 0.0),
+    (v8::null(scope).into(), 0.0),
+  ] as [(v8::Local<v8::Value>, f64); 3]
+  {
+    assert_eq!(value.number_value(scope), Some(expected));
+  }
+  assert!(v8::undefined(scope).number_value(scope).unwrap().is_nan());
+  let negative_zero = v8::Number::new(scope, -0.0);
+  assert_eq!(
+    negative_zero.number_value(scope).unwrap().to_bits(),
+    (-0.0_f64).to_bits()
+  );
+  let values: [v8::Local<v8::Value>; 2] = [
+    v8::Symbol::new(scope, None).into(),
+    v8::BigInt::new_from_i64(scope, 1).into(),
+  ];
+  for value in values {
+    v8::tc_scope!(let caught, scope);
+    assert_eq!(value.number_value(caught), None);
+    assert!(caught.has_caught());
+    let text = caught
+      .exception()
+      .unwrap()
+      .to_string(caught)
+      .unwrap()
+      .to_rust_string_lossy(caught);
+    assert!(text.starts_with("TypeError:"), "{text}");
   }
 }
 

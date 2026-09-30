@@ -152,3 +152,10 @@ enters the compiled realm. A bootstrap fixture checks its value after transfer.
 Host object graph adoption preserves explicit null and object prototypes,
 including shared identity and property cycles. Prototype reads and writes on
 adopted objects use the compiled realm; rejected prototype cycles return false.
+
+Native numeric conversion uses the compiled realm for strings and objects.
+Native arrays acquire that realm's intrinsic iterator on demand. The unchanged
+Deno WebIDL integer and basic sequence conversions pass, but the live-mutation
+iterator control currently fails: an iterator can read stale elements after an
+indexed write. This path is incomplete and does not establish full WebIDL or
+Deno compatibility.

@@ -3362,9 +3362,14 @@ pub extern "C" fn v8__TypedArray__Length(
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__Get(
   object: *const Object,
-  _context: *const Context,
+  context: *const Context,
   key: *const Value,
 ) -> *const Value {
+  if let Err(error) = realm_objects::adopt_array_iterator(object, context, key)
+  {
+    realm_objects::report(error);
+    return ptr::null();
+  }
   if let Some(result) = realm_objects::get(object, key) {
     return match result {
       Ok(value) => value,
@@ -4970,16 +4975,7 @@ pub extern "C" fn v8__Value__NumberValue(
   context: *const Context,
   out: *mut Maybe<f64>,
 ) {
-  let value =
-    if matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_))) {
-      match unsafe { heap_value(value) } {
-        Some(HeapValue::Number(value)) => Some(*value),
-        _ => None,
-      }
-    } else {
-      None
-    };
-  unsafe { write_maybe(out, value) };
+  unsafe { write_maybe(out, coerce_numeric_value(value, context)) };
 }
 
 #[unsafe(no_mangle)]
@@ -4988,16 +4984,24 @@ pub extern "C" fn v8__Value__IntegerValue(
   context: *const Context,
   out: *mut Maybe<i64>,
 ) {
+  // Rust's saturating cast preserves NumberToInt64 after the shared ToNumber
+  // conversion: truncate fractions, map NaN to zero and clamp infinities.
+  let result = coerce_numeric_value(value, context).map(|number| number as i64);
+  unsafe { write_maybe(out, result) };
+}
+
+fn coerce_numeric_value(
+  value: *const Value,
+  context: *const Context,
+) -> Option<f64> {
   if !matches!(unsafe { heap_value(context) }, Some(HeapValue::Context(_))) {
-    unsafe { write_maybe(out, None) };
-    return;
+    return None;
   }
-  // Rust's saturating float cast matches V8 NumberToInt64: truncate finite
-  // fractions, map NaN to zero, and clamp overflow and infinities.
-  let result = match unsafe { heap_value(value) } {
-    Some(HeapValue::Number(number)) => Some(*number as i64),
-    Some(HeapValue::Boolean(boolean)) => Some(i64::from(*boolean)),
-    Some(HeapValue::Null | HeapValue::Undefined) => Some(0),
+  match unsafe { heap_value(value) } {
+    Some(HeapValue::Number(number)) => Some(*number),
+    Some(HeapValue::Boolean(boolean)) => Some(f64::from(*boolean)),
+    Some(HeapValue::Null) => Some(0.0),
+    Some(HeapValue::Undefined) => Some(f64::NAN),
     Some(HeapValue::Symbol(_) | HeapValue::BigInt(_)) => {
       let message = new_string(
         current_isolate(),
@@ -5007,15 +5011,14 @@ pub extern "C" fn v8__Value__IntegerValue(
       None
     }
     Some(_) => match realm_objects::to_number(value, context) {
-      Ok(number) => number.map(|number| number as i64),
+      Ok(number) => number,
       Err(error) => {
         realm_objects::report(error);
         None
       }
     },
     None => None,
-  };
-  unsafe { write_maybe(out, result) };
+  }
 }
 
 #[unsafe(no_mangle)]

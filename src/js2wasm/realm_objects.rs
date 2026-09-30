@@ -840,6 +840,30 @@ pub fn js2wasm_attach_graph_for_test(
   crate::js2wasm_spike::load_graph_for_test(&mut runtime, path)
 }
 
+// Native arrays acquire the actual compiled realm's Array iterator lazily.
+// Explicit properties win, and the supplied context selects the owner rather
+// than whichever context happens to be current during a nested callback.
+pub(super) fn adopt_array_iterator(
+  object: *const Object,
+  context: *const Context,
+  key: *const Value,
+) -> Result<(), String> {
+  if context.is_null()
+    || binding(object).is_some()
+    || !matches!(unsafe { heap_value(object) }, Some(HeapValue::Array(_)))
+    || key != unsafe { isolate_state(current_isolate()).iterator_symbol }.cast()
+    || property_on_chain(object, key.cast()).is_some()
+  {
+    return Ok(());
+  }
+  let Some(global) = binding(v8__Context__Global(context)) else {
+    return Ok(());
+  };
+  callback_access::with_owner(&global.runtime, |runtime| {
+    into_realm(runtime, &global.runtime, object.cast()).map(|_| ())
+  })
+}
+
 fn adopt_native_error(object: *const Object) -> Result<(), String> {
   if !matches!(unsafe { heap_value(object) }, Some(HeapValue::Error { .. }))
     || binding(object).is_some()
