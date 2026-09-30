@@ -38,6 +38,20 @@ replay now passes with exact output and neither provider variable configured.
 Both compiled Wasm tests pass, including unknown-source refusal with zero host
 op calls. All31/31 measured runs pass. See results/2026-09-09-aot-processes.md.
 
+On 2026-09-30 the clean detached runtime build was verified at compiler
+`54eaa2239acd5eb1f383a500bd4d4a3b9dbdb3b2` and runtime
+`59ec036ed4ee1f5ef6d3beb3fd03a57c187a53bf`. It emits 2,666,543 bytes with
+17 native imports, including the enqueue notification for shared native and
+compiled microtask ordering. Its SHA-256 is
+`2376bb786df65caa199091ae6b32ff0ff992ae579324e0b0ed25006d747a327d`.
+The compiler pin advances independently of the historical POC. This verifies
+the raw artifact build, not a complete distribution or full Deno conformance.
+Fresh Wasmtime 47.0.3 precompilation of this output and its paired attestation
+also pass. Compiler-free replay passes 24/24 core fixture tests with three
+explicit ignores and no interpreter provider configured. The source-namespace
+multi-graph fixture separately passes using its existing trusted artifacts;
+those graphs were not part of this clean package build.
+
 Run the generator tests with DENO_HELLO_WORLD_SOURCE pointing to the pinned
 `libs/core/examples/hello_world.rs`, then:
 

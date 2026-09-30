@@ -82,9 +82,9 @@ The runtime artifact builder now requests the compiled enqueue notification
 and rejects output without the single-job drain and pending-count functions.
 AOT mode links only native host capabilities; an interpreter provider remains
 an explicit dynamic-code fallback. The historical POC compile commitment is
-unchanged. The runtime compiler pin now includes this scheduler ABI.
-Clean-checkout production packaging and release validation remain required.
-The development fixture is not a substitute for that release gate.
+unchanged. The runtime compiler pin now includes this scheduler ABI and the
+clean detached raw-artifact build is verified for the pinned program.
+Distribution packaging and broader release validation remain required.
 
 Separately evaluated extension and application graphs can be packaged with
 `V8X_JS2WASM_ARTIFACT_OUTPUT_DIR` during build-time execution. Compiler-free
