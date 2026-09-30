@@ -673,6 +673,34 @@ pub(super) fn to_number(
   })
 }
 
+pub(super) fn to_string(
+  value: *const Value,
+) -> Option<Result<*const V8String, String>> {
+  let entry = binding(value.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let envelope = runtime.realm_handle(
+      "__v8x_value_to_string",
+      &[runtime.realm_check(entry.value)?],
+    )?;
+    let zero = runtime.realm_string(&[48])?;
+    let one = runtime.realm_string(&[49])?;
+    let success = runtime.realm_get(envelope, zero)?;
+    let result = runtime.realm_get(envelope, one)?;
+    if !runtime.realm_as_boolean(success)? {
+      let exception = from_realm(runtime, &entry.runtime, result)?;
+      record_exception(current_isolate(), exception);
+      return Ok(ptr::null());
+    }
+    if runtime.realm_kind(result)? != 4 {
+      return Err("realm String conversion did not return a string".into());
+    }
+    let units = runtime.realm_as_utf16(result)?;
+    let text = String::from_utf16(&units)
+      .map_err(|_| "realm String conversion contains unpaired UTF-16")?;
+    Ok(new_string(current_isolate(), text))
+  }))
+}
+
 pub(super) fn report(error: String) {
   if std::env::var_os("V8X_JS2WASM_TRACE_HOST").is_some() {
     eprintln!("v8x/js2wasm: {error}");

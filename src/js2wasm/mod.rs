@@ -5178,6 +5178,15 @@ pub extern "C" fn v8__Value__ToString(
   value: *const Value,
   _context: *const Context,
 ) -> *const V8String {
+  if let Some(result) = realm_objects::to_string(value) {
+    return match result {
+      Ok(string) => string,
+      Err(error) => {
+        realm_objects::report(error);
+        ptr::null()
+      }
+    };
+  }
   let isolate = current_isolate();
   match unsafe { heap_value(value) } {
     Some(HeapValue::String(_)) => value.cast(),

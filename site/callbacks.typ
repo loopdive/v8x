@@ -133,6 +133,11 @@ records actual Wasmtime frames and a non-enumerable stack property without
 replacing the error. Source locations, identity-based `constructorOpt` trimming
 and full V8 stack formatting are not implemented.
 
+The compiled value bridge has a string-conversion operation with a success and
+value result. Its focused compiled controls verify Error text, the string hint
+for object coercion, rejection of Symbol values and original thrown-value
+identity. This is not a complete native coercion or Deno conformance result.
+
 Native js2wasm functions retain the length supplied by Function and
 FunctionTemplate builders. The property is included when a host callback
 enters the compiled realm. A bootstrap fixture checks its value after transfer.

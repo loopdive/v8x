@@ -30,6 +30,21 @@ const applicationSource = `
 (globalThis as any).throwingCoercion = {
   valueOf():any { throw (globalThis as any).coercionError; }
 };
+(globalThis as any).stringHintObject = {
+  [Symbol.toPrimitive](hint:any):any {
+    if (hint !== "string") throw new Error("wrong string hint");
+    return "string hint";
+  }
+};
+(globalThis as any).throwingStringCoercion = {
+  toString():any { throw (globalThis as any).coercionError; }
+};
+(globalThis as any).symbolStringCoercion = {
+  [Symbol.toPrimitive](hint:any):any {
+    if (hint !== "string") throw new Error("wrong string hint");
+    return Symbol("coercion result");
+  }
+};
 
 const unnamedFunction:any = function():number { return 42; };
 Object.defineProperty(unnamedFunction, "name", { value: undefined, configurable: true });
@@ -114,6 +129,28 @@ assert.equal(e.__v8x_value_set_prototype(proto,obj),0);
 assert.equal(e.__v8x_value_get_prototype(proto),nil);
 assert.throws(()=>e.__v8x_value_set_prototype(obj,e.__v8x_value_number(1)));
 const text=str("Grüße 😀");
+const decode = handle => {
+  let result = "";
+  for (let i=0;i<e.__v8x_value_utf16_length(handle);i++) result += String.fromCharCode(e.__v8x_value_utf16_unit(handle,i));
+  return result;
+};
+for (const [value,expected] of [
+  [e.__v8x_value_error(str("Error"),str("realm failure")),"Error: realm failure"],
+  [e.__v8x_value_get(global,str("stringHintObject")),"string hint"],
+]) {
+  const envelope=e.__v8x_value_to_string(value);
+  assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(envelope,str("0"))),1);
+  assert.equal(decode(e.__v8x_value_get(envelope,str("1"))),expected);
+}
+const stringFailure=e.__v8x_value_to_string(e.__v8x_value_get(global,str("throwingStringCoercion")));
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(stringFailure,str("0"))),0);
+assert.equal(e.__v8x_value_get(stringFailure,str("1")),e.__v8x_value_get(global,str("coercionError")));
+for (const symbol of [e.__v8x_value_symbol_create(0,str("x")),e.__v8x_value_get(global,str("symbolStringCoercion"))]) {
+  const symbolFailure=e.__v8x_value_to_string(symbol);
+  assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(symbolFailure,str("0"))),0);
+  assert.equal(decode(e.__v8x_value_get(e.__v8x_value_get(symbolFailure,str("1")),str("name"))),"TypeError");
+}
+console.log("PASS: realm ToString preserves errors, string hints, thrown identity and Symbol refusal");
 assert.equal(e.__v8x_value_utf16_length(text),8);
 assert.equal(e.__v8x_value_utf16_unit(text,6),0xd83d);
 assert.equal(e.__v8x_value_number(NaN),e.__v8x_value_number(NaN));

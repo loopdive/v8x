@@ -112,6 +112,14 @@ export function __v8x_value_to_number(id: number): number {
   try { return __v8xKeepValue([true, +value]); }
   catch (error) { return __v8xKeepValue([false, error]); }
 }
+export function __v8x_value_to_string(id: number): number {
+  const value = __v8xValueAt(id);
+  // The native concat argument path performs spec ToString with the string
+  // hint, including Symbol rejection. String(value) accepts a Symbol and the
+  // binary + operator uses the default hint instead.
+  try { return __v8xKeepValue([true, "".concat(value)]); }
+  catch (error) { return __v8xKeepValue([false, error]); }
+}
 
 const __v8xHostBufferIds = new Set<number>();
 const __v8xPacketIds = new Set<number>();
@@ -243,6 +251,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_symbol_kind",
   "__v8x_value_symbol_text",
   "__v8x_value_kind",
+  "__v8x_value_to_string",
   "__v8x_value_null",
   "__v8x_value_boolean",
   "__v8x_value_as_boolean",
