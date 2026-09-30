@@ -372,6 +372,9 @@ struct IsolateState {
   microtasks: VecDeque<Microtask>,
   running_microtasks: bool,
   promise_reject_callback: Option<crate::isolate::PromiseRejectCallback>,
+  compiled_rejections:
+    VecDeque<crate::js2wasm_spike::rejection_events::PendingPromiseRejection>,
+  flushing_rejections: bool,
   continuation_data: *const Value,
   terminating: AtomicBool,
   active_try_catch: *mut TryCatchAbiState,
@@ -596,6 +599,7 @@ fn with_runtime_owner<T>(
     let mut runtime = owner
       .try_borrow_mut()
       .map_err(|_| format!("compiled runtime re-entered during {operation}"))?;
+    runtime.configure_realm_owner(Rc::as_ptr(owner) as usize)?;
     runtime.configure_heap_limit(current_isolate());
     callback(&mut runtime)
   };
@@ -615,6 +619,23 @@ pub(crate) fn capture_rejection_continuation(isolate: usize) -> usize {
   } else {
     continuation::get(isolate as *mut RealIsolate) as usize
   }
+}
+
+pub(crate) fn enqueue_compiled_rejection(
+  event: crate::js2wasm_spike::rejection_events::PendingPromiseRejection,
+) -> Result<(), String> {
+  if event.isolate == 0
+    || event.isolate != current_isolate() as usize
+    || event.realm_owner_identity == 0
+  {
+    return Err(
+      "rejection event has no active isolate or published realm owner".into(),
+    );
+  }
+  unsafe { isolate_state(event.isolate as *mut RealIsolate) }
+    .compiled_rejections
+    .push_back(event);
+  Ok(())
 }
 
 fn allocate_error(
@@ -1867,6 +1888,8 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     microtasks: VecDeque::new(),
     running_microtasks: false,
     promise_reject_callback: None,
+    compiled_rejections: VecDeque::new(),
+    flushing_rejections: false,
     continuation_data: ptr::null(),
     terminating: AtomicBool::new(false),
     active_try_catch: ptr::null_mut(),

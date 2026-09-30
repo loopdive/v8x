@@ -14,6 +14,11 @@ const fixture = eventFixture ? `
 const rejectionMarker = { token: 42 };
 (globalThis as any).__v8x_test_reason = rejectionMarker;
 (globalThis as any).__v8x_test_reject = function(): any { return Promise.reject(rejectionMarker); };
+(globalThis as any).__v8x_test_reject_and_handle = function(): any {
+  const promise = Promise.reject(rejectionMarker);
+  promise.catch(() => 42);
+  return promise;
+};
 (globalThis as any).__v8x_test_attach = function(promise: any): any { return promise.catch(() => 42); };
 ` : "";
 const dispatcher = eventFixture === "--rejection-events" ? contextPromiseRejectionDispatcherSource() : "";

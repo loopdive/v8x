@@ -196,48 +196,77 @@ fn from_realm(
   }
 }
 
-/// Flush only after the outer Store borrow ends. Reentrant operations append
-/// behind the existing events and let this flush retain this realm's event order.
+/// Flush after the Store borrow ends. One isolate-wide guard prevents a
+/// callback entering another realm from overtaking previously queued events.
 pub(crate) fn flush_rejection_events(
-  owner: &Rc<RefCell<DenoRuntime>>,
+  _owner: &Rc<RefCell<DenoRuntime>>,
 ) -> Result<(), String> {
-  if !owner
-    .try_borrow_mut()
-    .map_err(|_| {
-      "rejection flush attempted inside Wasmtime execution".to_string()
-    })?
-    .begin_rejection_flush()
-  {
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return Err("rejection flush has no active isolate".into());
+  }
+  if unsafe { isolate_state(isolate) }.flushing_rejections {
     return Ok(());
   }
-  struct FlushGuard(Rc<RefCell<DenoRuntime>>);
+  unsafe { isolate_state(isolate) }.flushing_rejections = true;
+  struct FlushGuard(*mut RealIsolate);
   impl Drop for FlushGuard {
     fn drop(&mut self) {
-      if let Ok(mut runtime) = self.0.try_borrow_mut() {
-        runtime.end_rejection_flush();
-      }
+      unsafe { isolate_state(self.0) }.flushing_rejections = false;
     }
   }
-  let _guard = FlushGuard(owner.clone());
+  let _guard = FlushGuard(isolate);
   loop {
-    let translated = {
-      let mut runtime = owner.try_borrow_mut().map_err(|_| {
-        "rejection value conversion reentered runtime".to_string()
-      })?;
-      let Some(event) = runtime.take_rejection_event() else {
-        break;
-      };
-      if event.realm_id != runtime.realm_id()
-        || event.isolate == 0
-        || event.isolate != current_isolate() as usize
-      {
-        return Err(
-          "rejection notification has a different realm or isolate owner"
-            .into(),
-        );
+    let Some(event) = unsafe { isolate_state(isolate) }
+      .compiled_rejections
+      .front()
+      .copied()
+    else {
+      break;
+    };
+    let owner = {
+      let state = unsafe { isolate_state(isolate) };
+      state.owned_contexts.iter().find_map(|context| {
+        let Some(HeapValue::Context(state)) = (unsafe { heap_value(*context) })
+        else {
+          return None;
+        };
+        [&state.deno_core_bootstrap, &state.module_runtime]
+          .into_iter()
+          .flatten()
+          .find(|runtime| {
+            Rc::as_ptr(runtime) as usize == event.realm_owner_identity
+          })
+          .map(|runtime| (*context, runtime.clone()))
+      })
+    }
+    .ok_or_else(|| "queued rejection realm owner is unavailable".to_string())?;
+    // Reentrant execution can finish in one realm while an outer Store is
+    // still running in another. Leave the head queued; never skip it or try
+    // to convert values through the borrowed Store. The outer boundary flushes.
+    let Ok(mut runtime) = owner.1.try_borrow_mut() else {
+      return Ok(());
+    };
+    if event.realm_id != runtime.realm_id() || event.isolate != isolate as usize
+    {
+      return Err(
+        "rejection notification has a different realm or isolate owner".into(),
+      );
+    }
+    unsafe { isolate_state(isolate) }
+      .compiled_rejections
+      .pop_front();
+    struct ContextGuard(*const Context);
+    impl Drop for ContextGuard {
+      fn drop(&mut self) {
+        v8__Context__Exit(self.0);
       }
+    }
+    v8__Context__Enter(owner.0);
+    let _context = ContextGuard(owner.0);
+    let translated = {
       let promise_value = runtime.realm_from_handle(event.promise)?;
-      let promise = from_realm(&mut *runtime, owner, promise_value)?;
+      let promise = from_realm(&mut *runtime, &owner.1, promise_value)?;
       if !matches!(unsafe { heap_value(promise) }, Some(HeapValue::Promise(_)))
       {
         return Err("rejection event carrier is not a native Promise".into());
@@ -246,7 +275,7 @@ pub(crate) fn flush_rejection_events(
         ptr::null()
       } else {
         let value = runtime.realm_from_handle(event.reason)?;
-        from_realm(&mut *runtime, owner, value)?
+        from_realm(&mut *runtime, &owner.1, value)?
       };
       let kind = match event.event {
         0 => crate::PromiseRejectEvent::PromiseRejectWithNoHandler,
@@ -263,6 +292,7 @@ pub(crate) fn flush_rejection_events(
         event.continuation_data as *const Value,
       )
     };
+    drop(runtime);
     let _restore = continuation::enter(translated.0, translated.4);
     promise_reject::notify(
       translated.0,

@@ -8,6 +8,7 @@ pub(crate) struct PendingPromiseRejection {
   pub(crate) promise: f64,
   pub(crate) reason: f64,
   pub(crate) continuation_data: usize,
+  pub(crate) realm_owner_identity: usize,
 }
 
 impl PendingPromiseRejection {
@@ -44,6 +45,7 @@ impl PendingPromiseRejection {
       promise,
       reason,
       continuation_data: 0,
+      realm_owner_identity: 0,
     })
   }
 }

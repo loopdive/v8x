@@ -104,8 +104,13 @@ events, reentrant attachment and isolate isolation. An event-producing compiled
 test context also delivers unhandled rejection and first late-handler events
 with exact Promise/reason identity. The callback can attach a handler after the
 runtime borrow ends. Both controls pass in compiler-free AOT replay. This
-opt-in transport has not yet advanced the packaged Deno compiler pin, and
-cross-realm rejection ordering remains unverified. A separate two-graph acceptance test verifies
+opt-in transport is included in the runtime compiler pin. A clean complete-core
+artifact passes the compiler-free public API controls without an interpreter
+provider. Compiled notifications share an isolate-local queue. A compiler-free
+two-realm control verifies that callback reentry cannot overtake a previously
+queued handler notification, preserving each realm's Promise and reason
+identity. General thenable and duplicate-resolution coverage remains incomplete.
+A separate two-graph acceptance test verifies
 compiled reactions interleaved with native callbacks in one shared Store,
 including compiler-free replay of trusted context and source-bound graph
 artifacts. It also checks live namespace values, exception identity and

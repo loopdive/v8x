@@ -56,6 +56,28 @@ unsafe extern "C" fn noop_callback(_info: *const v8::FunctionCallbackInfo) {}
 
 thread_local! {
   static PROMISE_REJECTION_EVENTS: RefCell<Vec<(v8::PromiseRejectEvent, usize, Option<usize>)>> = const { RefCell::new(Vec::new()) };
+  static REJECTION_SECOND_REALM: RefCell<Option<(v8::Global<v8::Context>, v8::Global<v8::Function>)>> = const { RefCell::new(None) };
+}
+
+unsafe extern "C" fn reject_in_second_realm(message: v8::PromiseRejectMessage) {
+  unsafe { record_promise_rejection(message) };
+  let first =
+    PROMISE_REJECTION_EVENTS.with(|events| events.borrow().len() == 1);
+  if !first {
+    return;
+  }
+  v8::callback_scope!(unsafe scope, &message);
+  let (context, reject) = REJECTION_SECOND_REALM.with(|slot| {
+    let slot = slot.borrow();
+    let (context, reject) = slot.as_ref().expect("second realm installed");
+    (
+      v8::Local::new(scope, context),
+      v8::Local::new(scope, reject),
+    )
+  });
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let receiver = v8::undefined(scope).into();
+  reject.call(scope, receiver, &[]).unwrap();
 }
 
 unsafe extern "C" fn record_promise_rejection(
@@ -187,6 +209,92 @@ fn compiled_rejection_reports_exact_identity_and_late_handler() {
 #[ignore = "requires freshly built event-producing V8X_JS2WASM_REJECTION_CONTEXT"]
 fn compiled_rejection_callback_can_reenter_without_borrowing_runtime() {
   compiled_rejection_delivery(true);
+}
+
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[test]
+#[ignore = "requires cross-realm event-producing V8X_JS2WASM_REJECTION_CONTEXT"]
+fn compiled_rejection_preserves_cross_realm_enqueue_order() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(reject_in_second_realm);
+  v8::scope!(let scope, isolate);
+  let first = v8::Context::new(scope, Default::default());
+  let second = v8::Context::new(scope, Default::default());
+  let path =
+    PathBuf::from(std::env::var_os("V8X_JS2WASM_REJECTION_CONTEXT").unwrap());
+  let second_reason_id;
+  {
+    let scope = &mut v8::ContextScope::new(scope, second);
+    scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+    v8::js2wasm_attach_precompiled_realm_for_test(&second, &path).unwrap();
+    let global = second.global(scope);
+    let key = v8::String::new(scope, "__v8x_test_reject").unwrap();
+    let reject = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let key = v8::String::new(scope, "__v8x_test_reason").unwrap();
+    let reason = global.get(scope, key.into()).unwrap();
+    second_reason_id = &*reason as *const v8::Value as usize;
+    REJECTION_SECOND_REALM.with(|slot| {
+      *slot.borrow_mut() = Some((
+        v8::Global::new(scope, second),
+        v8::Global::new(scope, reject),
+      ))
+    });
+  }
+  {
+    let scope = &mut v8::ContextScope::new(scope, first);
+    v8::js2wasm_attach_precompiled_realm_for_test(&first, &path).unwrap();
+    let global = first.global(scope);
+    let key = v8::String::new(scope, "__v8x_test_reason").unwrap();
+    let reason = global.get(scope, key.into()).unwrap();
+    let reason_id = &*reason as *const v8::Value as usize;
+    assert_ne!(reason_id, second_reason_id);
+    let key = v8::String::new(scope, "__v8x_test_reject_and_handle").unwrap();
+    let reject = v8::Local::<v8::Function>::try_from(
+      global.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let receiver = v8::undefined(scope).into();
+    let promise = v8::Local::<v8::Promise>::try_from(
+      reject.call(scope, receiver, &[]).unwrap(),
+    )
+    .unwrap();
+    let promise_id = &*promise as *const v8::Promise as usize;
+    PROMISE_REJECTION_EVENTS.with(|events| {
+      let events = events.borrow();
+      assert_eq!(events.len(), 3);
+      assert_eq!(
+        events[0],
+        (
+          v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+          promise_id,
+          Some(reason_id)
+        )
+      );
+      assert_eq!(
+        events[1],
+        (
+          v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+          promise_id,
+          None
+        )
+      );
+      assert_eq!(
+        events[2].0,
+        v8::PromiseRejectEvent::PromiseRejectWithNoHandler
+      );
+      assert_ne!(events[2].1, promise_id);
+      assert_eq!(events[2].2, Some(second_reason_id));
+    });
+    scope.perform_microtask_checkpoint();
+    PROMISE_REJECTION_EVENTS
+      .with(|events| assert_eq!(events.borrow().len(), 3));
+  }
+  REJECTION_SECOND_REALM.with(|slot| slot.borrow_mut().take());
 }
 
 #[test]
