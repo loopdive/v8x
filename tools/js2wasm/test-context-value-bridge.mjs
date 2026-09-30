@@ -145,31 +145,39 @@ console.log("PASS: fixed host buffer handles, shared overlapping views, view bou
 
 console.log("PASS: identity, prototype updates and refusals, callable result, UTF-16, NaN, signed zero, invalid handles");
 
-function numericEnvelope(handle) {
-  const envelope=e.__v8x_value_to_number(handle);
-  return [e.__v8x_value_as_boolean(e.__v8x_value_get(envelope,str("0"))),
-    e.__v8x_value_get(envelope,str("1"))];
+function numericEnvelope(handle, label) {
+  const checked = (stage, operation) => {
+    try { return operation(); }
+    catch (cause) { throw new Error(`numeric envelope ${label}: ${stage}`, { cause }); }
+  };
+  const envelope=checked("ToNumber", () => e.__v8x_value_to_number(handle));
+  const ok=checked("status property", () => e.__v8x_value_get(envelope,str("0")));
+  return [checked("boolean status", () => e.__v8x_value_as_boolean(ok)),
+    checked("result property", () => e.__v8x_value_get(envelope,str("1")))];
 }
 for (const [input, expected] of [["",0],[" 42.9 ",42.9],["0x10",16],["0b11",3],["no",NaN]]) {
-  const [ok,value]=numericEnvelope(str(input));
+  const [ok,value]=numericEnvelope(str(input), JSON.stringify(input));
   assert.equal(ok,1,input);
   assert.equal(e.__v8x_value_as_number(value),expected,input);
 }
-const [coercedOk,coerced]=numericEnvelope(e.__v8x_value_get(global,str("coercionObject")));
+const [coercedOk,coerced]=numericEnvelope(e.__v8x_value_get(global,str("coercionObject")), "coercionObject");
 assert.equal(coercedOk,1);
 assert.equal(e.__v8x_value_as_number(coerced),42.9);
-const [threw,exception]=numericEnvelope(e.__v8x_value_get(global,str("throwingCoercion")));
+const [threw,exception]=numericEnvelope(e.__v8x_value_get(global,str("throwingCoercion")), "throwingCoercion");
 assert.equal(threw,0);
 assert.equal(exception,e.__v8x_value_get(global,str("coercionError")));
 
 console.log("PASS: numeric strings, number-hint coercion, and original exception identity");
 const positiveZero=e.__v8x_value_number(0), negativeZero=e.__v8x_value_number(-0);
+assert.equal(e.__v8x_value_number(-0), negativeZero, "negative zero before handle growth");
 const identities=[];
 for(let i=0;i<512;i++) identities.push(e.__v8x_value_object());
 assert.equal(new Set(identities).size,512);
+assert.equal(e.__v8x_value_number(-0), negativeZero, "negative zero after object handle growth");
 for(let i=0;i<512;i++) {
   const n=e.__v8x_value_number(i+1000);
   assert.equal(e.__v8x_value_number(i+1000),n);
+  assert.equal(e.__v8x_value_number(-0),negativeZero, `negative zero after number ${i+1000}`);
 }
 assert.equal(e.__v8x_value_number(-0),negativeZero);
 assert.equal(e.__v8x_value_number(0),positiveZero);
