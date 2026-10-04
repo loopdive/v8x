@@ -1,5 +1,45 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Cached dependency failure checkpoint
+
+The native regression initially failed 0/1 because a cached synthetic failure
+was replaced by "source graph contains a synthetic module". Evaluation now
+recognizes the next already-failed dependency before packaging, propagates its
+original exception through intermediate modules, and caches rejected Promises.
+The final public-API regression passes 1/1 (53 filtered /54). It checks direct
+and transitive failure, exact object identity, repeated Promise identity, one
+callback total, no synchronous TryCatch delivery, preservation of an unrelated
+caught exception, and zero runtime compiler/interpreter activity.
+
+The shortcut must stop at an earlier pending dependency without a known next
+failure. It must not skip that dependency's side effects. The ordering unit
+control covers pending, evaluated, cyclic-prefix and missing-payload cases.
+First-failure propagation during flattened source execution, mixed fresh-prefix
+failure execution, general cycles/TDZ, and native prepared-IR participation
+still need work. This is not complete Deno integration or a performance claim.
+
+Rebuild and replay from this checkout:
+
+```sh
+cargo test --offline --no-default-features --features js2wasm_deno_poc,js2wasm_gc_copying,js2wasm_diagnostic_abi --lib js2wasm:: -- --test-threads=1
+cargo test --offline --no-default-features --features js2wasm_deno_poc,js2wasm_gc_copying,js2wasm_diagnostic_abi --test js2wasm_spike --no-run
+target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::cached_dependency_failure_rejects_with_original_payload_without_reexecution --nocapture --test-threads=1
+target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --skip routes_exact_deno_core_scripts_through_public_script_run --test-threads=1
+```
+
+The unfiltered library population is not green: it aborts at the unsupported
+diagnostic ABI v8__V8__IsSandboxEnabled. The full 431-test Deno population is
+not certified. Keep paired PRs 6468 (compiler, stacked) and v8x 2 as drafts.
+Temporary package paths below are replay aids, not deployable release inputs.
+
+Final rebuild receipts: filtered adapter library 16/16 (16 filtered /32);
+ordinary native controls 35 passed, 18 ignored, 1 filtered /54; typed and
+shared-owner AOT replays each 1/1 (53 filtered /54). Rebuilt unchanged Deno
+selected controls pass 5/5, each 430 filtered /431, using the existing clean
+graph/Script packages and unchanged Context described below. Formatting and
+diff checks pass. Site build fails because /opt/homebrew/bin/typst is absent;
+no rendered-site validation is claimed.
+
 ## Typed live imports through the native module lifecycle
 
 New test `shared_modules::aot_typed_dependency_reads_original_numeric_export`

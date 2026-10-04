@@ -33,4 +33,12 @@ The system-JSC row is a deliberate trade. A closed-graph restriction is
 stronger than a partial emulation of hooks Apple's framework does not
 expose, and it is much easier to test.
 
+The experimental js2wasm backend keys module state by native wrapper identity.
+When the next dependency has already failed, later evaluation returns a cached
+rejected Promise with the original exception object. This includes transitive
+dependencies and does not rerun the failed callback. An earlier unevaluated
+dependency prevents this shortcut so its execution order is retained.
+General cyclic evaluation, snapshots, and complete Deno integration remain
+unverified.
+
 #next("snapshots", [Snapshots: record and replay])

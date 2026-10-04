@@ -8132,7 +8132,22 @@ fn reject_module_evaluation(
   module: *const Module,
   message: &str,
 ) -> *const Value {
-  fail_module_evaluation(module, message);
+  reject_module_evaluation_with_exception(module, ptr::null(), message)
+}
+
+fn reject_module_evaluation_with_exception(
+  module: *const Module,
+  exception: *const Value,
+  message: &str,
+) -> *const Value {
+  if exception.is_null() {
+    fail_module_evaluation(module, message);
+  } else if let Some(state) = unsafe { module_state(module) } {
+    // Cached delivery is not a fresh synchronous throw. An unrelated active
+    // TryCatch must neither replace this payload nor be cleared by rejection.
+    state.status = STATUS_ERRORED;
+    state.exception = exception;
+  }
   let Some(state) = (unsafe { module_state(module) }) else {
     return ptr::null();
   };
@@ -8155,6 +8170,42 @@ fn reject_module_evaluation(
   state.evaluation_result = promise.cast();
   settle_promise_value(promise, exception, PromiseSettlement::Rejected);
   promise.cast()
+}
+
+// Propagate a cached failure only when it is next in dependency evaluation
+// order. An earlier unevaluated body must retain its side effects, so it ends
+// this shortcut even if a later sibling is already errored. Walk exact native
+// identities, not URLs; cycles remain on the ordinary execution path.
+fn failed_dependency_exception(
+  dependencies: &[*const Module],
+  seen: &mut HashSet<usize>,
+) -> Result<Option<*const Value>, String> {
+  for &dependency in dependencies {
+    if !seen.insert(dependency as usize) {
+      continue;
+    }
+    let state = unsafe { module_state(dependency) }
+      .ok_or("dependency Module disappeared before evaluation")?;
+    if state.status == STATUS_ERRORED {
+      if state.exception.is_null() {
+        return Err("errored dependency Module has no cached exception".into());
+      }
+      return Ok(Some(state.exception));
+    }
+    if state.status == STATUS_EVALUATED {
+      continue;
+    }
+    let nested = state.dependencies.clone();
+    if let Some(exception) = failed_dependency_exception(&nested, seen)? {
+      let state = unsafe { module_state(dependency) }
+        .ok_or("dependency Module disappeared during cached failure")?;
+      state.status = STATUS_ERRORED;
+      state.exception = exception;
+      return Ok(Some(exception));
+    }
+    return Ok(None);
+  }
+  Ok(None)
 }
 
 fn evaluate_synthetic_module(
@@ -8275,8 +8326,16 @@ pub extern "C" fn v8__Module__Evaluate(
   let Some(state) = (unsafe { module_state(module) }) else {
     return ptr::null();
   };
-  if state.status == STATUS_ERRORED && !state.evaluation_result.is_null() {
-    return state.evaluation_result;
+  if state.status == STATUS_ERRORED {
+    if !state.evaluation_result.is_null() {
+      return state.evaluation_result;
+    }
+    let exception = state.exception;
+    return reject_module_evaluation_with_exception(
+      module,
+      exception,
+      "errored Module has no cached exception",
+    );
   }
   if state.status == STATUS_EVALUATED {
     if !state.evaluation_result.is_null() {
@@ -8294,6 +8353,20 @@ pub extern "C" fn v8__Module__Evaluate(
       "module must be instantiated before evaluation",
     );
     return ptr::null();
+  }
+  match failed_dependency_exception(
+    &state.dependencies,
+    &mut HashSet::from([module as usize]),
+  ) {
+    Ok(Some(exception)) => {
+      return reject_module_evaluation_with_exception(
+        module,
+        exception,
+        "dependency module evaluation failed",
+      );
+    }
+    Err(error) => return reject_module_evaluation(module, &error),
+    Ok(None) => {}
   }
   state.status = STATUS_EVALUATING;
   let synthetic_evaluation_steps = state
@@ -8442,6 +8515,51 @@ mod tests {
       attributes: Vec::new(),
       phase: StaticImportPhase::Evaluation,
     }
+  }
+
+  #[test]
+  fn cached_dependency_failure_shortcut_retains_execution_order() {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    let fresh = test_source_module(isolate, "same-url", Vec::new());
+    let failed = test_source_module(isolate, "same-url", Vec::new());
+    let marker = new_object(isolate).cast();
+    unsafe { module_state(fresh) }.unwrap().status = STATUS_INSTANTIATED;
+    let state = unsafe { module_state(failed) }.unwrap();
+    state.status = STATUS_ERRORED;
+    state.exception = marker;
+    // A later cached failure cannot skip an earlier source's unevaluated body.
+    assert_eq!(
+      failed_dependency_exception(&[fresh, failed], &mut HashSet::new())
+        .unwrap(),
+      None
+    );
+    assert_eq!(
+      unsafe { module_state(fresh) }.unwrap().status,
+      STATUS_INSTANTIATED
+    );
+    // Once that prefix is evaluated, its exact identity is safe to skip.
+    unsafe { module_state(fresh) }.unwrap().status = STATUS_EVALUATED;
+    assert_eq!(
+      failed_dependency_exception(&[fresh, failed], &mut HashSet::new())
+        .unwrap(),
+      Some(marker)
+    );
+    // Same URL is not same Module, and a cyclic pending prefix is not complete.
+    unsafe { module_state(fresh) }.unwrap().status = STATUS_INSTANTIATED;
+    unsafe { module_state(fresh) }.unwrap().dependencies = vec![fresh];
+    assert_eq!(
+      failed_dependency_exception(&[fresh, failed], &mut HashSet::new())
+        .unwrap(),
+      None
+    );
+    // Missing evidence must refuse, never turn an errored Module into success.
+    unsafe { module_state(failed) }.unwrap().exception = ptr::null();
+    assert!(
+      failed_dependency_exception(&[failed], &mut HashSet::new()).is_err()
+    );
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
   }
 
   thread_local! {

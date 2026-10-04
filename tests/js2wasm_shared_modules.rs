@@ -3,6 +3,125 @@ use super::*;
 
 struct SharedModule(v8::Global<v8::Module>);
 
+struct CachedFailure {
+  payload: v8::Global<v8::Value>,
+  calls: Cell<u32>,
+}
+
+#[test]
+fn cached_dependency_failure_rejects_with_original_payload_without_reexecution()
+{
+  fn fail<'s>(
+    context: v8::Local<'s, v8::Context>,
+    _module: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+    let failure = context.get_slot::<CachedFailure>().unwrap().clone();
+    failure.calls.set(failure.calls.get() + 1);
+    let payload = v8::Local::new(scope, &failure.payload);
+    scope.throw_exception(payload);
+    None
+  }
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let payload: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  let failure = Rc::new(CachedFailure {
+    payload: v8::Global::new(scope, payload),
+    calls: Cell::new(0),
+  });
+  context.set_slot(failure.clone());
+  let name =
+    v8::String::new(scope, "file:///cached-failure/shared.js").unwrap();
+  let shared = v8::Module::create_synthetic_module(scope, name, &[], fail);
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, shared))));
+  assert_eq!(shared.instantiate_module(scope, resolve_shared), Some(true));
+  let rejected = shared.evaluate(scope).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(rejected).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(scope).strict_equals(payload));
+  promise.mark_as_handled();
+  assert!(shared.evaluate(scope).unwrap().strict_equals(rejected));
+  for index in 0..2 {
+    let entry = compile(
+      scope,
+      &format!("file:///cached-failure/entry-{index}.js"),
+      "import './shared.js'; throw new Error('entry must not execute');",
+    );
+    assert_eq!(entry.instantiate_module(scope, resolve_shared), Some(true));
+    v8::tc_scope!(let caught, scope);
+    let prior = if index == 1 {
+      let value: v8::Local<v8::Value> = v8::Object::new(caught).into();
+      caught.throw_exception(value);
+      Some(value)
+    } else {
+      None
+    };
+    let result = entry.evaluate(caught).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+    assert_eq!(promise.state(), v8::PromiseState::Rejected);
+    assert!(
+      promise.result(caught).strict_equals(payload),
+      "entry {index} must retain the cached dependency payload"
+    );
+    assert!(entry.get_exception().strict_equals(payload));
+    if let Some(prior) = prior {
+      assert!(
+        caught.exception().unwrap().strict_equals(prior),
+        "cached delivery must preserve an unrelated caught exception"
+      );
+      caught.reset();
+    } else {
+      assert!(
+        !caught.has_caught(),
+        "dependency failure is an asynchronous rejection"
+      );
+    }
+    assert!(entry.evaluate(caught).unwrap().strict_equals(result));
+    promise.mark_as_handled();
+  }
+  let middle = compile(
+    scope,
+    "file:///cached-failure/middle.js",
+    "import './shared.js'; export const value=1;",
+  );
+  assert_eq!(middle.instantiate_module(scope, resolve_shared), Some(true));
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, middle))));
+  let leaf = compile(
+    scope,
+    "file:///cached-failure/leaf.js",
+    "import './shared.js'; throw new Error('leaf must not execute');",
+  );
+  assert_eq!(leaf.instantiate_module(scope, resolve_shared), Some(true));
+  v8::tc_scope!(let caught, scope);
+  let result = leaf.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(caught).strict_equals(payload));
+  assert_eq!(middle.get_status(), v8::ModuleStatus::Errored);
+  assert!(middle.get_exception().strict_equals(payload));
+  let middle_result = middle.evaluate(caught).unwrap();
+  let middle_promise =
+    v8::Local::<v8::Promise>::try_from(middle_result).unwrap();
+  assert_eq!(middle_promise.state(), v8::PromiseState::Rejected);
+  assert!(middle_promise.result(caught).strict_equals(payload));
+  assert!(
+    middle
+      .evaluate(caught)
+      .unwrap()
+      .strict_equals(middle_result)
+  );
+  assert!(!caught.has_caught());
+  promise.mark_as_handled();
+  middle_promise.mark_as_handled();
+  assert_eq!(failure.calls.get(), 1);
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 fn resolve_shared<'s>(
   context: v8::Local<'s, v8::Context>,
   specifier: v8::Local<'s, v8::String>,
