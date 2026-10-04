@@ -1,0 +1,42 @@
+// Copyright 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import assert from "node:assert/strict";
+
+export function functionSource(source, name) {
+  assert(/^[A-Za-z_]\w*$/.test(name), "invalid Rust test identifier");
+  const matches = [...source.matchAll(new RegExp(`^(?:async )?fn ${name}\\(\\)`, "gm"))];
+  assert.equal(matches.length, 1, `missing or ambiguous original Deno test ${name}`);
+  const match = matches[0];
+  const end = source.indexOf("\n#[", match.index);
+  return source.slice(match.index, end < 0 ? undefined : end);
+}
+
+export function rawBinding(body, name) {
+  const match = new RegExp(`let ${name} = r#"([\\s\\S]*?)"#;`).exec(body);
+  assert(match, `missing original raw binding ${name}`);
+  return match[1];
+}
+
+// Preserve the exact original runtime source bytes, including whitespace.
+// Fail on unrecognized literal layouts rather than guessing Rust semantics.
+export function denoModuleFixtures(source) {
+  const graphs = [];
+  const scripts = [];
+  const resolve = functionSource(source, "import_meta_resolve");
+  graphs.push({ name: "import_meta_resolve", entry: "file:///test.js", source: rawBinding(resolve, "source") });
+  const filename = functionSource(source, "import_meta_filename_dirname");
+  graphs.push({ name: "import_meta_filename_dirname", entry: "file:///main_module.js", source: rawBinding(filename, "code") });
+  const builtin = functionSource(source, "builtin_core_module");
+  graphs.push({ name: "builtin_core_module", entry: "ext:///main_module.js", source: rawBinding(builtin, "source_code") });
+  for (const name of ["evaluate_already_evaluated_module", "evaluate_already_evaluated_module_sync"]) {
+    const body = functionSource(source, name);
+    const literal = /ascii_str!\(\s*("(?:[^"\\]|\\.)*")\s*\)/.exec(body);
+    assert(literal, `missing original module literal in ${name}`);
+    graphs.push({ name, entry: "file:///main.js", source: JSON.parse(literal[1]) });
+    const checks = [...body.matchAll(/\.execute_script\(\s*"(check[12])",\s*("(?:[^"\\]|\\.)*")\s*\)/g)];
+    assert.equal(checks.length, 2, `${name} must contain both original execution checks`);
+    for (const check of checks) scripts.push({ test: name, specifier: check[1], source: JSON.parse(check[2]) });
+  }
+  assert.equal(graphs.length, 5);
+  assert.equal(scripts.length, 4);
+  return { graphs, scripts };
+}

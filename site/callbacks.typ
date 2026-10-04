@@ -208,3 +208,7 @@ verifies null-prototype identity and an older graph's metadata after another
 same-URL Module executes. Native plain-object CreateDataProperty supports these
 initialization callbacks; defining properties on compiled and native exotic
 objects is still explicitly refused. Full module conformance is not established.
+Unchanged metadata resolution, filename/dirname and repeated evaluation controls
+pass with exact AOT packages. Importing the built-in core from another graph
+still fails a namespace identity conflict. Canonical shared-module linking is
+not yet supported; the existing binding is never silently replaced.

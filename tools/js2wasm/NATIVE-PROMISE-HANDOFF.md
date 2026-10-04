@@ -1,5 +1,62 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Broader unchanged module population
+
+Selected run: **4 passed /1 failed out of 5**, not full Deno integration.
+All runs used unchanged Deno 1d4e6c1, compiler-free binary
+`deno_core-87206ac56a2fccad`, fresh full Context from the section below and
+new exact-source packages in `/private/tmp/deno-module-population.SdW8YU`.
+Metadata resolve passes 1/1 (1.79s); filename/dirname 1/1 (1.54s); repeated
+evaluation async 1/1 (1.51s) and sync 1/1 (1.64s). Each has 430 filtered /431.
+Removing only the assertion Script directory makes async repeated evaluation
+fail 0/1 at check1 with an unknown-Script refusal (1.56s). Assertions are real.
+
+`builtin_core_module` fails 0/1 (1.79s) with its full package installed:
+"source module namespace was already bound to another value". The source graph
+publishes a second core namespace although the native core Module is already
+bound to its original Context namespace. Do not bypass this conflict. The next
+implementation must reuse canonical native Module namespaces in linked graphs,
+retain live exports/import-star identity, and avoid reevaluating already executed
+dependency bodies. Use native Module identity, not URL-only lookup. Cover shared
+dependencies across entries, same-URL separate Modules and cycles/early access.
+
+Build-side tools added: `deno-module-fixtures.mjs`,
+`build-deno-module-test-packages.mjs`, `test-deno-module-fixtures.mjs`.
+Extractor reads pinned original Rust source, preserving literal whitespace and
+rejecting missing/duplicate declarations, comments and unsupported layouts.
+Five graph packages plus four assertion Scripts are built with clean detached
+compiler ba14fcaedb, Binaryen 125 O3 and Wasmtime 47.0.3. No source/test edits,
+runtime compilation or interpreter are used. Extractor/graph/Script controls
+pass 10/10. Native artifact SHA256 are in per-package JSON inventories.
+
+Rebuild from compiler cwd:
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-deno-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-promise-full.X2WdwN/deno /private/tmp/deno-module-population.SdW8YU
+```
+
+Replay from the patched Deno checkout, changing only the exact test selector:
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-promise-full.X2WdwN/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-module-population.SdW8YU/scripts V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-population.SdW8YU/graphs target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::builtin_core_module --nocapture --test-threads=1
+```
+
+Graph digests:
+
+- resolve: 472642c36c38d274179b232c50ddcdded4bd885b826d62729d5f49d2d66363d6
+- filename: b048e367b02baca23ae264bc3712a211ad4c91eb20c7735e495439dc09539555
+- builtin core: 132783fb316229bbb401075500159535810c5bd7a00af9437a004a77823a98f9
+- async repeat: b909e5ec18dc37b20d6020645f948eaf03362d36628e6acff5e0a007e041a129
+- sync repeat: 18e0420a743779da09d4b909c3683328a4c57ed80b4d3f433278d483de492906
+
+Compiler entry points: namespace getter construction in
+`src/codegen/module-namespace-value.ts`, per-source initializer planning in
+`module-init-collection.ts` / `multi-prepared-module-init*`. Adapter:
+`collect_graph`, `publish_source_namespaces`, `bind_source_namespace` and
+`bind_prelinked_core_namespace`. Preserve the refusal until identity reuse is
+implemented and measured. Full population, snapshots, dynamic imports/top-level
+await, remaining host/value transport and matched benchmarks remain open.
+
 ## Full Context and rooted module exceptions
 
 The full Context was rebuilt from clean detached checkouts: compiler
