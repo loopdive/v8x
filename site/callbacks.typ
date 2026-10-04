@@ -166,3 +166,7 @@ Scripts. The linker resolves it against the retained Context, without requiring
 a runtime-eval provider. A separate native fixture covers persistent lexical
 state; it is not the public Script compilation path. General completion values,
 typed lexical bindings and unchanged Deno conformance remain incomplete.
+Inferred number and boolean constants retain their typed slots across the
+lexical operation. Shared global-object function writes use native AOT callable
+carriers, allowing later Scripts to call them without an interpreter. Mutable
+and reference-typed bindings still lack safe cross-Script type planning.

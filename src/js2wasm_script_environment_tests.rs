@@ -8,7 +8,7 @@ pub fn precompiled_scripts_share_context_lexicals(
 ) -> Result<(), String> {
   let shared = SharedDenoRuntime::new()?;
   let context = shared.precompiled_file(&path.join("context.cwasm"))?;
-  let scripts = (0..6)
+  let scripts = (0..8)
     .map(|index| {
       shared.precompiled_file(&path.join(format!("script-{index}.cwasm")))
     })
@@ -62,6 +62,12 @@ pub fn precompiled_scripts_share_context_lexicals(
   first.instantiate_graph(&shared, &scripts[5])?;
   assert_eq!(read_number(&mut first, "__v8x_probe_script_fixed")?, 41.0);
   assert_eq!(read_number(&mut first, "__v8x_probe_script_caught")?, 42.0);
+  first.instantiate_graph(&shared, &scripts[6])?;
+  first.instantiate_graph(&shared, &scripts[7])?;
+  assert_eq!(
+    read_number(&mut first, "__v8x_probe_script_observed")?,
+    43.0
+  );
   for script in &scripts[..3] {
     second.instantiate_graph(&shared, script)?;
   }

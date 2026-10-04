@@ -2,7 +2,7 @@
 
 PR: https://github.com/loopdive/v8x/pull/2 (draft).
 Compiler dependency: https://github.com/loopdive/js2/pull/6468 (draft),
-commit `cafc1769ccb45074064c5ca88f0262aae1388aa4`.
+commit `ce9b93df3560db237c82eb4a47ad7f4ddc3a7643`.
 
 The retained Context linker now accepts `__v8x_context_lexical`. Runtime
 and namespace-test Context builders export the compiler's lexical provider.
@@ -10,10 +10,11 @@ The runtime compiler pin advances independently of the historical POC pin.
 The generated provider is included in the production graph-input provenance.
 Missing Context exports remain a loud linker error, not an interpreter fallback.
 
-The new fixture compiles one Context and six independent Scripts. It checks
+The new fixture compiles one Context and eight independent Scripts. It checks
 cross-Script object conversion, exact BigInt postfix results, declaration
 preflight, const-write rejection, and isolation between two Contexts. The
-native test deserializes separately precompiled artifacts, uses the existing
+native test also covers inferred number/boolean constants and foreign global
+callable aliases. It deserializes separately precompiled artifacts, uses the existing
 retained-Context linker, and asserts zero runtime compilations and zero
 runtime-eval provider instantiations. This fixture contains explicit `any`
 annotations and is not unchanged Deno conformance or the public Script path.
@@ -24,12 +25,12 @@ Build raw fixtures with Node supporting TypeScript imports, using an absolute
 compiler checkout path and a fresh output directory:
 
 ```sh
-node --experimental-strip-types tools/js2wasm/build-script-environment-test-artifacts.mjs "$JS2_CHECKOUT" "$FIXTURE_DIR"
+node --experimental-wasm-exnref --import "$JS2_CHECKOUT/node_modules/tsx/dist/loader.mjs" tools/js2wasm/build-script-environment-test-artifacts.mjs "$JS2_CHECKOUT" "$FIXTURE_DIR"
 cargo test --offline --no-default-features --features js2wasm_spike,js2wasm_gc_copying,js2wasm_diagnostic_abi --test js2wasm_spike --no-run
 ```
 
 Use the test executable printed by Cargo. For each of `context`, `script-0`
-through `script-5`, run the packaging helper with the corresponding paths:
+through `script-7`, run the packaging helper with the corresponding paths:
 
 ```sh
 V8X_JS2WASM_DENO_CORE_WASM="$FIXTURE_DIR/context.wasm" V8X_JS2WASM_DENO_CORE_AOT_OUTPUT="$FIXTURE_DIR/context.cwasm" "$PACKAGING_TEST_BINARY" --exact precompiles_exact_deno_core_artifact --nocapture
@@ -45,7 +46,16 @@ be generated first. No Deno or rusty_v8 vendored test was changed.
 
 ## Remaining integration work
 
-Measured at this checkpoint: raw Node fixture checks pass (seven artifacts),
+Latest scalar/callable continuation: one Context and eight Scripts (nine
+artifacts) pass raw controls and all nine packaging runs. The final compiler-free
+native test passes 1/1 (36 filtered, 0.07 seconds), now also covering inferred
+numeric const rejection and a boolean-constant callback through a foreign alias.
+Fixtures are at `/private/tmp/deno-script-scalars.6Tj5CN`. The compiler focused
+suite reports 86/86 including two existing expected failures; its wider five-file
+run has the same three recorded TDZ failures. Mutable/reference-typed planning
+remains open; const does not prove immutable array elements or object fields.
+
+Earlier native-wiring checkpoint: raw Node fixture checks pass (seven artifacts),
 all seven native packaging invocations pass, and the compiler-free deployment
 test passes 1/1 with 36 other tests filtered out in 0.07 seconds. The nine
 runtime compile-option tests pass 9/9. Both Cargo feature profiles build.

@@ -32,8 +32,10 @@ const scripts = [
   "globalThis.saved=retained++;",
   'globalThis.published=String(retained)==="18446744073709551617" && String(globalThis.saved)==="18446744073709551616"?42:0;',
   "let first:any=1; let retained:any=0; globalThis.published=0;",
-  "const fixed:any=41;",
+  "const fixed=41;",
   "try {fixed=42;} catch(error){globalThis.caught=error;}",
+  "const active=true; globalThis.reader=()=>{globalThis.published=active?43:0;};",
+  "globalThis.alias=globalThis.reader; globalThis.alias();",
 ];
 const records = [];
 async function build(name, source, options) {
@@ -76,6 +78,8 @@ assert.equal(owner.exports.__v8x_probe_script_observed(), 42);
 run(4); run(5);
 assert.equal(owner.exports.__v8x_probe_script_fixed(), 41);
 assert.equal(owner.exports.__v8x_probe_script_caught(), 42);
+run(6); run(7);
+assert.equal(owner.exports.__v8x_probe_script_observed(), 43);
 writeFileSync(join(output, "test-inputs.json"), JSON.stringify({
   kind: "local-native-script-environment-test-not-production-package", compiler, records,
 }, null, 2) + "\n");
