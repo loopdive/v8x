@@ -1,5 +1,15 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Continuation: main sync and method ordering
+
+Runtime compiler pin: 9bfee5a9c6893bc17313c226363648ebe1ccb6b3, after merging
+origin/main 39fd7b7d44. New compiler controls exposed arguments running before
+foreign getters. Captured frame-local callees now fix the measured dot/computed
+closed-dispatch paths. Compiler controls pass 140/140 (54 focused and 86 persistent,
+including two existing expected failures); constructor/expression merge controls
+pass 30/30. TypeScript passes; lint has no errors. Spread and independent IR call
+ordering still need coverage. Native rebuild/replay is in progress, not credited.
+
 ## Wrap-up: owner-aware method call
 
 Runtime compiler pin: ffea2d022fde6c76b189b0958ca91c4b86fc3369.
