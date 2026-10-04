@@ -1,5 +1,46 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Verified native reflection replay, 2026-10-04
+
+Unchanged pinned Deno WebIDL now passes **17/17**, 0 ignored and 414 filtered
+out of 431, in 21.79 seconds. Dictionary record conversion now returns foo: 1.
+Compiler c98082082b163165ed6c5ba7f726c24d01ee1ba7; Context builder/adapter
+5c565213ecaa5df5a9c4424b8b65ffbe66e5f1bf; Deno
+1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44. Runtime profile has no compiler.
+
+Artifacts: /private/tmp/deno-reflection-native.Zfl1zI. Raw Context 2,716,198
+bytes, SHA256 62c279c95f6c342efe226b2194ae4e6382476e6a2aaedfa2d8f75c8a4d561eac;
+Binaryen 125 optimized 2,013,627 bytes, SHA256
+bd65b037c9b8c99d64bbd2e3b96da13bf4c970dcf95c92bfdbdcd6bdf2d28fa3.
+All six Symbol global exports were inspected in the real Context. Wasmtime
+precompilation passed 1/1 in 209.36 seconds. All five original WebIDL Scripts
+were Binaryen optimized and precompiled; source/specifier bindings were checked.
+
+The first optimized Script packaging attempt correctly exposed a too-strict
+import equality assertion. Binaryen removes unused imports and reorders survivors.
+Packaging now checks an identity/count subset, while still requiring the native
+Script ABI; added, duplicated or changed capabilities are rejected. A new Context
+builder guard requires six actual Symbol globals instead of trusting options.
+Build-side controls pass 15/15. Canonical-index Rust control passes 1/1.
+
+Full unchanged 431-test replay terminated with exit 134 at
+modules::tests::dynamic_imports_snapshot: unresolved
+v8__SnapshotCreator__CONSTRUCT. No full-population pass/fail summary was produced.
+Earlier conversion/module tests refused because only the five WebIDL Scripts
+were packaged; cancel_try_future also failed PermissionDenied vs Interrupted in
+the restricted environment. These are distinct observations, not 431 measured
+adapter failures. Next package broader unchanged Script/module inputs and handle
+snapshot creation (or establish its compile-time replacement) without skipping
+tests or adding an interpreter. The run was not killed or timed out.
+
+Native Script ABI controls passed 2/2, including rejection of invalid signatures
+and interpreter imports. An earlier incorrect test-name filter executed zero;
+it is not counted as verification.
+The clean packaging checkout could not fetch headers under network restrictions;
+the same committed adapter was built using its existing local pinned vendor.
+The Context used the clean committed builder; Script packaging used the documented
+import-subset fix before commit. Full host support and fresh benchmarks remain open.
+
 ## Native reflection continuation, 2026-10-04
 
 Runtime compiler pin: `c98082082b163165ed6c5ba7f726c24d01ee1ba7`.

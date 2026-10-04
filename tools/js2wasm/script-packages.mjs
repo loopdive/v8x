@@ -48,6 +48,19 @@ export function assertScriptABI(module) {
     "AOT Script lacks native initializer");
 }
 
+export function assertOptimizedScriptImports(original, optimized) {
+  const remaining = new Map();
+  const key = (entry) => JSON.stringify([entry.module, entry.name, entry.kind]);
+  for (const entry of original)
+    remaining.set(key(entry), (remaining.get(key(entry)) ?? 0) + 1);
+  for (const entry of optimized) {
+    const identity = key(entry);
+    const count = remaining.get(identity) ?? 0;
+    assert(count > 0, `optimizer introduced native Script import ${identity}`);
+    remaining.set(identity, count - 1);
+  }
+}
+
 export async function packageScript(compilerPath, precompiler, specifier, source, outputPath) {
   const { compile } = await import(pathToFileURL(join(resolve(compilerPath), "src/index.ts")).href);
   const options = scriptCompileOptions(specifier);
@@ -71,7 +84,8 @@ export async function packageScript(compilerPath, precompiler, specifier, source
   const optimizedBytes = readFileSync(optimized);
   const optimizedModule = new WebAssembly.Module(optimizedBytes);
   assertScriptABI(optimizedModule);
-  assert.deepEqual(WebAssembly.Module.imports(optimizedModule), WebAssembly.Module.imports(new WebAssembly.Module(result.binary)), "optimizer changed native Script imports");
+  assertOptimizedScriptImports(WebAssembly.Module.imports(new WebAssembly.Module(result.binary)),
+    WebAssembly.Module.imports(optimizedModule));
   const run = spawnSync(resolve(precompiler), ["--exact", "precompiles_exact_deno_core_artifact", "--nocapture"], {
     encoding: "utf8", env: { ...process.env, V8X_JS2WASM_DENO_CORE_WASM: optimized,
       V8X_JS2WASM_DENO_CORE_AOT_OUTPUT: native, V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION: attestation },

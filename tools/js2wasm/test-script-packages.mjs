@@ -1,6 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { scriptDigest, scriptCompileOptions, assertScriptABI } from "./script-packages.mjs";
+import { scriptDigest, scriptCompileOptions, assertScriptABI, assertOptimizedScriptImports } from "./script-packages.mjs";
+
+test("optimizer may remove and reorder imports but cannot add or duplicate capabilities", () => {
+  const global = {
+    module: "v8x:context",
+    name: "__symbol_counter",
+    kind: "global",
+  };
+  const func = {
+    module: "v8x:context",
+    name: "__v8x_context_script_completion",
+    kind: "function",
+  };
+  assert.doesNotThrow(() =>
+    assertOptimizedScriptImports([global, func], [func, global]),
+  );
+  assert.doesNotThrow(() =>
+    assertOptimizedScriptImports([global, func], [func]),
+  );
+  assert.throws(
+    () => assertOptimizedScriptImports([global, func], [func, func]),
+    /introduced/,
+  );
+  assert.throws(
+    () =>
+      assertOptimizedScriptImports([global], [{ ...global, kind: "function" }]),
+    /introduced/,
+  );
+  assert.throws(
+    () =>
+      assertOptimizedScriptImports([global], [{ ...global, module: "other" }]),
+    /introduced/,
+  );
+  assert.throws(() => assertOptimizedScriptImports([], [func]), /introduced/);
+});
 
 test("Script binding includes exact source, specifier and length framing", () => {
   assert.equal(scriptDigest("a", "bc"), scriptDigest("a", "bc"));

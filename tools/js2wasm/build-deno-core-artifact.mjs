@@ -157,6 +157,24 @@ export function assertRuntimeAllocationOwnerABI(module) {
   }
 }
 
+export function assertRuntimeSymbolStateABI(module) {
+  const exports = WebAssembly.Module.exports(module);
+  for (const name of [
+    "__symbol_counter",
+    "__symbol_desc_table",
+    "__symbol_intern_table",
+    "__symbol_reg_keys",
+    "__symbol_reg_ids",
+    "__symbol_reg_count",
+  ]) {
+    if (
+      !exports.some((entry) => entry.name === name && entry.kind === "global")
+    ) {
+      fail(`runtime artifact lacks shared Symbol global ${name}`);
+    }
+  }
+}
+
 // This is an ABI bridge, not an implementation of the Deno example. The
 // pinned usage source is embedded below and executed through the interpreter
 // provider by __v8x_run_classic_script. In particular, do not add a copied
@@ -1161,6 +1179,7 @@ async function packageDenoArtifacts({
   const appModule = new WebAssembly.Module(appBinary);
   if (profile === "runtime") {
     assertRuntimeSchedulerABI(appModule);
+    assertRuntimeSymbolStateABI(appModule);
     assertRuntimeAllocationOwnerABI(appModule);
   }
   assertNoLinearMemories(

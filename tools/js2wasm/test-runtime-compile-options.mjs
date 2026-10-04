@@ -1,9 +1,59 @@
 // Copyright 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { COMPILE_OPTIONS, runtimeCompileOptions, assertRuntimeSchedulerABI, assertRuntimeAllocationOwnerABI, compilerRefForProfile } from "./build-deno-core-artifact.mjs";
+import { COMPILE_OPTIONS, runtimeCompileOptions, assertRuntimeSchedulerABI, assertRuntimeAllocationOwnerABI, compilerRefForProfile, assertRuntimeSymbolStateABI } from "./build-deno-core-artifact.mjs";
 import { contextPromiseRejectionDispatcherSource, contextScriptCompletionSource } from "./context-value-bridge.mjs";
 
+test("shared Symbol state is verified from artifact exports, not compiler options", () => {
+  const names = [
+    "__symbol_counter",
+    "__symbol_desc_table",
+    "__symbol_intern_table",
+    "__symbol_reg_keys",
+    "__symbol_reg_ids",
+    "__symbol_reg_count",
+  ];
+  const string = (value) => {
+    const bytes = [...new TextEncoder().encode(value)];
+    return [bytes.length, ...bytes];
+  };
+  const section = (id, bytes) => [id, ...uleb(bytes.length), ...bytes];
+  const uleb = (value) => {
+    const bytes = [];
+    do {
+      const byte = value & 127;
+      value >>>= 7;
+      bytes.push(byte | (value ? 128 : 0));
+    } while (value);
+    return bytes;
+  };
+  const module = (omitted) => {
+    const exports = names
+      .filter((name) => name !== omitted)
+      .flatMap((name) => [...string(name), 3, names.indexOf(name)]);
+    return new WebAssembly.Module(
+      Uint8Array.from([
+        0,
+        97,
+        115,
+        109,
+        1,
+        0,
+        0,
+        0,
+        ...section(6, [6, ...names.flatMap(() => [0x7f, 1, 0x41, 0, 0x0b])]),
+        ...section(7, [omitted ? 5 : 6, ...exports]),
+      ]),
+    );
+  };
+  assert.doesNotThrow(() => assertRuntimeSymbolStateABI(module()));
+  for (const name of names)
+    assert.throws(
+      () => assertRuntimeSymbolStateABI(module(name)),
+      new RegExp(name),
+    );
+  assert.throws(() => assertRuntimeSymbolStateABI({}), TypeError);
+});
 test("Script completion roots native references through the owning keeper", () => {
   const source = contextScriptCompletionSource("imported__v8x_value_keep");
   assert(source.includes("__v8x_context_script_completion(value: any): void"));
