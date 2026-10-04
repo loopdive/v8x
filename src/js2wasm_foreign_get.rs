@@ -9,6 +9,11 @@ pub(super) fn bind(
   realm: Instance,
   module: &Module,
 ) -> Result<(), String> {
+  // This protocol belongs to source-bound Scripts. Preserve existing Module
+  // graph linking until its distinct owner/getter ABI is integrated as well.
+  if module.get_export("localOwns").is_none() {
+    return Ok(());
+  }
   bind_foreign_ownership(linker, realm, module)?;
   bind_foreign_call(linker, realm, module)?;
   let Some(import) = module.imports().find(|import| {

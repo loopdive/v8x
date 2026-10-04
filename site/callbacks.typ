@@ -158,7 +158,8 @@ Native arrays acquire that realm's intrinsic iterator on demand. The unchanged
 Deno WebIDL integer and basic sequence conversions pass. A clean core build
 also passes the retained live-mutation iterator control after the compiler's
 first-class values factory was changed to read the original receiver live.
-The bounded compiler-free adapter suite passes 31 tests with six ignored.
+The ordinary compiler-free adapter run passes 31 tests with 12 ignored; four
+additional artifact-backed function and foreign-value controls pass separately.
 This does not establish full WebIDL or Deno compatibility.
 
 Context artifacts also export a lexical operation for independently compiled
