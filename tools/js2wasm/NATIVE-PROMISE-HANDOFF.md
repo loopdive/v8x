@@ -1,5 +1,61 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Pinned-original main/side and imported-call/Rust-op coverage
+
+Package extraction now includes unchanged main_and_side_module and test_mods
+from Deno 1d4e6c1. The complete builder inventory is eight graphs and five
+Scripts across seven tests; optional comma-separated test selection refuses
+unknown names before artifact creation. ASCII/raw literal extraction retains
+original source whitespace, specifiers and dependency order. No upstream Deno
+code or tests changed and no backend production change was needed.
+
+Fresh packages `/private/tmp/deno-mods-expanded.5MyCYn` contain three graphs
+and one setup Script for these two tests, built from clean compiler 4a98f06ae2,
+Binaryen 125 O3 and Wasmtime 47.0.3. Adapter ea09181 and Context unchanged.
+Both unchanged Deno tests pass 2/2, each 1/1 (430 filtered /431). test_mods
+checks the requested-module specifier and offset, zero Rust-op dispatches after
+both instantiations, the imported callable's result, and exactly one Rust-op
+dispatch after evaluation. Main/side rejects a second main registration then
+loads it as a side module. These are executed assertions, not package counts.
+
+Optimized graph import floors: one enter/complete pair for main and side,
+two pairs for the a.js/b.js graph. Extractor/binding/V8 controls pass 9/9.
+Negative control without the setup Script fails 0/1 at its missing exact
+binding; removing only the graph directory with setup installed also fails
+0/1 rather than crediting a swallowed rejection. Unknown test selection exits
+1 without creating an output directory. Full Deno population and benchmarks
+remain unmeasured; site rendering still lacks Typst.
+
+Build from the clean compiler checkout:
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-deno-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-upstream-conformance.H6HA4g/deno /private/tmp/deno-mods-expanded.5MyCYn test_mods,main_and_side_module
+```
+
+Replay from Deno, repeat with main_and_side_module:
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-promise-full.X2WdwN/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-mods-expanded.5MyCYn/scripts V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-mods-expanded.5MyCYn/graphs target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::test_mods --nocapture --test-threads=1
+```
+
+test_mods binding 6b178cba770c1b5b15268e1ee2baca417bfdf5803355f6b6283c3fe87e1d0a21;
+native SHA256 da793d8db87c130c98b32574c646b94999374a36aa7dd11873e299cc7409fc9a;
+optimized Wasm SHA256 974e2756a4ec8a78c121a31042a130d6bb0fae47c9eed96bae526ca353d01491.
+setup.js binding 00f634db6391f6c85bc75d61c4bb2370cd3856c8f9d00c694cadc9467041400b;
+native SHA256 a6884819e80abdc18970faf17756e94f7c75c1d5bab68149c5d9b8d08f7f3440;
+optimized Wasm SHA256 12e9dcbca11d8702d5d51771225d0a4ac0af92f1c5b7660ad4bd4821b82e3150.
+Main/side inventories match the clean lifecycle evaluation packages.
+
+The previous five selected unchanged module tests were replayed again using
+`/private/tmp/deno-lifecycle-rollout.ykaQLB/deno` and passed 5/5 (each 430
+filtered /431). Together with the new pair, selected coverage is now 7/7
+across these two recorded package directories, not a full-suite run.
+
+Next: extend original-source lazy loading and cyclic module coverage, prove
+native prepared-IR participation, implement successful synthetic/source
+composition and snapshots, then broader conformance, complete host integration
+and matched benchmarks. Both PRs remain incomplete drafts.
+
 ## Fresh source prefix before cached failure retains the original payload
 
 The expanded native failure control improves from 0/1 to 1/1 (54 filtered

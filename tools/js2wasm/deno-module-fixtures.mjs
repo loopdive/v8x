@@ -16,6 +16,16 @@ export function rawBinding(body, name) {
   return match[1];
 }
 
+export function asciiLiterals(body) {
+  return [...body.matchAll(/ascii_str!\(\s*(?:r#"([\s\S]*?)"#|("(?:[^"\\]|\\.)*"))\s*\)/g)]
+    .map(match => match[1] ?? JSON.parse(match[2]));
+}
+
+export function rawScripts(body, test) {
+  return [...body.matchAll(/\.execute_script\(\s*("(?:[^"\\]|\\.)*"),\s*r#"([\s\S]*?)"#,?\s*\)/g)]
+    .map(match => ({ test, specifier: JSON.parse(match[1]), source: match[2] }));
+}
+
 // Preserve the exact original runtime source bytes, including whitespace.
 // Fail on unrecognized literal layouts rather than guessing Rust semantics.
 export function denoModuleFixtures(source) {
@@ -36,7 +46,23 @@ export function denoModuleFixtures(source) {
     assert.equal(checks.length, 2, `${name} must contain both original execution checks`);
     for (const check of checks) scripts.push({ test: name, specifier: check[1], source: JSON.parse(check[2]) });
   }
-  assert.equal(graphs.length, 5);
-  assert.equal(scripts.length, 4);
+  const mainSide = asciiLiterals(functionSource(source, "main_and_side_module"));
+  assert.equal(mainSide.length, 2, "main/side must contain both original module sources");
+  for (const [index, name] of ["main", "side"].entries()) {
+    graphs.push({ name: "main_and_side_module", entry: `file:///${name}_module.js`, source: mainSide[index] });
+  }
+  const mods = functionSource(source, "test_mods");
+  const literals = asciiLiterals(mods);
+  assert.equal(literals.length, 4, "test_mods must retain both specifier/source pairs");
+  assert.equal(literals[0], "file:///a.js");
+  assert.equal(literals[2], "file:///b.js");
+  graphs.push({ name: "test_mods", entry: literals[0], source: literals[1],
+    dependencies: [{ specifier: literals[2], source: literals[3] }] });
+  const setup = rawScripts(mods, "test_mods");
+  assert.equal(setup.length, 1, "test_mods must contain its original assertion setup Script");
+  assert.equal(setup[0].specifier, "setup.js");
+  scripts.push(...setup);
+  assert.equal(graphs.length, 8);
+  assert.equal(scripts.length, 5);
   return { graphs, scripts };
 }

@@ -54,6 +54,9 @@ retains that object without reexecuting the failed source.
 The shared-module, typed-module, module-evaluation, and selected Deno module
 test package builders explicitly enable lifecycle events. Generic graph
 packaging still defaults to disabled.
+Pinned-original Deno packages also cover main/side loader identity and the
+test_mods import/host-op case. The latter checks that instantiation alone does
+not execute source and that evaluation dispatches the Rust op exactly once.
 General cyclic evaluation, snapshots, and complete Deno integration remain
 unverified.
 
