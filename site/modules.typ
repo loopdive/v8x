@@ -47,6 +47,10 @@ sources and their consumers retain the original exception, and later siblings
 remain untouched. Calls into the completed dependency retain its original
 allocation owner even before the failed entry's export registry is ready.
 Packages without lifecycle events cannot recover these per-source states.
+If a fresh source dependency precedes a cached source failure, its body runs
+first. The namespace capability then throws the original cached JS object
+through the Context's shared exception tag. The consumer's rejected Promise
+retains that object without reexecuting the failed source.
 The shared-module, typed-module, module-evaluation, and selected Deno module
 test package builders explicitly enable lifecycle events. Generic graph
 packaging still defaults to disabled.

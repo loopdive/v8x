@@ -16,3 +16,6 @@ console.log(packageGraph(compiler, precompiler, entry.specifier,
 const consumer = fixture("consumer");
 console.log(packageGraph(compiler, precompiler, consumer.specifier,
   [consumer, fixture("prefix")], output, { lifecycle: true }));
+const cached = fixture("cached-entry");
+console.log(packageGraph(compiler, precompiler, cached.specifier,
+  [cached, fixture("prefix"), fixture("shared"), fixture("later")], output, { lifecycle: true }));

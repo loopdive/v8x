@@ -1,4 +1,5 @@
 use super::*;
+use wasmtime::{AsContext, AsContextMut};
 
 pub(super) fn bind(
   linker: &mut Linker<DenoHostState>,
@@ -87,16 +88,27 @@ pub(super) fn bind(
         DENO_IMPORT_MODULE,
         import.name(),
         ty,
-        move |mut caller, _, results| {
-          let value = crate::js2wasm::realm_objects::existing_module_namespace(
-            context as *const crate::Context,
-            target as *const crate::Module,
-            caller.data().realm_owner_identity,
-          )
-          .map_err(wasmtime::Error::msg)?;
-          let Some(value) = value else {
-            results[0] = wasmtime::Val::ExternRef(None);
-            return Ok(());
+        move |caller, _, results| {
+          use crate::js2wasm::realm_objects::ModuleNamespaceCapability;
+          let identity = caller.data().realm_owner_identity;
+          let mut access =
+            CallerRealm::new(caller).map_err(wasmtime::Error::msg)?;
+          let capability =
+            crate::js2wasm::realm_objects::existing_module_namespace(
+              context as *const crate::Context,
+              target as *const crate::Module,
+              identity,
+              &mut access,
+            )
+            .map_err(wasmtime::Error::msg)?;
+          let mut caller = access.into_caller();
+          let (value, rejected) = match capability {
+            ModuleNamespaceCapability::Pending => {
+              results[0] = wasmtime::Val::ExternRef(None);
+              return Ok(());
+            }
+            ModuleNamespaceCapability::Namespace(value) => (value, false),
+            ModuleNamespaceCapability::Exception(value) => (value, true),
           };
           let handle = value
             .checked_handle(caller.data().realm_id)
@@ -110,7 +122,28 @@ pub(super) fn bind(
             &mut caller,
             &[wasmtime::Val::F64(handle.to_bits())],
             results,
-          )
+          )?;
+          if !rejected {
+            return Ok(());
+          }
+          // Throw the exact JS payload with the Context's shared tag. A host
+          // trap is not a JS throw and loses native rejection identity.
+          let tag =
+            realm.get_tag(&mut caller, "__exn_tag").ok_or_else(|| {
+              wasmtime::Error::msg("Context lacks exception tag")
+            })?;
+          let exception_type = wasmtime::ExnType::new(
+            caller.as_context().engine(),
+            tag.ty(&caller).ty().params(),
+          )?;
+          let allocator = wasmtime::ExnRefPre::new(&mut caller, exception_type);
+          let exception = wasmtime::ExnRef::new(
+            &mut caller,
+            &allocator,
+            &tag,
+            &[results[0]],
+          )?;
+          caller.as_context_mut().throw(exception)
         },
       )
       .map_err(|error| format!("bind native module namespace: {error:#}"))?;

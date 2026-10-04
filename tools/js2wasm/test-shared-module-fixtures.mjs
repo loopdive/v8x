@@ -4,6 +4,32 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createContext, SourceTextModule } from "node:vm";
 
+test("fresh same-URL source executes before a cached source rejection on V8", async () => {
+  const context = createContext({});
+  const module = name => new SourceTextModule(readFileSync(new URL(`../../tests/fixtures/js2wasm-failed-module/${name}.js`, import.meta.url), "utf8"), { context, identifier: `file:///failed-module/${name}.js` });
+  const prefix = module("prefix"), shared = module("shared"), middle = module("middle"), later = module("later");
+  const entry = module("entry");
+  const first = new Map([["./prefix.js", prefix], ["./shared.js", shared], ["./middle.js", middle], ["./later.js", later]]);
+  await entry.link(request => { assert(first.has(request)); return first.get(request); });
+  // Node refuses linking to an already errored Module. Link both consumers
+  // first, then evaluate them in order to exercise the cached failure path.
+  const fresh = module("prefix"), untouched = module("later"), cached = module("cached-entry");
+  const second = new Map([["./prefix.js", fresh], ["./shared.js", shared], ["./later.js", untouched]]);
+  await cached.link(request => { assert(second.has(request)); return second.get(request); });
+  await assert.rejects(entry.evaluate(), error => error === context.moduleThrownToken);
+  const token = context.moduleThrownToken;
+  assert.equal(context.prefixRuns, 1);
+  await assert.rejects(cached.evaluate(), error => error === token);
+  assert.equal(context.prefixRuns, 2);
+  assert.equal(fresh.status, "evaluated");
+  assert.equal(untouched.status, "linked");
+  assert.equal(context.cachedEntryRuns, undefined);
+  assert.equal(context.laterRuns, undefined);
+  assert.equal(context.moduleThrownToken, token);
+  await assert.rejects(cached.evaluate(), error => error === token);
+  assert.equal(context.prefixRuns, 2);
+});
+
 test("shared fixture preserves single evaluation, namespace identity and live imports on V8", async () => {
   const context = createContext({});
   const module = name => new SourceTextModule(readFileSync(new URL(`../../tests/fixtures/js2wasm-shared-module/${name}.js`, import.meta.url), "utf8"), { context });

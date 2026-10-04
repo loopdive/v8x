@@ -827,6 +827,10 @@ fn settle_native_promise_in_store(
   result.map_err(|error| format!("settle native Promise copy: {error:#}"))
 }
 impl<'a> CallerRealm<'a> {
+  pub(super) fn into_caller(self) -> Caller<'a, DenoHostState> {
+    self.caller
+  }
+
   pub(super) fn new(caller: Caller<'a, DenoHostState>) -> Result<Self, String> {
     let realm_id = caller.data().realm_id;
     let realm_instance = caller.data().realm_instance.ok_or_else(|| {

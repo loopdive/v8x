@@ -1,5 +1,62 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Fresh source prefix before cached failure retains the original payload
+
+The expanded native failure control improves from 0/1 to 1/1 (54 filtered
+/55). Baseline adapter 85d1572 executes the fresh prefix but traps with
+"namespace capability refers to an errored Module", then rejects with a new
+bridge Error instead of the original object. The fix separates pending,
+available namespace, and cached exception capability outcomes. The latter
+transfers the exact native value through Caller-owned realm access, unwraps
+it, creates an ExnRef with the Context's shared __exn_tag and throws it through
+Wasmtime's pending-exception API. It does not reborrow the executing Runtime
+or install a compiler/interpreter.
+
+The control first runs the original failing graph and successful consumer.
+It then creates a distinct same-URL prefix Module followed by the already
+errored source. Prefix execution count rises from 1 to 2, its namespace is
+distinct and contains 7 while the original namespace still contains 9.
+Consumer and dependency retain the exact original thrown object, repeated
+evaluation returns the same rejected Promise, later source remains Instantiated
+and both later/consumer side effects remain absent. Compiler/interpreter
+counters are zero. The cached source is not reexecuted.
+
+Fresh packages `/private/tmp/deno-cached-prefix.mRGaa6` are built from clean
+compiler 4a98f06ae2 with Binaryen 125 O3 and Wasmtime 47.0.3. Three source-bound
+graphs are required; original entry and consumer hashes match prior clean
+receipts. New cached-entry binding is
+11a72cf040420551408d24d59445771c52236b06857fb6ce8dd7ce208ae5900a,
+native SHA256 8d8b0a7bf6ff25b417e161abe37194ac8efb903adde9f1847a584c23b5538ae6,
+optimized Wasm SHA256 8897e3402b9cb70a06b12719800017d2705fd6067b8a1287f6c8f82a50d9b45a.
+Context is unchanged. Rebuild with the same build-failed-module-test-packages
+command below, substituting this package directory; replay:
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-cached-prefix.mRGaa6 target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_first_dependency_failure_preserves_execution_states --ignored --nocapture --test-threads=1
+```
+
+Identical source evaluation-order control on V8 passes 1/1. Node's Module API
+refuses linking to an already errored Module, so the V8 control links both
+graphs before the first evaluation; the native control also verifies later
+linking. This is not a claim of matching Node's separate linking restriction.
+Fixture/binding/extractor controls pass 8/8. Final native ordinary controls:
+35 passed, 19 ignored, 1 environment-dependent Script test filtered /55.
+Filtered adapter library: 17/17 (16 filtered /33). Shared/typed AOT controls
+each pass 1/1 (54 filtered /55). An initial ordinary-suite command filtered
+the wrong environment-dependent test and failed because the pinned Script
+fixtures variable was missing, then the corrected filter passed as above.
+No full-suite, complete host-layer, or fresh benchmark claim.
+
+Rebuilt unchanged Deno runner passes the selected five module controls 5/5,
+each 1/1 (430 filtered /431), using the lifecycle rollout graph/Script packages
+and unchanged full Context. Rebuild command remains RUSTFLAGS='--cfg
+tokio_unstable' cargo test --offline -p deno_core --lib --no-run. No test/source
+rewrites. Full 431-test population and site rendering remain uncertified.
+
+Next: native prepared-IR participation, general cycles/TDZ, successful
+synthetic/source composition, snapshots, broader unchanged Deno population,
+complete host integration and matched benchmarks. Both PRs remain drafts.
+
 ## Lifecycle enabled in ordinary test package builders
 
 The shared-module, typed-module, module-evaluation, and selected unchanged

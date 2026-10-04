@@ -233,6 +233,69 @@ fn aot_first_dependency_failure_preserves_execution_states() {
     Some(1.0)
   );
   assert!(!caught.has_caught());
+  // A fresh same-URL Module is not the previously completed prefix. Its body
+  // must run before the cached dependency rejection, without rerunning shared.
+  let fresh_prefix = compile(
+    caught,
+    "file:///failed-module/prefix.js",
+    include_str!("fixtures/js2wasm-failed-module/prefix.js"),
+  );
+  let untouched = compile(
+    caught,
+    "file:///failed-module/later.js",
+    include_str!("fixtures/js2wasm-failed-module/later.js"),
+  );
+  let failed = v8::Local::new(caught, &modules.0[1].1);
+  context.set_slot(Rc::new(FailureGraphModules(vec![
+    ("./prefix.js".into(), v8::Global::new(caught, fresh_prefix)),
+    ("./shared.js".into(), v8::Global::new(caught, failed)),
+    ("./later.js".into(), v8::Global::new(caught, untouched)),
+  ])));
+  let cached = compile(
+    caught,
+    "file:///failed-module/cached-entry.js",
+    include_str!("fixtures/js2wasm-failed-module/cached-entry.js"),
+  );
+  assert_eq!(cached.instantiate_module(caught, resolve), Some(true));
+  let result = cached.evaluate(caught).unwrap();
+  let rejection = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(rejection.state(), v8::PromiseState::Rejected);
+  let key = v8::String::new(caught, "prefixRuns").unwrap();
+  assert_eq!(
+    global.get(caught, key.into()).unwrap().number_value(caught),
+    Some(2.0)
+  );
+  assert!(rejection.result(caught).strict_equals(token));
+  assert!(cached.get_exception().strict_equals(token));
+  assert!(failed.get_exception().strict_equals(token));
+  assert_eq!(fresh_prefix.get_status(), v8::ModuleStatus::Evaluated);
+  assert_eq!(untouched.get_status(), v8::ModuleStatus::Instantiated);
+  let fresh_namespace = fresh_prefix.get_module_namespace();
+  assert!(!fresh_namespace.strict_equals(prefix_namespace));
+  let fresh_object =
+    v8::Local::<v8::Object>::try_from(fresh_namespace).unwrap();
+  let key = v8::String::new(caught, "value").unwrap();
+  assert_eq!(
+    fresh_object
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(7.0)
+  );
+  assert_eq!(
+    prefix_object
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(9.0)
+  );
+  let key = v8::String::new(caught, "laterRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  let key = v8::String::new(caught, "cachedEntryRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  assert!(cached.evaluate(caught).unwrap().strict_equals(result));
+  rejection.mark_as_handled();
+  assert!(!caught.has_caught());
   let stats = v8::js2wasm_runtime_stats().unwrap();
   assert_eq!(stats.compilations, 0);
   assert_eq!(stats.runtime_eval_instantiations, 0);

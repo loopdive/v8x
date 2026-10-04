@@ -89,19 +89,31 @@ pub(crate) fn import_meta_owner(
     })
 }
 
+pub(crate) enum ModuleNamespaceCapability {
+  Pending,
+  Namespace(RealmValue),
+  Exception(RealmValue),
+}
+
 pub(crate) fn existing_module_namespace(
   context: *const Context,
   module: *const Module,
   identity: usize,
-) -> Result<Option<RealmValue>, String> {
+  access: &mut dyn RealmAccess,
+) -> Result<ModuleNamespaceCapability, String> {
   let owner = import_meta_owner(context, identity)?;
   let state = unsafe { module_state(module) }
     .ok_or_else(|| "namespace capability lost its native Module".to_string())?;
   if state.status == STATUS_ERRORED {
-    return Err("namespace capability refers to an errored Module".into());
+    let exception = state.exception;
+    if exception.is_null() {
+      return Err("errored Module has no cached exception".into());
+    }
+    return into_realm(access, &owner, exception)
+      .map(ModuleNamespaceCapability::Exception);
   }
   if state.status != STATUS_EVALUATED {
-    return Ok(None);
+    return Ok(ModuleNamespaceCapability::Pending);
   }
   let previous = binding(state.namespace).ok_or_else(|| {
     "evaluated Module has no canonical namespace binding".to_string()
@@ -109,7 +121,7 @@ pub(crate) fn existing_module_namespace(
   if !Rc::ptr_eq(&owner, &previous.runtime) {
     return Err("namespace capability belongs to a different Context".into());
   }
-  Ok(Some(previous.value))
+  Ok(ModuleNamespaceCapability::Namespace(previous.value))
 }
 pub(super) use property_names::own_property_names;
 
