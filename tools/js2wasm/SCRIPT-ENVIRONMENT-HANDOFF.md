@@ -1,5 +1,71 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## CompileFunction and real lazy loading now pass
+
+Implementation: 5cae5514f0598aeffe2ce36869669a01d0c7ff87, with Script-only routing
+guard 0bd28340669fc2936c6de70e81e5aad343b8b8ab. The guard preserves existing
+non-Script Module linking; it does not implement Module owner routing. Compiler runtime pin
+9bfee5a9c6893bc17313c226363648ebe1ccb6b3 is unchanged. This supersedes the old
+missing-CompileFunction checkpoint. Existing drafts remain incomplete.
+
+The generic factory binds exact body, individual parameter names and resource.
+Build-side Function parsing rejects invalid bodies and parameter source fragments
+without executing the body. Runtime lookup requires trusted native packages.
+Caller access supports reentrant instantiation without borrowing DenoRuntime again;
+graph retention and exception roots survive initialization failures. Nested calls
+restore outer completion. Bound native functions return no fake V8 code cache.
+
+The first lazy replay stopped at expected foo despite correct original exports
+through the native API. src/js2wasm_foreign_get.rs now binds owner-aware get/call
+and ownership imports for cross-Script values, excluding the caller's own values.
+Return references use Caller roots, not an inner scope dropped before the host
+trampoline consumes results. Native getter exceptions preserve payload identity;
+undefined results never cause a search through unrelated owners.
+
+Unchanged Deno at 1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44, compiler-free patch:
+actual lazy-script 1/1 in 1.72s, missing-script 1/1 in 1.71s, WebIDL 17/17 in
+24.89s and derived conversions 2/2 in 3.06s. Denominator remains 431, not a full
+population pass. Compiler-free adapter: 31 pass, zero fail, 12 ignored /43 plus
+four explicitly executed native tests (3/3 with 40 filtered, then 1/1 with 42 filtered). These cover
+callback loading, deferred Function bodies/parameters, original lazy exports,
+foreign getters/calls, exception/receiver identity and pre-argument getter errors.
+Each asserts zero runtime compilation and zero interpreter instances. Alternate
+foreign Reflect receivers are explicitly refused and verified by a negative control.
+Runtime-profile ordinary checks: 35 pass, zero fail, 31 ignored, four filtered /70.
+Provider-retention controls were corrected after clean baseline f236d22698 showed
+the same two failures: Context-only modules need zero interpreter providers, while
+the retention fixture must actually import the provider whose lifetime it checks.
+Build-side 18/18; Rust binding unit 1/1; compiler-free cargo check and formatting pass.
+Site build cannot run because Typst is not installed. No new benchmark was run.
+
+Artifacts /private/tmp/deno-reentrant-script.MZdH2Q: context-fixtures/context.cwasm
+is the small fixture, 19,669,600 bytes, SHA
+bfb2c7162c54121d704c0d4ed59b0c307044aa1492c44168bff259909e9e2eba.
+Binaryen 125 optimized; Wasmtime 47.0.3 precompile 1/1 in 108.83s. Full Deno
+Context remains /private/tmp/deno-call-order-native.dBQZ3T/deno-core.cwasm.
+deno-scripts/ copies the original packages plus two exact Function factories;
+deno-lazy-function-inputs.json records source hashes and bodies produced by Deno's
+actual public wrap_lazy_ext_script. Build tools include a Rust wrapper linked to
+the pinned unchanged deno_core library, not a copy of its wrapping implementation.
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-call-order-native.dBQZ3T/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-reentrant-script.MZdH2Q/deno-scripts /private/tmp/deno-upstream-conformance.H6HA4g/deno/target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::test_lazy_loaded_script --nocapture --test-threads=1
+```
+
+Compiler-free controls use target/debug/deps/js2wasm_spike-e7e456f13e693536;
+packaging/runtime-profile controls use js2wasm_spike-13b131f10cc30c9d. Set
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR to context-fixtures and Script package directory
+to the artifact root, except original-lazy-export control uses deno-scripts.
+Invoke each artifact-backed control with --exact NAME --ignored --nocapture.
+
+Resume with a three-argument owning getter for alternate Reflect receivers;
+retain refusal until semantics are implemented. Cover Context-internal foreign
+reflection and non-Script graphs. Then full unchanged population/module graphs,
+snapshots, context extensions/cache semantics, macro-generated inputs, host
+capabilities, BigInt/unpaired UTF-16, shared libraries and fresh comparative
+benchmarks. No interpreter or Deno/test source rewrite was introduced. Preserve
+pre-existing .tmp/ files. All earlier sections describe their own checkpoints.
+
 ## Stop checkpoint
 
 Wrapped up at user request with existing draft PRs
