@@ -54,6 +54,7 @@ test("trusted builder selects Script goal and native completion without dynamic 
   assert.equal(options.standaloneScriptCompletionImport.name, "__v8x_context_script_completion");
   assert.equal(options.standaloneScriptGetExport, "__v8x_script_get_export");
   assert.equal(options.standaloneScriptCallExport, "__v8x_script_call_export");
+  assert.equal(options.standaloneGlobalThisImport.call, "__v8x_context_call");
   assert.equal(options.standaloneScriptOwnNamesExport, "__v8x_script_own_names_export");
   assert.deepEqual(options.standaloneScriptReflectionExports, {ownSymbols: "__v8x_script_own_symbols_export", descriptor: "__v8x_script_descriptor_export"});
   assert.equal(options.standaloneGlobalThisImport.arrayPrototype, "__v8x_context_array_prototype");

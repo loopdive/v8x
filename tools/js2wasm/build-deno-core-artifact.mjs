@@ -30,7 +30,7 @@ const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
-const RUNTIME_JS2_REF = "0c4fc2beae2a95b068b05dc1bf524bf5f9d02a20";
+const RUNTIME_JS2_REF = "825eb75e74db913184480cf9182793db8549e0e4";
 export function compilerRefForProfile(profile) {
   if (profile === "poc") return EXPECTED_JS2_REF;
   if (profile === "runtime") return RUNTIME_JS2_REF;
@@ -150,7 +150,7 @@ export function assertRuntimeSchedulerABI(module) {
 
 export function assertRuntimeAllocationOwnerABI(module) {
   const exports = WebAssembly.Module.exports(module);
-  for (const name of ["__v8x_context_owns", "__v8x_context_get", "__v8x_context_array_prototype"]) {
+  for (const name of ["__v8x_context_owns", "__v8x_context_get", "__v8x_context_array_prototype", "__v8x_context_call"]) {
     if (!exports.some(entry => entry.name === name && entry.kind === "function")) {
       fail(`runtime artifact lacks allocation-owner function ${name}`);
     }

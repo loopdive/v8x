@@ -34,6 +34,7 @@ export function scriptCompileOptions(specifier) {
     standaloneScriptReflectionExports: { ownSymbols: "__v8x_script_own_symbols_export", descriptor: "__v8x_script_descriptor_export" },
     standaloneGlobalThisImport: { module: "v8x:context", name: "__v8x_context_global_this",
       owns: "__v8x_context_owns", get: "__v8x_context_get",
+      call: "__v8x_context_call",
       arrayPrototype: "__v8x_context_array_prototype", exceptionTag: "__exn_tag" },
     link: ["v8x:context"],
   };

@@ -1,5 +1,21 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Ambient global read diagnosis, 2026-10-04
+
+Current runtime compiler pin: 825eb75e74db913184480cf9182793db8549e0e4.
+Focused compiler suite: 36 positive controls and one expected failure out of
+37, not 37 functional wins. Typecheck passes. No new native Context replay yet.
+
+The compiler's injected ambient Deno namespace bypasses symbol-less linked
+global lookup and falls through to null. The candidate compiler now resolves
+unimplemented ambient host names through the Context after native intrinsic
+paths decline. Three controls read Deno, Deno.core and loadExtScript correctly.
+The foreign method call still fails "called value is not a function" and has
+an explicit expected-failure control. This does NOT verify native lazy loading.
+Script packaging now supplies the already-exported __v8x_context_call terminal;
+the Context owner ABI guard requires it. Further owner-aware callable routing
+is needed; a call terminal alone does not prove [[Call]] support.
+
 ## Broader Script input inventory, 2026-10-04
 
 Runtime compiler pin advances to 0c4fc2beae2a95b068b05dc1bf524bf5f9d02a20.
