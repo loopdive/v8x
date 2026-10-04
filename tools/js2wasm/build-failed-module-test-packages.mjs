@@ -19,3 +19,9 @@ console.log(packageGraph(compiler, precompiler, consumer.specifier,
 const cached = fixture("cached-entry");
 console.log(packageGraph(compiler, precompiler, cached.specifier,
   [cached, fixture("prefix"), fixture("shared"), fixture("later")], output, { lifecycle: true }));
+const nested = fixture("nested-entry");
+console.log(packageGraph(compiler, precompiler, nested.specifier,
+  [nested], output, { lifecycle: true }));
+const throwing = fixture("shared");
+console.log(packageGraph(compiler, precompiler, throwing.specifier,
+  [throwing], output, { lifecycle: true }));

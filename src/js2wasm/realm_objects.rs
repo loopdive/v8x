@@ -42,6 +42,13 @@ pub(crate) fn instantiate_callback_graph(
 pub(crate) fn record_module_exception(
   owner: &Rc<RefCell<DenoRuntime>>,
 ) -> Result<bool, String> {
+  // Caller-owned nested initialization roots and records its thrown value
+  // directly above. It never populates Runtime.pending_module_exception, and
+  // borrowing that Runtime here would fail while the outer graph is executing.
+  // Return false rather than inventing a payload for a non-JS nested trap.
+  if callback_access::has_active_owner(owner) {
+    return Ok(false);
+  }
   let value = owner
     .try_borrow_mut()
     .map_err(|_| "module exception owner is already executing")?

@@ -10,6 +10,97 @@ struct CachedFailure {
 
 struct FailureGraphModules(Vec<(String, v8::Global<v8::Module>)>);
 
+struct NestedFailure {
+  module: v8::Global<v8::Module>,
+  calls: Cell<u32>,
+}
+
+unsafe extern "C" fn nested_module_host(info: *const v8::FunctionCallbackInfo) {
+  let parts = unsafe { &*info }.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let context = scope.get_current_context();
+  let state = context.get_slot::<NestedFailure>().unwrap();
+  state.calls.set(state.calls.get() + 1);
+  let module = v8::Local::new(scope, &state.module);
+  v8::tc_scope!(let caught, scope);
+  let result = module.evaluate(caught).expect("nested evaluation Promise");
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+  let payload = promise.result(caught);
+  assert!(payload.is_object());
+  assert!(module.get_exception().strict_equals(payload));
+  assert!(module.evaluate(caught).unwrap().strict_equals(result));
+  promise.mark_as_handled();
+  assert!(!caught.has_caught());
+  caught.throw_exception(payload);
+  caught.rethrow();
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound nested failure graphs"]
+fn aot_nested_module_failure_preserves_original_exception() {
+  fn resolve<'s>(
+    _context: v8::Local<'s, v8::Context>,
+    _specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    panic!("single-source graphs must not resolve dependencies");
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let nested = compile(
+    scope,
+    "file:///failed-module/shared.js",
+    include_str!("fixtures/js2wasm-failed-module/shared.js"),
+  );
+  assert_eq!(nested.instantiate_module(scope, resolve), Some(true));
+  context.set_slot(Rc::new(NestedFailure {
+    module: v8::Global::new(scope, nested),
+    calls: Cell::new(0),
+  }));
+  let global = context.global(scope);
+  let host = v8::Function::new_raw(scope, nested_module_host).unwrap();
+  let key = v8::String::new(scope, "nestedModuleHost").unwrap();
+  assert_eq!(global.set(scope, key.into(), host.into()), Some(true));
+  let entry = compile(
+    scope,
+    "file:///failed-module/nested-entry.js",
+    include_str!("fixtures/js2wasm-failed-module/nested-entry.js"),
+  );
+  assert_eq!(entry.instantiate_module(scope, resolve), Some(true));
+  v8::tc_scope!(let caught, scope);
+  let result = entry.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  let key = v8::String::new(caught, "moduleThrownToken").unwrap();
+  let token = global.get(caught, key.into()).unwrap();
+  assert!(token.is_object(), "nested source must actually execute");
+  assert!(promise.result(caught).strict_equals(token));
+  assert!(entry.get_exception().strict_equals(token));
+  assert!(nested.get_exception().strict_equals(token));
+  assert!(entry.evaluate(caught).unwrap().strict_equals(result));
+  promise.mark_as_handled();
+  assert!(!caught.has_caught());
+  let key = v8::String::new(caught, "nestedModuleUnreachable").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  assert_eq!(context.get_slot::<NestedFailure>().unwrap().calls.get(), 1);
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 #[test]
 #[ignore = "requires trusted Context and source-bound failure lifecycle graph"]
 fn aot_first_dependency_failure_preserves_execution_states() {

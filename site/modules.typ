@@ -61,8 +61,10 @@ Pinned-original lazy loading also covers aliased imports and evaluation of a
 pre-instantiated sibling from a native callback. Nested initialization and
 namespace publication use the active Caller store access instead of borrowing
 the executing runtime again. Nine selected unchanged Deno module tests pass;
-this is not certification of the full 431-test suite. Nested throwing-module
-identity, general cyclic evaluation, snapshots, and complete Deno integration remain
+this is not certification of the full 431-test suite. A separate native AOT
+control verifies a nested throwing module's original object, cached rejection
+Promise, and propagation to the outer module without executing its next write.
+General cyclic evaluation, snapshots, and complete Deno integration remain
 unverified.
 
 #next("snapshots", [Snapshots: record and replay])
