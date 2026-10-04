@@ -178,4 +178,7 @@ borrowing the runtime again. Nested instantiation preserves the caller's complet
 and retains the new owning graph even if its initializer throws. Cross-Script reads
 and calls select the allocation owner, not a structural layout or an undefined
 result. Native controls cover thrown getter identity, own undefined and receiver
-identity. Alternate foreign Reflect receivers still require an extended getter ABI.
+identity. New Script packages also export the three-reference Reflect getter ABI,
+so an explicit receiver from another graph reaches the owning accessor unchanged.
+Old packages keep their two-reference getter; alternate receivers are refused
+when that extended export is absent.

@@ -15,6 +15,8 @@ const callSources = [
   "globalThis.reentrantScriptHost(8).foo(2);",
   "try {globalThis.reentrantScriptHost(5,globalThis.completionSaved).foo((globalThis.shouldNotRun=1));}catch(error){error;}",
   'Reflect.get(globalThis.reentrantScriptHost(7),"foo",{});',
+  'Reflect.get(globalThis.reentrantScriptHost(11),"foo",globalThis.completionSaved);',
+  'try {Reflect.get(globalThis.reentrantScriptHost(12),"foo",globalThis.completionSaved);}catch(error){error;}',
 ];
 for (const source of [...(callsOnly ? [] : getSources), ...callSources]) {
   console.log(await packageScript(compiler, precompiler, "<anonymous>", source, output));
@@ -27,6 +29,8 @@ const getBodies = [
 ];
 for (const body of [...(callsOnly ? [] : getBodies),
   "return {foo(value){return this.marker + value;}, marker:40};",
+  "return {get foo(){return this;}, marker:91};",
+  "return {get foo(){throw this;}, marker:92};",
 ]) {
   console.log(await packageFunction(compiler, precompiler, "<anonymous>", body, ["value"], output));
 }

@@ -2238,6 +2238,8 @@ unsafe extern "C" fn reentrant_script_host(
       6 => "return {get foo(){return undefined;}};",
       7 => "return {get foo(){return this;}};",
       8 => "return {foo(value){return this.marker + value;}, marker:40};",
+      11 => "return {get foo(){return this;}, marker:91};",
+      12 => "return {get foo(){throw this;}, marker:92};",
       _ => panic!("unexpected function selector"),
     };
     let body = v8::String::new(scope, body).unwrap();
@@ -2595,6 +2597,14 @@ fn routes_foreign_script_property_reads_and_exceptions() {
       "try {globalThis.reentrantScriptHost(5,globalThis.completionSaved).foo((globalThis.shouldNotRun=1));}catch(error){error;}",
       9,
     ),
+    (
+      "Reflect.get(globalThis.reentrantScriptHost(11),\"foo\",globalThis.completionSaved);",
+      10,
+    ),
+    (
+      "try {Reflect.get(globalThis.reentrantScriptHost(12),\"foo\",globalThis.completionSaved);}catch(error){error;}",
+      12,
+    ),
   ] {
     let source = v8::String::new(scope, source).unwrap();
     let result = v8::Script::compile(scope, source, None)
@@ -2609,6 +2619,7 @@ fn routes_foreign_script_property_reads_and_exceptions() {
       5 => assert!(result.strict_equals(marker.into())),
       6 => assert!(result.is_undefined()),
       7 => assert!(result.is_true()),
+      10 | 12 => assert!(result.strict_equals(marker.into())),
       8 => assert_eq!(result.number_value(scope), Some(42.0)),
       9 => {
         assert!(result.strict_equals(marker.into()));

@@ -57,6 +57,13 @@ pub(super) fn bind(
               ));
             }
           }
+          if let Some(get) =
+            graph.get_func(&mut scope, "__v8x_script_get_export_receiver")
+          {
+            // New packages expose the full Reflect.get ABI. Forward all three
+            // references, including a receiver allocated by a different graph.
+            return get.call(&mut scope, args, results);
+          }
           let get = graph
             .get_func(&mut scope, "__v8x_script_get_export")
             .ok_or_else(|| {
