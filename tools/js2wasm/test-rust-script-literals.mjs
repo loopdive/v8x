@@ -12,3 +12,13 @@ test("unsupported expressions cannot silently disappear from the input populatio
   assert.throws(() => literalScripts('r.execute_script("", "a" + other);'), /unsupported expression/);
   assert.throws(() => literalScripts('r.execute_script(name, "a");'), /not a literal/);
 });
+
+test("inventory retains every unsupported call alongside exact literal inputs", () => {
+  const source = 'r.execute_script(name, "x");\nr.execute_script("", "({a:1})");\nr.execute_script("", dynamic);';
+  const rows = literalScripts(source, {inventory:true});
+  assert.equal(rows.length, 3);
+  assert.match(rows[0].unresolved, /not a literal/);
+  assert.deepEqual(rows[1], {specifier:"",source:"({a:1})",line:2});
+  assert.match(rows[2].unresolved, /not a literal/);
+  assert.throws(() => literalScripts(source), /not a literal/);
+});

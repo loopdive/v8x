@@ -1,5 +1,32 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Broader Script input inventory, 2026-10-04
+
+Runtime compiler pin advances to 0c4fc2beae2a95b068b05dc1bf524bf5f9d02a20.
+Context/native replay at that fresh clean pin is not yet measured.
+
+New build-core-script-packages.mjs inventories literal and unresolved execute_script
+calls in pinned Rust sources. It records every call and packaging failure; strict
+literalScripts callers still refuse unsupported expressions. Reports include
+compiler revision/diff fingerprint and packager binary hash, with unique run files
+and a latest alias. Inventories describe textual call sites, not expanded Rust
+macro populations or all module graph inputs. Build-side controls pass 18/18.
+
+Initial convert.rs plus modules/tests.rs inventory: 22 call sites, 14 packaged,
+6 failed packaging and 2 unresolved macros. The compiler now initializes
+function-only completion Scripts and retains a completion sink export through
+Binaryen DCE. Focused compiler tests pass 33/33; persistent Script tests 86/86.
+After those local compiler edits, 16/16 module-test literal Scripts package.
+This is a candidate packaging result, not a fresh clean-pin Context replay.
+
+Four conversion literal packages allow unchanged derive_from_struct and
+derive_from_tuple_struct to pass 2/2 (429 filtered of 431). The unchanged
+test_lazy_loaded_script_not_found executes but fails 0/1 with
+"Cannot access property on null or undefined", not its required lazy-load error.
+Do not equate packaged module-test Scripts with native module conformance.
+Next trace that host path, build module graph packages, expand macro-generated
+sources/resource names without runtime compilation, and implement snapshot support.
+
 ## Verified native reflection replay, 2026-10-04
 
 Unchanged pinned Deno WebIDL now passes **17/17**, 0 ignored and 414 filtered
