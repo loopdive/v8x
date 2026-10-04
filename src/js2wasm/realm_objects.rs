@@ -102,7 +102,7 @@ fn into_realm(
   }
 }
 
-fn from_realm(
+pub(super) fn from_realm(
   runtime: &mut dyn RealmAccess,
   owner: &Rc<RefCell<DenoRuntime>>,
   value: RealmValue,

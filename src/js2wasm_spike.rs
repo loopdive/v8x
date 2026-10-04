@@ -38,7 +38,7 @@ mod realm_values;
 #[path = "js2wasm_rejection_events.rs"]
 pub(crate) mod rejection_events;
 #[path = "js2wasm_script_packages.rs"]
-mod script_packages;
+pub(crate) mod script_packages;
 #[path = "js2wasm_shared_buffers.rs"]
 mod shared_buffers;
 #[path = "js2wasm_shared_strings.rs"]
@@ -2850,6 +2850,7 @@ impl DenoRuntime {
       &path,
       script_packages::digest(specifier, source),
     )?;
+    script_packages::validate(&prepared)?;
     let (normal, handle) = self.instantiate_script(shared, &prepared)?;
     Ok(Some((normal, self.realm_from_handle(handle)?)))
   }

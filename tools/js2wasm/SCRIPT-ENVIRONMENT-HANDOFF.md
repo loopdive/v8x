@@ -100,7 +100,7 @@ measurements use the older compiler pin, not this checkpoint. Factoring
 compiler helpers into an external shared library and fresh footprint/speed
 benchmarks also remain open. Do not advance suite baselines from this fixture.
 
-## Public Script package checkpoint (2026-10-04)
+## Historical public Script package checkpoint (2026-10-04)
 
 This continuation is intentionally unfinished and belongs in the existing
 draft PR https://github.com/loopdive/v8x/pull/2, with compiler companion
@@ -154,3 +154,71 @@ Resume in this order:
 No Deno/vendor test or baseline was modified. Unrelated `.tmp/` content is
 excluded. Fresh footprint/speed measurements and shared-library factoring
 remain outstanding; do not reuse old measurements as results of this change.
+
+## Public source-bound Script execution continuation (2026-10-04)
+
+The previous unwired checkpoint is superseded. Public `v8__Script__Run` now
+selects the generic AOT path first when `V8X_JS2WASM_AOT_SCRIPT_DIR` is set,
+using the original source and resource name. It reuses either the Context's
+Deno bootstrap owner or its source-module owner, clones source before callbacks,
+and adopts results through the existing realm wrapper. Original thrown objects
+and primitive values are recorded as exceptions without JSON conversion or a
+replacement Error. Unconfigured behavior is unchanged. Missing or mismatched
+configured packages do not fall back to source matching or interpreting.
+
+`tools/js2wasm/script-packages.mjs` compiles original sources in Script goal
+with deferred initialization, persistent bindings and a native completion sink,
+then invokes one real Rust packaging test per artifact. The binding uses the
+same length-framed UTF-8 digest in JS and Rust. Native bytes and the original
+source/options manifest are published before the binding sidecar. Package
+directories are trusted build outputs, not adversarial tenant inputs. The
+compiler's virtual filename is `script.ts`; resource names such as `<anonymous>`
+are preserved separately in the exact binding because TypeScript cannot load
+them as virtual source filenames. No wrapper or indirect eval is introduced.
+
+Before Script instantiation, Rust validates the `() -> ()` initializer and
+exactly one `(externref) -> ()` completion sink. This initial Script ABI admits
+Context imports only and rejects interpreter-provider imports. Direct additional
+Deno host capability imports still need deliberate admission and controls.
+
+Eight new native Script packages were built at
+`/private/tmp/deno-public-script-packages-20261004`, paired with the existing
+Context at `/private/tmp/deno-script-completion.8HrA0L/context.cwasm`.
+The public API test passes 1/1 (37 filtered), covering repeat execution, numeric
+and undefined completion, returned object identity, thrown object/number/undefined,
+two-Context isolation, wrong resource name, missing source and corrupted native
+bytes rejected before effects. It asserts zero runtime compilations and zero
+runtime-eval provider instantiations. The byte-mismatch control mutates only
+the generated marker-test artifact, so generate a fresh package directory for
+reproduction or deployment. An earlier repeat-test failure was the test flipping
+a corrupted byte back to its valid original; appending a byte makes repeated
+corruption controls stable instead of undoing the corruption.
+
+Build-side tests pass 13/13. Native digest and ABI controls pass 2/2, including
+wrong initializer/sink signatures and interpreter import refusal. Ordinary
+compiler-free adapter tests report 30 passes, zero failures and eight explicit
+ignored out of 38. The original native Script environment fixture still passes
+1/1 (37 filtered). These are focused controls, not unchanged Deno conformance.
+
+Reproduce build-side packaging, then run only the ignored public control with
+the package directory configured. Do not configure it for the whole ordinary
+suite, whose historical paths intentionally use different inputs:
+
+```sh
+node --experimental-wasm-exnref --import "$JS2_CHECKOUT/node_modules/tsx/dist/loader.mjs" tools/js2wasm/build-public-script-test-packages.mjs "$JS2_CHECKOUT" "$PACKAGING_TEST_BINARY" "$SCRIPT_PACKAGE_DIR"
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR="$FIXTURE_DIR" V8X_JS2WASM_AOT_SCRIPT_DIR="$SCRIPT_PACKAGE_DIR" "$DEPLOYMENT_TEST_BINARY" --exact runs_source_bound_aot_scripts_through_public_api --ignored --nocapture
+node --test tools/js2wasm/test-script-packages.mjs tools/js2wasm/test-runtime-compile-options.mjs
+cargo test --offline --no-default-features --features js2wasm_spike,js2wasm_gc_copying,js2wasm_diagnostic_abi --lib script_packages::tests -- --nocapture
+```
+
+Next: cover additional native Deno capabilities and wider Script semantics,
+including BigInt result adoption and lossless UTF-16 strings; configure or reject
+pure source Program completion; build a fresh full Deno Context and package its
+unchanged Script inputs; rerun full unchanged WebIDL/deno_core conformance.
+General runtime AOT source compilation/cache routing remains open. Do not
+claim full integration, advance baselines or publish new performance numbers
+from these fixture results. Both existing PRs remain draft.
+
+Site text is updated for this public path. Rendering is still unverified:
+`make -C site all` fails because `/opt/homebrew/bin/typst` is absent. No Deno
+or vendor test was modified and no conformance baseline was advanced.

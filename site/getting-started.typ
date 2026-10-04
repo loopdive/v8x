@@ -58,8 +58,14 @@ ships or locates the js2wasm compiler and caches target-native artifacts by
 module graph and compiler identity. Graphs using dynamic code can link the
 existing zero-import `js2wasm:runtime-eval` provider in the same Wasmtime store,
 preserving global objects and mutable binding cells across the module boundary.
-Arbitrary Deno classic scripts and REPL submissions still need `Script::Run`
-lifecycle routing into a persistent compiled graph. Build the full interpreter
+Known classic Script sources can use `V8X_JS2WASM_AOT_SCRIPT_DIR` with trusted
+build-side packages. Public `Script::Run` selects an exact source/resource-name
+binding, validates native completion signatures before instantiation, and adopts
+results and thrown values through the owning Context. A configured missing or
+mismatched package fails without interpreter fallback. Focused compiler-free
+controls cover repeat execution, Context isolation and object/exception identity;
+this is not full unchanged Deno conformance. Arbitrary new classic scripts and
+REPL submissions still need general AOT compilation/cache routing. Build the full interpreter
 provider with a current js2wasm compiler, whose standalone target uses the
 standardized `try_table` encoding accepted by Wasmtime, statically binds Acorn,
 and preserves an ordinary `call; return` boundary instead of `return_call` for

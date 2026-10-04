@@ -2221,6 +2221,185 @@ fn precompiled_scripts_share_context_lexicals_without_interpreter() {
 }
 
 #[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires trusted Context and source-bound public Script packages"]
+fn runs_source_bound_aot_scripts_through_public_api() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR")
+    .expect("precompiled Context fixture");
+  let directory = std::env::var_os("V8X_JS2WASM_AOT_SCRIPT_DIR")
+    .expect("trusted public Script packages");
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let source = v8::String::new(scope, "41;42;").unwrap();
+  let script = v8::Script::compile(scope, source, None).unwrap();
+  assert_eq!(script.run(scope).unwrap().number_value(scope), Some(42.0));
+  assert_eq!(script.run(scope).unwrap().number_value(scope), Some(42.0));
+  {
+    v8::tc_scope!(let caught, scope);
+    let resource = v8::String::new(caught, "file:///other.js").unwrap();
+    let origin = v8::ScriptOrigin::new(
+      caught,
+      resource.into(),
+      0,
+      0,
+      false,
+      -1,
+      None,
+      false,
+      false,
+      false,
+      None,
+    );
+    let source = v8::String::new(caught, "41;42;").unwrap();
+    assert!(
+      v8::Script::compile(caught, source, Some(&origin))
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert!(caught.has_caught());
+  }
+  let source = v8::String::new(scope, "void 0;").unwrap();
+  assert!(
+    v8::Script::compile(scope, source, None)
+      .unwrap()
+      .run(scope)
+      .unwrap()
+      .is_undefined()
+  );
+  let source = v8::String::new(
+    scope,
+    "globalThis.completionSaved={marker:42};globalThis.completionSaved;",
+  )
+  .unwrap();
+  let object = v8::Script::compile(scope, source, None)
+    .unwrap()
+    .run(scope)
+    .unwrap();
+  let source = v8::String::new(scope, "globalThis.completionSaved;").unwrap();
+  let again = v8::Script::compile(scope, source, None)
+    .unwrap()
+    .run(scope)
+    .unwrap();
+  assert!(object.strict_equals(again));
+  {
+    let second = v8::Context::new(scope, Default::default());
+    let second_scope = &mut v8::ContextScope::new(scope, second);
+    v8::js2wasm_attach_precompiled_realm_for_test(
+      &second,
+      &Path::new(&path).join("context.cwasm"),
+    )
+    .unwrap();
+    let source =
+      v8::String::new(second_scope, "globalThis.completionSaved;").unwrap();
+    assert!(
+      v8::Script::compile(second_scope, source, None)
+        .unwrap()
+        .run(second_scope)
+        .unwrap()
+        .is_undefined()
+    );
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let source =
+      v8::String::new(caught, "throw globalThis.completionSaved;").unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert!(caught.exception().unwrap().strict_equals(object));
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let source = v8::String::new(caught, "throw undefined;").unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert!(caught.has_caught());
+    assert!(caught.exception().unwrap().is_undefined());
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let source = v8::String::new(caught, "throw 42;").unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert_eq!(caught.exception().unwrap().number_value(caught), Some(42.0));
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let source =
+      v8::String::new(caught, "globalThis.shouldNotRun=2;42;").unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert!(caught.has_caught());
+  }
+  // Byte mismatch must be rejected before the initializer writes this marker.
+  // Corrupt only a fresh generated test package that has never been loaded.
+  let package = fs::read_dir(&directory)
+    .unwrap()
+    .filter_map(Result::ok)
+    .map(|entry| entry.path())
+    .find(|path| {
+      path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+        && fs::read_to_string(path)
+          .unwrap()
+          .contains("globalThis.shouldNotRun=1;42;")
+    })
+    .expect("marker test package manifest");
+  let native = package.with_extension("");
+  let mut bytes = fs::read(&native).unwrap();
+  bytes.push(0);
+  fs::write(&native, bytes).unwrap();
+  {
+    v8::tc_scope!(let caught, scope);
+    let source =
+      v8::String::new(caught, "globalThis.shouldNotRun=1;42;").unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert!(caught.has_caught());
+  }
+  let key = v8::String::new(scope, "shouldNotRun").unwrap();
+  assert!(
+    context
+      .global(scope)
+      .get(scope, key.into())
+      .unwrap()
+      .is_undefined()
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[ignore = "requires V8X_JS2WASM_CONTEXT_VALUES_WASM from test-context-value-bridge.mjs"]
 fn transfers_context_values_through_embedded_wasmtime() {

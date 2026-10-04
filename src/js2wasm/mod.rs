@@ -6495,6 +6495,50 @@ pub extern "C" fn v8__Script__Run(
   let Some(HeapValue::Script(state)) = (unsafe { heap_value(script) }) else {
     return ptr::null();
   };
+  if crate::js2wasm_spike::script_packages::configured() {
+    // Clone before entering Wasmtime: callbacks can allocate into the heap.
+    let source = state.source.clone();
+    let specifier = state.specifier.clone();
+    let result = (|| {
+      let owner = match unsafe { heap_value(context) } {
+        Some(HeapValue::Context(state)) => state
+          .deno_core_bootstrap
+          .as_ref()
+          .or(state.module_runtime.as_ref())
+          .cloned(),
+        _ => None,
+      }
+      .ok_or("AOT Script has no live Context runtime")?;
+      with_runtime_owner(&owner, "AOT Script execution", |runtime| {
+        let (normal, value) = runtime
+          .run_aot_script(&specifier, &source)?
+          .ok_or("AOT Script package configuration disappeared")?;
+        let value = realm_objects::from_realm(runtime, &owner, value)?;
+        Ok((normal, value))
+      })
+    })();
+    return match result {
+      Ok((true, value)) => value,
+      Ok((false, exception)) => {
+        record_exception(current_isolate(), exception);
+        ptr::null()
+      }
+      Err(error) => {
+        let isolate = current_isolate();
+        if !isolate.is_null()
+          && unsafe { isolate_state(isolate) }
+            .terminating
+            .load(Ordering::Acquire)
+        {
+          return ptr::null();
+        }
+        eprintln!("v8x/js2wasm: {error}");
+        let message = new_string(isolate, error);
+        record_exception(isolate, allocate_error(message, "Error"));
+        ptr::null()
+      }
+    };
+  }
   match run_prelinked_deno_core_script(context, state) {
     Ok(true) => return v8__Undefined(current_isolate()).cast(),
     Ok(false) => {}
