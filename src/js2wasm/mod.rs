@@ -8172,13 +8172,14 @@ fn reject_module_evaluation_with_exception(
   promise.cast()
 }
 
-// Propagate a cached failure only when it is next in dependency evaluation
-// order. An earlier unevaluated body must retain its side effects, so it ends
-// this shortcut even if a later sibling is already errored. Walk exact native
-// identities, not URLs; cycles remain on the ordinary execution path.
+// Process cached failures and leading native callback modules in dependency
+// order. An earlier unevaluated source body must retain its side effects, so it
+// ends this shortcut even if a later sibling is already errored. Walk exact
+// native identities, not URLs; cycles remain on the ordinary execution path.
 fn failed_dependency_exception(
   dependencies: &[*const Module],
   seen: &mut HashSet<usize>,
+  context: *const Context,
 ) -> Result<Option<*const Value>, String> {
   for &dependency in dependencies {
     if !seen.insert(dependency as usize) {
@@ -8195,8 +8196,25 @@ fn failed_dependency_exception(
     if state.status == STATUS_EVALUATED {
       continue;
     }
+    if state.status == STATUS_INSTANTIATED && state.synthetic.is_some() {
+      // Native callback modules cannot be flattened into an AOT source graph.
+      // Execute only the next dependency, then consult its authoritative state.
+      // Never hold ModuleState across a callback that can reenter the adapter.
+      let result = v8__Module__Evaluate(dependency, context);
+      let state = unsafe { module_state(dependency) }
+        .ok_or("synthetic dependency disappeared during evaluation")?;
+      if state.status == STATUS_ERRORED && !state.exception.is_null() {
+        return Ok(Some(state.exception));
+      }
+      if result.is_null() || state.status != STATUS_EVALUATED {
+        return Err("synthetic dependency did not complete evaluation".into());
+      }
+      continue;
+    }
     let nested = state.dependencies.clone();
-    if let Some(exception) = failed_dependency_exception(&nested, seen)? {
+    if let Some(exception) =
+      failed_dependency_exception(&nested, seen, context)?
+    {
       let state = unsafe { module_state(dependency) }
         .ok_or("dependency Module disappeared during cached failure")?;
       state.status = STATUS_ERRORED;
@@ -8354,9 +8372,12 @@ pub extern "C" fn v8__Module__Evaluate(
     );
     return ptr::null();
   }
+  let dependencies = state.dependencies.clone();
+  state.status = STATUS_EVALUATING;
   match failed_dependency_exception(
-    &state.dependencies,
+    &dependencies,
     &mut HashSet::from([module as usize]),
+    context,
   ) {
     Ok(Some(exception)) => {
       return reject_module_evaluation_with_exception(
@@ -8368,7 +8389,9 @@ pub extern "C" fn v8__Module__Evaluate(
     Err(error) => return reject_module_evaluation(module, &error),
     Ok(None) => {}
   }
-  state.status = STATUS_EVALUATING;
+  let Some(state) = (unsafe { module_state(module) }) else {
+    return ptr::null();
+  };
   let synthetic_evaluation_steps = state
     .synthetic
     .as_ref()
@@ -8530,8 +8553,12 @@ mod tests {
     state.exception = marker;
     // A later cached failure cannot skip an earlier source's unevaluated body.
     assert_eq!(
-      failed_dependency_exception(&[fresh, failed], &mut HashSet::new())
-        .unwrap(),
+      failed_dependency_exception(
+        &[fresh, failed],
+        &mut HashSet::new(),
+        ptr::null()
+      )
+      .unwrap(),
       None
     );
     assert_eq!(
@@ -8541,22 +8568,31 @@ mod tests {
     // Once that prefix is evaluated, its exact identity is safe to skip.
     unsafe { module_state(fresh) }.unwrap().status = STATUS_EVALUATED;
     assert_eq!(
-      failed_dependency_exception(&[fresh, failed], &mut HashSet::new())
-        .unwrap(),
+      failed_dependency_exception(
+        &[fresh, failed],
+        &mut HashSet::new(),
+        ptr::null()
+      )
+      .unwrap(),
       Some(marker)
     );
     // Same URL is not same Module, and a cyclic pending prefix is not complete.
     unsafe { module_state(fresh) }.unwrap().status = STATUS_INSTANTIATED;
     unsafe { module_state(fresh) }.unwrap().dependencies = vec![fresh];
     assert_eq!(
-      failed_dependency_exception(&[fresh, failed], &mut HashSet::new())
-        .unwrap(),
+      failed_dependency_exception(
+        &[fresh, failed],
+        &mut HashSet::new(),
+        ptr::null()
+      )
+      .unwrap(),
       None
     );
     // Missing evidence must refuse, never turn an errored Module into success.
     unsafe { module_state(failed) }.unwrap().exception = ptr::null();
     assert!(
-      failed_dependency_exception(&[failed], &mut HashSet::new()).is_err()
+      failed_dependency_exception(&[failed], &mut HashSet::new(), ptr::null())
+        .is_err()
     );
     v8__Isolate__Exit(isolate);
     v8__Isolate__Dispose(isolate);

@@ -2,6 +2,21 @@
 
 ## Cached dependency failure checkpoint
 
+Continuation: a fresh leading synthetic dependency now executes its callback
+before source graph packaging. The expanded public-API regression initially
+failed 0/1 on the unsupported synthetic graph error, then passes 1/1 (53
+filtered /54) with the original failure on both dependency and consumer,
+cached repeated evaluation, no synchronous delivery and exactly one callback
+per dependency. The existing cached direct/transitive cases remain covered.
+The consumer enters Evaluating before callbacks to prevent recursive startup,
+and ModuleState is reacquired after callback execution. Successful synthetic
+graph composition and first source-body failure propagation remain unfinished.
+Filtered library 16/16 (16 filtered /32), ordinary native 35 passed /18 ignored
+/1 filtered out of 54, and typed-owner replay 1/1 (53 filtered /54) pass on
+this continuation. Rebuilt selected unchanged Deno tests also pass 5/5, each
+430 filtered /431, with existing packages and Context. No compiler production
+change or new artifact is required.
+
 The native regression initially failed 0/1 because a cached synthetic failure
 was replaced by "source graph contains a synthetic module". Evaluation now
 recognizes the next already-failed dependency before packaging, propagates its

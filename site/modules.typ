@@ -38,6 +38,9 @@ When the next dependency has already failed, later evaluation returns a cached
 rejected Promise with the original exception object. This includes transitive
 dependencies and does not rerun the failed callback. An earlier unevaluated
 dependency prevents this shortcut so its execution order is retained.
+Leading synthetic dependencies execute their native callbacks before source
+graph packaging. A first callback failure retains the original exception too.
+Successful synthetic/source graph composition is not yet supported.
 General cyclic evaluation, snapshots, and complete Deno integration remain
 unverified.
 

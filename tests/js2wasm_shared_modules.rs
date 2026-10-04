@@ -117,6 +117,38 @@ fn cached_dependency_failure_rejects_with_original_payload_without_reexecution()
   promise.mark_as_handled();
   middle_promise.mark_as_handled();
   assert_eq!(failure.calls.get(), 1);
+  // A fresh synthetic dependency must execute before graph packaging. Its
+  // first callback failure has the same semantics as a previously cached one.
+  let name =
+    v8::String::new(caught, "file:///cached-failure/fresh.js").unwrap();
+  let fresh = v8::Module::create_synthetic_module(caught, name, &[], fail);
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(caught, fresh))));
+  let consumer = compile(
+    caught,
+    "file:///cached-failure/fresh-consumer.js",
+    "import './shared.js'; throw new Error('consumer must not execute');",
+  );
+  assert_eq!(
+    consumer.instantiate_module(caught, resolve_shared),
+    Some(true)
+  );
+  let result = consumer.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(caught).strict_equals(payload));
+  assert_eq!(fresh.get_status(), v8::ModuleStatus::Errored);
+  assert!(fresh.get_exception().strict_equals(payload));
+  assert!(consumer.get_exception().strict_equals(payload));
+  assert!(consumer.evaluate(caught).unwrap().strict_equals(result));
+  assert!(!caught.has_caught());
+  assert_eq!(failure.calls.get(), 2);
+  promise.mark_as_handled();
+  let dependency_result = fresh.evaluate(caught).unwrap();
+  let dependency_promise =
+    v8::Local::<v8::Promise>::try_from(dependency_result).unwrap();
+  assert!(dependency_promise.result(caught).strict_equals(payload));
+  dependency_promise.mark_as_handled();
+  assert_eq!(failure.calls.get(), 2);
   let stats = v8::js2wasm_runtime_stats().unwrap();
   assert_eq!(stats.compilations, 0);
   assert_eq!(stats.runtime_eval_instantiations, 0);
