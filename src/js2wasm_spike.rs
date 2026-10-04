@@ -29,6 +29,8 @@ compile_error!(
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
+#[path = "js2wasm_foreign_get.rs"]
+mod foreign_get;
 #[path = "js2wasm_graph_calls.rs"]
 mod graph_calls;
 #[path = "js2wasm_graph_packages.rs"]
@@ -2643,7 +2645,7 @@ impl DenoRuntime {
   fn instantiate_in_store(
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
-    store: &mut Store<DenoHostState>,
+    store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
     existing_provider: &mut Option<Instance>,
     context_instance: Option<Instance>,
   ) -> Result<Instance, String> {
@@ -2725,6 +2727,7 @@ impl DenoRuntime {
           .map_err(|error| {
             format!("bind js2wasm context provider exports: {error:#}")
           })?;
+        foreign_get::bind(&mut linker, realm, module)?;
         linker
           .define_unknown_imports_as_traps(module)
           .map_err(|error| {
@@ -2781,23 +2784,106 @@ impl DenoRuntime {
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
   ) -> Result<(bool, f64), String> {
-    self
-      .realm_instance
-      .get_typed_func::<(), ()>(
-        &mut self.store,
-        "__v8x_script_completion_reset",
+    Self::instantiate_script_in_context(
+      &mut self.store,
+      self.realm_instance,
+      shared,
+      prepared,
+      Some(&mut self.graph_instances),
+      false,
+    )
+  }
+
+  // A Caller already owns mutable access to the store during a host callback.
+  // Use that access rather than recursively borrowing the enclosing runtime.
+  fn instantiate_script_in_context(
+    store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
+    realm: Instance,
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    retained: Option<&mut Vec<Instance>>,
+    preserve_completion: bool,
+  ) -> Result<(bool, f64), String> {
+    // Refuse malformed packages before changing the Context completion.
+    script_packages::validate(prepared)?;
+    // Nested Script/factory completion belongs to the nested invocation. The
+    // caller's completion must survive both normal and exceptional execution.
+    let previous = if preserve_completion {
+      Some(
+        realm
+          .get_typed_func::<(), f64>(
+            &mut *store,
+            "__v8x_script_completion_handle",
+          )
+          .map_err(|error| format!("save nested Script completion: {error}"))?
+          .call(&mut *store, ())
+          .map_err(|error| format!("save nested Script completion: {error}"))?,
       )
+    } else {
+      None
+    };
+    let result = Self::instantiate_script_body_in_context(
+      store, realm, shared, prepared, retained,
+    );
+    if let Some(previous) = previous {
+      use wasmtime::{RootScope, Val};
+      let mut scope = RootScope::new(&mut *store);
+      let unwrap = realm
+        .get_func(&mut scope, "__v8x_value_unwrap")
+        .ok_or("Context lacks completion unwrapping ABI")?;
+      let sink = realm
+        .get_func(&mut scope, "__v8x_context_script_completion")
+        .ok_or("Context lacks completion restoration ABI")?;
+      let mut value = [Val::null_extern_ref()];
+      unwrap
+        .call(&mut scope, &[Val::F64(previous.to_bits())], &mut value)
+        .map_err(|error| {
+          format!("unwrap outer Script completion: {error:#}")
+        })?;
+      sink.call(&mut scope, &value, &mut []).map_err(|error| {
+        format!("restore outer Script completion: {error:#}")
+      })?;
+    }
+    result
+  }
+
+  fn instantiate_script_body_in_context(
+    store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
+    realm: Instance,
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    retained: Option<&mut Vec<Instance>>,
+  ) -> Result<(bool, f64), String> {
+    realm
+      .get_typed_func::<(), ()>(&mut *store, "__v8x_script_completion_reset")
       .map_err(|error| format!("Script completion reset: {error}"))?
-      .call(&mut self.store, ())
+      .call(&mut *store, ())
       .map_err(|error| format!("Script completion reset: {error}"))?;
-    let instance = self.retain_graph_instance(shared, prepared)?;
-    if let Some(init) = instance.get_func(&mut self.store, "__module_init") {
+    // A validated Script can import only the Context; never initialize an
+    // interpreter provider as a side effect of nested Script loading.
+    let instance = Self::instantiate_in_store(
+      shared,
+      prepared,
+      store,
+      &mut None,
+      Some(realm),
+    )?;
+    if let Some(retained) = retained {
+      retained.push(instance);
+    }
+    store
+      .as_context_mut()
+      .data_mut()
+      .aot_call_graphs
+      .push(instance);
+    shared.instantiations.fetch_add(1, Ordering::Relaxed);
+    if let Some(init) = instance.get_func(&mut *store, "__module_init") {
       let init = init
-        .typed::<(), ()>(&self.store)
+        .typed::<(), ()>(&*store)
         .map_err(|error| format!("Script initializer ABI: {error}"))?;
-      if let Err(error) = init.call(&mut self.store, ()) {
+      if let Err(error) = init.call(&mut *store, ()) {
         use wasmtime::{AsContextMut, RootScope, Val};
-        let mut scope = RootScope::new(&mut self.store);
+        let mut scope = RootScope::new(&mut *store);
         let exception = scope
           .as_context_mut()
           .take_pending_exception()
@@ -2811,8 +2897,7 @@ impl DenoRuntime {
             "Script exception must carry exactly one JS value".into(),
           );
         };
-        let keep = self
-          .realm_instance
+        let keep = realm
           .get_func(&mut scope, "__v8x_value_keep")
           .ok_or("Context lacks exception rooting ABI")?;
         let mut result = [Val::F64(0)];
@@ -2825,14 +2910,10 @@ impl DenoRuntime {
         ));
       }
     }
-    let handle = self
-      .realm_instance
-      .get_typed_func::<(), f64>(
-        &mut self.store,
-        "__v8x_script_completion_handle",
-      )
+    let handle = realm
+      .get_typed_func::<(), f64>(&mut *store, "__v8x_script_completion_handle")
       .map_err(|error| format!("Script completion handle: {error}"))?
-      .call(&mut self.store, ())
+      .call(&mut *store, ())
       .map_err(|error| format!("Script completion handle: {error}"))?;
     Ok((true, handle))
   }
@@ -2841,7 +2922,29 @@ impl DenoRuntime {
     &mut self,
     specifier: &str,
     source: &str,
+    preserve_completion: bool,
   ) -> Result<Option<(bool, RealmValue)>, String> {
+    let result = Self::run_aot_script_in_context(
+      &mut self.store,
+      self.realm_instance,
+      Some(&mut self.graph_instances),
+      specifier,
+      source,
+      preserve_completion,
+    )?;
+    result
+      .map(|(normal, handle)| Ok((normal, self.realm_from_handle(handle)?)))
+      .transpose()
+  }
+
+  fn run_aot_script_in_context(
+    store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
+    realm: Instance,
+    retained: Option<&mut Vec<Instance>>,
+    specifier: &str,
+    source: &str,
+    preserve_completion: bool,
+  ) -> Result<Option<(bool, f64)>, String> {
     let Some(path) = script_packages::configured_input(specifier, source)
     else {
       return Ok(None);
@@ -2852,8 +2955,15 @@ impl DenoRuntime {
       script_packages::digest(specifier, source),
     )?;
     script_packages::validate(&prepared)?;
-    let (normal, handle) = self.instantiate_script(shared, &prepared)?;
-    Ok(Some((normal, self.realm_from_handle(handle)?)))
+    Self::instantiate_script_in_context(
+      store,
+      realm,
+      shared,
+      &prepared,
+      retained,
+      preserve_completion,
+    )
+    .map(Some)
   }
 
   pub(crate) fn bind_deno_ops(

@@ -57,6 +57,7 @@ async function build(name, source, options) {
   return { result, module };
 }
 const context = await build("context", contextSource, {
+  standaloneSymbolState: "export",
   target: "standalone", platform:"deno", hostBridge:"always", externImportModule:"v8x:deno", standaloneAllocationOwnerExport: "__v8x_context_owns",
 });
 const owner = new WebAssembly.Instance(context.module, {"v8x:deno": {__v8x_host_call(){throw new Error("unexpected host callback in completion fixture");}}});

@@ -45,6 +45,14 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_run_aot_script(
+    &mut self,
+    specifier: &str,
+    source: &str,
+    preserve_completion: bool,
+  ) -> Result<Option<(bool, RealmValue)>, String> {
+    self.run_aot_script(specifier, source, preserve_completion)
+  }
   fn realm_try_graph_reflection(
     &mut self,
     handles: &[f64],
@@ -215,6 +223,14 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_run_aot_script(
+    &mut self,
+    _specifier: &str,
+    _source: &str,
+    _preserve_completion: bool,
+  ) -> Result<Option<(bool, RealmValue)>, String> {
+    Err("this realm does not support AOT Script instantiation".into())
+  }
   fn realm_try_graph_reflection(
     &mut self,
     _handles: &[f64],
@@ -766,6 +782,24 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_run_aot_script(
+    &mut self,
+    specifier: &str,
+    source: &str,
+    _preserve_completion: bool,
+  ) -> Result<Option<(bool, RealmValue)>, String> {
+    let result = DenoRuntime::run_aot_script_in_context(
+      &mut self.caller,
+      self.realm_instance,
+      None,
+      specifier,
+      source,
+      true,
+    )?;
+    result
+      .map(|(normal, handle)| Ok((normal, self.realm_from_handle(handle)?)))
+      .transpose()
+  }
   fn realm_try_graph_reflection(
     &mut self,
     handles: &[f64],

@@ -2220,6 +2220,432 @@ fn precompiled_scripts_share_context_lexicals_without_interpreter() {
   v8::js2wasm_test_precompiled_script_environment(Path::new(&path)).unwrap();
 }
 
+unsafe extern "C" fn reentrant_script_host(
+  info: *const v8::FunctionCallbackInfo,
+) {
+  let info = unsafe { &*info };
+  let parts = info.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let args = v8::FunctionCallbackArguments::from_function_callback_info_parts(
+    info, &parts,
+  );
+  let selector = args.get(0).int32_value(scope).unwrap();
+  if selector >= 3 {
+    let body = match selector {
+      3 => "return value + 1;",
+      4 => "return { foo: 'foo', bar: 123 };",
+      5 => "return {get foo(){throw value;}};",
+      6 => "return {get foo(){return undefined;}};",
+      7 => "return {get foo(){return this;}};",
+      8 => "return {foo(value){return this.marker + value;}, marker:40};",
+      _ => panic!("unexpected function selector"),
+    };
+    let body = v8::String::new(scope, body).unwrap();
+    let parameter = v8::String::new(scope, "value").unwrap();
+    let mut source = v8::script_compiler::Source::new(body, None);
+    let Some(function) = v8::script_compiler::compile_function(
+      scope,
+      &mut source,
+      &[parameter],
+      &[],
+      v8::script_compiler::CompileOptions::NoCompileOptions,
+      v8::script_compiler::NoCacheReason::NoReason,
+    ) else {
+      return;
+    };
+    let receiver = v8::undefined(scope);
+    let argument = if selector == 5 {
+      args.get(1)
+    } else {
+      v8::Number::new(scope, 41.0).into()
+    };
+    if let Some(value) = function.call(scope, receiver.into(), &[argument]) {
+      let mut return_value = parts.return_value;
+      return_value.set(value);
+    }
+    return;
+  }
+  let source = match selector {
+    0 => "41;42;",
+    1 => "throw globalThis.completionSaved;",
+    2 => "throw undefined;",
+    _ => panic!("unexpected reentrant Script selector"),
+  };
+  v8::tc_scope!(let caught, scope);
+  let source = v8::String::new(caught, source).unwrap();
+  let script = v8::Script::compile(caught, source, None).unwrap();
+  let result = script.run(caught);
+  let mut return_value = parts.return_value;
+  if selector == 0 {
+    assert!(!caught.has_caught());
+    return_value.set(result.expect("nested Script should return a number"));
+  } else {
+    assert!(result.is_none());
+    assert!(caught.has_caught());
+    // Return the exact caught native payload rather than serializing it.
+    return_value.set(caught.exception().unwrap());
+  }
+}
+
+#[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires trusted Context and reentrant AOT Script packages"]
+fn loads_aot_scripts_during_native_host_callbacks() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR")
+    .expect("precompiled Context fixture");
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_SCRIPT_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "reentrantScriptHost").unwrap();
+  let callback = v8::Function::new_raw(scope, reentrant_script_host).unwrap();
+  assert_eq!(global.set(scope, key.into(), callback.into()), Some(true));
+  let key = v8::String::new(scope, "completionSaved").unwrap();
+  let marker = v8::Object::new(scope);
+  assert_eq!(global.set(scope, key.into(), marker.into()), Some(true));
+  for selector in 0..4 {
+    let source = v8::String::new(
+      scope,
+      &format!("globalThis.reentrantScriptHost({selector});"),
+    )
+    .unwrap();
+    let result = v8::Script::compile(scope, source, None)
+      .unwrap()
+      .run(scope)
+      .expect("outer Script should complete normally");
+    match selector {
+      0 | 3 => assert_eq!(result.number_value(scope), Some(42.0)),
+      1 => assert!(result.strict_equals(marker.into())),
+      2 => assert!(result.is_undefined()),
+      _ => unreachable!(),
+    }
+  }
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires trusted Context and AOT function-body packages"]
+fn compiles_aot_function_bodies_without_executing_them() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let body = v8::String::new(
+    scope,
+    "globalThis.functionBodyRuns = 1; return value + 1;",
+  )
+  .unwrap();
+  let parameter = v8::String::new(scope, "value").unwrap();
+  let mut source = v8::script_compiler::Source::new(body, None);
+  let function = v8::script_compiler::compile_function(
+    scope,
+    &mut source,
+    &[parameter],
+    &[],
+    v8::script_compiler::CompileOptions::NoCompileOptions,
+    v8::script_compiler::NoCacheReason::NoReason,
+  )
+  .expect("trusted factory should return a native function");
+  assert!(function.create_code_cache().is_none());
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "functionBodyRuns").unwrap();
+  assert!(global.get(scope, key.into()).unwrap().is_undefined());
+  let receiver = v8::undefined(scope);
+  let argument = v8::Number::new(scope, 41.0);
+  assert_eq!(
+    function
+      .call(scope, receiver.into(), &[argument.into()])
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  assert_eq!(
+    global.get(scope, key.into()).unwrap().number_value(scope),
+    Some(1.0)
+  );
+  let repeated = v8::script_compiler::compile_function(
+    scope,
+    &mut source,
+    &[parameter],
+    &[],
+    v8::script_compiler::CompileOptions::NoCompileOptions,
+    v8::script_compiler::NoCacheReason::NoReason,
+  )
+  .unwrap();
+  assert!(!function.strict_equals(repeated.into()));
+  let other = v8::String::new(scope, "other").unwrap();
+  for parameters in [vec![], vec![other]] {
+    v8::tc_scope!(let caught, scope);
+    assert!(
+      v8::script_compiler::compile_function(
+        caught,
+        &mut source,
+        &parameters,
+        &[],
+        v8::script_compiler::CompileOptions::NoCompileOptions,
+        v8::script_compiler::NoCacheReason::NoReason,
+      )
+      .is_none()
+    );
+    assert!(caught.has_caught());
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let extension = v8::Object::new(caught);
+    assert!(
+      v8::script_compiler::compile_function(
+        caught,
+        &mut source,
+        &[parameter],
+        &[extension],
+        v8::script_compiler::CompileOptions::NoCompileOptions,
+        v8::script_compiler::NoCacheReason::NoReason,
+      )
+      .is_none()
+    );
+    assert!(caught.has_caught());
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let resource = v8::String::new(caught, "file:///wrong-origin.js").unwrap();
+    let origin = v8::ScriptOrigin::new(
+      caught,
+      resource.into(),
+      0,
+      0,
+      false,
+      -1,
+      None,
+      false,
+      false,
+      false,
+      None,
+    );
+    let mut changed = v8::script_compiler::Source::new(body, Some(&origin));
+    assert!(
+      v8::script_compiler::compile_function(
+        caught,
+        &mut changed,
+        &[parameter],
+        &[],
+        v8::script_compiler::CompileOptions::NoCompileOptions,
+        v8::script_compiler::NoCacheReason::NoReason,
+      )
+      .is_none()
+    );
+    assert!(caught.has_caught());
+  }
+  let marker = v8::Object::new(scope);
+  v8::tc_scope!(let caught, scope);
+  let body = v8::String::new(caught, "throw value;").unwrap();
+  let mut source = v8::script_compiler::Source::new(body, None);
+  let throwing = v8::script_compiler::compile_function(
+    caught,
+    &mut source,
+    &[parameter],
+    &[],
+    v8::script_compiler::CompileOptions::NoCompileOptions,
+    v8::script_compiler::NoCacheReason::NoReason,
+  )
+  .unwrap();
+  assert!(
+    throwing
+      .call(caught, receiver.into(), &[marker.into()])
+      .is_none()
+  );
+  assert!(caught.has_caught());
+  assert!(caught.exception().unwrap().strict_equals(marker.into()));
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires original Deno lazy-function packages and wrapping inventory"]
+fn reads_original_lazy_function_exports_through_native_api() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let directory = std::env::var_os("V8X_JS2WASM_AOT_SCRIPT_DIR").unwrap();
+  let inventory: serde_json::Value = serde_json::from_slice(
+    &std::fs::read(
+      Path::new(&directory).join("deno-lazy-function-inputs.json"),
+    )
+    .unwrap(),
+  )
+  .unwrap();
+  let input = &inventory["records"][0];
+  assert_eq!(input["specifier"], "ext:test_ext/lazy_script.js");
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let resource =
+    v8::String::new(scope, input["specifier"].as_str().unwrap()).unwrap();
+  let origin = v8::ScriptOrigin::new(
+    scope,
+    resource.into(),
+    0,
+    0,
+    false,
+    -1,
+    None,
+    false,
+    false,
+    false,
+    None,
+  );
+  let body = v8::String::new(scope, input["body"].as_str().unwrap()).unwrap();
+  let parameter = v8::String::new(scope, "__bootstrap").unwrap();
+  let mut source = v8::script_compiler::Source::new(body, Some(&origin));
+  let function = v8::script_compiler::compile_function(
+    scope,
+    &mut source,
+    &[parameter],
+    &[],
+    v8::script_compiler::CompileOptions::NoCompileOptions,
+    v8::script_compiler::NoCacheReason::NoReason,
+  )
+  .unwrap();
+  let undefined = v8::undefined(scope);
+  let result = function
+    .call(scope, undefined.into(), &[undefined.into()])
+    .unwrap();
+  let object = v8::Local::<v8::Object>::try_from(result).unwrap();
+  let foo = v8::String::new(scope, "foo").unwrap();
+  assert_eq!(
+    object
+      .get(scope, foo.into())
+      .unwrap()
+      .to_string(scope)
+      .unwrap()
+      .to_rust_string_lossy(scope),
+    "foo"
+  );
+  let bar = v8::String::new(scope, "bar").unwrap();
+  assert_eq!(
+    object.get(scope, bar.into()).unwrap().number_value(scope),
+    Some(123.0)
+  );
+  let blah = v8::String::new(scope, "blah").unwrap();
+  assert!(object.get(scope, blah.into()).unwrap().is_function());
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires trusted Context and foreign getter test packages"]
+fn routes_foreign_script_property_reads_and_exceptions() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "reentrantScriptHost").unwrap();
+  let callback = v8::Function::new_raw(scope, reentrant_script_host).unwrap();
+  assert_eq!(global.set(scope, key.into(), callback.into()), Some(true));
+  let key = v8::String::new(scope, "completionSaved").unwrap();
+  let marker = v8::Object::new(scope);
+  assert_eq!(global.set(scope, key.into(), marker.into()), Some(true));
+  for (source, selector) in [
+    ("globalThis.reentrantScriptHost(4).foo;", 4),
+    (
+      "try {globalThis.reentrantScriptHost(5,globalThis.completionSaved).foo;}catch(error){error;}",
+      5,
+    ),
+    ("globalThis.reentrantScriptHost(6).foo;", 6),
+    (
+      "const foreign=globalThis.reentrantScriptHost(7);foreign.foo===foreign;",
+      7,
+    ),
+    ("globalThis.reentrantScriptHost(8).foo(2);", 8),
+    (
+      "try {globalThis.reentrantScriptHost(5,globalThis.completionSaved).foo((globalThis.shouldNotRun=1));}catch(error){error;}",
+      9,
+    ),
+  ] {
+    let source = v8::String::new(scope, source).unwrap();
+    let result = v8::Script::compile(scope, source, None)
+      .unwrap()
+      .run(scope)
+      .unwrap();
+    match selector {
+      4 => assert_eq!(
+        result.to_string(scope).unwrap().to_rust_string_lossy(scope),
+        "foo"
+      ),
+      5 => assert!(result.strict_equals(marker.into())),
+      6 => assert!(result.is_undefined()),
+      7 => assert!(result.is_true()),
+      8 => assert_eq!(result.number_value(scope), Some(42.0)),
+      9 => {
+        assert!(result.strict_equals(marker.into()));
+        let key = v8::String::new(scope, "shouldNotRun").unwrap();
+        assert!(global.get(scope, key.into()).unwrap().is_undefined());
+      }
+      _ => unreachable!(),
+    }
+  }
+  {
+    v8::tc_scope!(let caught, scope);
+    let source = v8::String::new(
+      caught,
+      "Reflect.get(globalThis.reentrantScriptHost(7),\"foo\",{});",
+    )
+    .unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    assert!(caught.has_caught());
+    let message =
+      v8::Exception::create_message(caught, caught.exception().unwrap());
+    assert!(
+      message
+        .get(caught)
+        .to_rust_string_lossy(caught)
+        .contains("explicit Reflect receiver ABI")
+    );
+  }
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 #[test]
 #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
 #[ignore = "requires trusted Context and source-bound public Script packages"]

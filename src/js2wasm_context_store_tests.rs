@@ -71,9 +71,8 @@ pub fn failed_graph_initialization_preserves_primary_and_retains_graph() {
   // exists. Use a tiny cached provider to isolate lifetime from its JS ABI.
   *shared.runtime_eval_provider.lock().unwrap() =
     Some(Module::new(&shared.engine, GLOBAL_MODULE).unwrap());
-  let start_trap = b"\0asm\x01\0\0\0\x01\x04\x01\x60\0\0\x03\x02\x01\0\x08\x01\0\x0a\x05\x01\x03\0\0\x0b";
   let failing = PreparedModule::RuntimeEval(
-    Module::new(&shared.engine, start_trap).unwrap(),
+    Module::new(&shared.engine, provider_lifetime_fixture(true)).unwrap(),
   );
   let error = runtime.instantiate_graph(&shared, &failing).unwrap_err();
   assert!(error.contains("instantiate js2wasm artifact"), "{error}");
@@ -84,7 +83,7 @@ pub fn failed_graph_initialization_preserves_primary_and_retains_graph() {
     .unwrap();
 
   let good = PreparedModule::RuntimeEval(
-    Module::new(&shared.engine, GLOBAL_MODULE).unwrap(),
+    Module::new(&shared.engine, provider_lifetime_fixture(false)).unwrap(),
   );
   runtime.instantiate_graph(&shared, &good).unwrap();
   assert_eq!(
@@ -103,6 +102,27 @@ fn section(bytes: &mut Vec<u8>, id: u8, payload: &[u8]) {
   assert!(payload.len() < 128);
   bytes.extend_from_slice(&[id, payload.len() as u8]);
   bytes.extend_from_slice(payload);
+}
+
+// Actually import the cached provider before checking its lifetime. A module
+// with no provider imports must not create an unused interpreter instance.
+// This raw linker fixture tests retention, not the production JS provider ABI.
+fn provider_lifetime_fixture(trap: bool) -> Vec<u8> {
+  let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+  section(&mut bytes, 1, &[1, 0x60, 0, 0]);
+  let mut imports = vec![1, RUNTIME_EVAL_IMPORT_MODULE.len() as u8];
+  imports.extend_from_slice(RUNTIME_EVAL_IMPORT_MODULE.as_bytes());
+  imports.extend_from_slice(&[5, b'v', b'a', b'l', b'u', b'e', 3, 0x7f, 1]);
+  section(&mut bytes, 2, &imports);
+  section(&mut bytes, 3, &[1, 0]);
+  section(&mut bytes, 7, &[1, 5, b'v', b'a', b'l', b'u', b'e', 3, 0]);
+  section(&mut bytes, 8, &[0]);
+  if trap {
+    section(&mut bytes, 10, &[1, 3, 0, 0, 0x0b]);
+  } else {
+    section(&mut bytes, 10, &[1, 2, 0, 0x0b]);
+  }
+  bytes
 }
 
 fn context_fixture(provider: bool, name: &str) -> Vec<u8> {
@@ -157,8 +177,9 @@ fn context_imports_require_real_provider_exports() {
   runtime.instantiate_graph(&shared, &consumer).unwrap();
   assert_eq!(
     shared.runtime_eval_instantiations.load(Ordering::Relaxed),
-    1
+    0
   );
+  assert!(runtime._runtime_eval_provider.is_none());
 
   let unknown = Module::new(
     &shared.engine,

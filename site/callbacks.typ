@@ -164,9 +164,17 @@ This does not establish full WebIDL or Deno compatibility.
 Context artifacts also export a lexical operation for independently compiled
 Scripts. The linker resolves it against the retained Context, without requiring
 a runtime-eval provider. A separate native fixture covers persistent lexical
-state; it is not the public Script compilation path. General completion values,
-typed lexical bindings and unchanged Deno conformance remain incomplete.
+state. Public source-bound Script packages also retain completion values and
+exceptions as native references. Typed lexical bindings and full unchanged
+Deno conformance remain incomplete.
 Inferred number and boolean constants retain their typed slots across the
 lexical operation. Shared global-object function writes use native AOT callable
 carriers, allowing later Scripts to call them without an interpreter. Mutable
 and reference-typed bindings still lack safe cross-Script type planning.
+
+Known function bodies can be instantiated during a native host callback without
+borrowing the runtime again. Nested instantiation preserves the caller's completion
+and retains the new owning graph even if its initializer throws. Cross-Script reads
+and calls select the allocation owner, not a structural layout or an undefined
+result. Native controls cover thrown getter identity, own undefined and receiver
+identity. Alternate foreign Reflect receivers still require an extended getter ABI.

@@ -7,6 +7,7 @@
 #![allow(non_snake_case, unused)]
 
 mod boolean;
+mod compiled_function;
 mod private;
 mod promise_reject;
 mod retained_buffer;
@@ -3960,8 +3961,13 @@ fn placeholder_code_cache() -> *mut CachedData<'static> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Function__CreateCodeCache(
-  _function: *const crate::Function,
+  function: *const crate::Function,
 ) -> *mut CachedData<'static> {
+  // Native AOT functions already use trusted shared packages. Do not publish
+  // a fake V8 cache blob that cannot be consumed by this backend.
+  if realm_objects::is_bound(function.cast()) {
+    return ptr::null_mut();
+  }
   placeholder_code_cache()
 }
 
@@ -6562,9 +6568,9 @@ pub extern "C" fn v8__Script__Run(
         _ => None,
       }
       .ok_or("AOT Script has no live Context runtime")?;
-      with_runtime_owner(&owner, "AOT Script execution", |runtime| {
+      realm_objects::callback_access::with_owner(&owner, |runtime| {
         let (normal, value) = runtime
-          .run_aot_script(&state.specifier, &state.source)?
+          .realm_run_aot_script(&state.specifier, &state.source, false)?
           .ok_or("AOT Script package configuration disappeared")?;
         let value = realm_objects::from_realm(runtime, &owner, value)?;
         Ok((normal, value))

@@ -52,7 +52,7 @@ pub(super) fn with_active<T>(
   action()
 }
 
-pub(super) fn with_owner<T>(
+pub(in crate::js2wasm) fn with_owner<T>(
   owner: &Rc<RefCell<DenoRuntime>>,
   action: impl FnOnce(&mut dyn RealmAccess) -> Result<T, String>,
 ) -> Result<T, String> {

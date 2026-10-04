@@ -1,7 +1,7 @@
 use super::*;
 use crate::js2wasm_spike::{DenoRuntime, RealmAccess, RealmValue};
 #[path = "realm_callback_access.rs"]
-mod callback_access;
+pub(super) mod callback_access;
 #[path = "realm_host_callbacks.rs"]
 mod host_callbacks;
 #[path = "realm_host_values.rs"]

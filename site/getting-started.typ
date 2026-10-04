@@ -67,7 +67,13 @@ controls cover repeat execution, Context isolation and object/exception identity
 this is not full unchanged Deno conformance.
 The pinned core bootstrap runs before package lookup to create the Context owner.
 With a fresh optimized Context and five original Script packages, unchanged
-WebIDL checks pass 16 of 17; Script-array conversion remains incomplete.
+WebIDL checks pass 17 of 17. This is a focused replay, not the full population.
+Known `CompileFunction` bodies use trusted function-factory packages binding the
+body, parameter names and resource name. Compilation creates a native callable
+without executing its body. Active host callbacks instantiate and call these
+functions in the same store. The unchanged lazy-script test now passes, including
+cached export identity and a lazy dependency. Context extensions, V8 code-cache
+consumption and alternate receivers for foreign Script getters remain unsupported.
 Arbitrary new classic scripts and REPL submissions still need general AOT
 compilation/cache routing. Build the full interpreter
 provider with a current js2wasm compiler, whose standalone target uses the

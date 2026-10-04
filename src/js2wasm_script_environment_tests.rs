@@ -74,6 +74,33 @@ pub fn precompiled_scripts_share_context_lexicals(
     read_number(&mut first, "__v8x_probe_completion_number")?,
     42.0
   );
+  let retained_before = first.store.data().aot_call_graphs.len();
+  for index in [9, 10, 3] {
+    let nested = DenoRuntime::instantiate_script_in_context(
+      &mut first.store,
+      first.realm_instance,
+      &shared,
+      &scripts[index],
+      None,
+      true,
+    )?;
+    assert_eq!(nested.0, index != 3);
+    if index == 9 {
+      assert_eq!(nested.1, 0.0);
+    } else {
+      assert!(nested.1 > 0.0);
+    }
+    assert_eq!(
+      read_number(&mut first, "__v8x_probe_completion_number")?,
+      42.0
+    );
+  }
+  // Native ownership dispatch still finds nested graphs after completion is
+  // restored, including an initializer that threw after publishing values.
+  assert_eq!(
+    first.store.data().aot_call_graphs.len(),
+    retained_before + 3
+  );
   assert_eq!(first.instantiate_script(&shared, &scripts[9])?, (true, 0.0));
   let object_handle = first.instantiate_script(&shared, &scripts[10])?;
   assert!(object_handle.0 && object_handle.1 > 0.0);
