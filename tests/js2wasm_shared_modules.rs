@@ -10,6 +10,153 @@ struct CachedFailure {
 
 struct FailureGraphModules(Vec<(String, v8::Global<v8::Module>)>);
 
+struct NativeSourceDependency {
+  module: v8::Global<v8::Module>,
+  marker: v8::Global<v8::Value>,
+  calls: Cell<u32>,
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound synthetic/source graph"]
+fn aot_source_imports_live_synthetic_exports() {
+  fn evaluate<'s>(
+    context: v8::Local<'s, v8::Context>,
+    module: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+    let state = context.get_slot::<NativeSourceDependency>().unwrap();
+    state.calls.set(state.calls.get() + 1);
+    let marker = v8::Local::new(scope, &state.marker);
+    let key = v8::String::new(scope, "value").unwrap();
+    assert_eq!(
+      module.set_synthetic_module_export(scope, key, marker),
+      Some(true)
+    );
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let undefined = v8::undefined(scope);
+    assert_eq!(resolver.resolve(scope, undefined.into()), Some(true));
+    Some(resolver.get_promise(scope).into())
+  }
+  fn resolve<'s>(
+    context: v8::Local<'s, v8::Context>,
+    specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    v8::callback_scope!(unsafe scope, context);
+    assert_eq!(specifier.to_rust_string_lossy(scope), "custom:native");
+    Some(v8::Local::new(
+      scope,
+      &context.get_slot::<NativeSourceDependency>()?.module,
+    ))
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let marker: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  let name = v8::String::new(scope, "custom:native").unwrap();
+  let key = v8::String::new(scope, "value").unwrap();
+  let native =
+    v8::Module::create_synthetic_module(scope, name, &[key], evaluate);
+  context.set_slot(Rc::new(NativeSourceDependency {
+    module: v8::Global::new(scope, native),
+    marker: v8::Global::new(scope, marker),
+    calls: Cell::new(0),
+  }));
+  let entry = compile(
+    scope,
+    "file:///synthetic-source/entry.js",
+    include_str!("fixtures/js2wasm-synthetic-source/entry.js"),
+  );
+  assert_eq!(entry.instantiate_module(scope, resolve), Some(true));
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    0
+  );
+  let result = entry.evaluate(scope).unwrap();
+  assert_eq!(native.get_status(), v8::ModuleStatus::Evaluated);
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    1
+  );
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  let namespace =
+    v8::Local::<v8::Object>::try_from(entry.get_module_namespace()).unwrap();
+  let observed = v8::String::new(scope, "observed").unwrap();
+  assert!(
+    namespace
+      .get(scope, observed.into())
+      .unwrap()
+      .strict_equals(marker)
+  );
+  let live = v8::String::new(scope, "live").unwrap();
+  let live = v8::Local::<v8::Function>::try_from(
+    namespace.get(scope, live.into()).unwrap(),
+  )
+  .unwrap();
+  let replacement: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  assert_eq!(
+    native.set_synthetic_module_export(scope, key, replacement),
+    Some(true)
+  );
+  assert!(
+    live
+      .call(scope, namespace.into(), &[])
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  assert!(
+    namespace
+      .get(scope, observed.into())
+      .unwrap()
+      .strict_equals(marker)
+  );
+  let getter = v8::String::new(scope, "namespace").unwrap();
+  let getter = v8::Local::<v8::Function>::try_from(
+    namespace.get(scope, getter.into()).unwrap(),
+  )
+  .unwrap();
+  let actual = getter.call(scope, namespace.into(), &[]).unwrap();
+  assert!(actual.strict_equals(native.get_module_namespace()));
+  let actual = v8::Local::<v8::Object>::try_from(actual).unwrap();
+  assert_eq!(actual.set(scope, key.into(), marker), Some(false));
+  assert!(
+    actual
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  assert!(entry.evaluate(scope).unwrap().strict_equals(result));
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    1
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 struct NestedFailure {
   module: v8::Global<v8::Module>,
   calls: Cell<u32>,
