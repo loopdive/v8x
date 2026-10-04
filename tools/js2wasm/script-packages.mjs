@@ -30,7 +30,8 @@ export function scriptCompileOptions(specifier) {
     standaloneScriptGetExport: "__v8x_script_get_export",
     standaloneScriptCallExport: "__v8x_script_call_export",
     standaloneGlobalThisImport: { module: "v8x:context", name: "__v8x_context_global_this",
-      owns: "__v8x_context_owns", get: "__v8x_context_get", exceptionTag: "__exn_tag" },
+      owns: "__v8x_context_owns", get: "__v8x_context_get",
+      arrayPrototype: "__v8x_context_array_prototype", exceptionTag: "__exn_tag" },
     link: ["v8x:context"],
   };
 }

@@ -150,7 +150,7 @@ export function assertRuntimeSchedulerABI(module) {
 
 export function assertRuntimeAllocationOwnerABI(module) {
   const exports = WebAssembly.Module.exports(module);
-  for (const name of ["__v8x_context_owns", "__v8x_context_get"]) {
+  for (const name of ["__v8x_context_owns", "__v8x_context_get", "__v8x_context_array_prototype"]) {
     if (!exports.some(entry => entry.name === name && entry.kind === "function")) {
       fail(`runtime artifact lacks allocation-owner function ${name}`);
     }
@@ -1059,6 +1059,7 @@ export function __v8x_context_lexical(name:any, operation:number, value:any):any
 export function __v8x_context_get(object: any, key: any, receiver: any): any {
   return Reflect.get(object, key, receiver);
 }
+export function __v8x_context_array_prototype(): any { return Array.prototype; }
 `;
     // Root handles must exist before the host hook, which precedes all core
     // imports. The host global becomes authoritative before core captures ops.
@@ -1195,6 +1196,7 @@ async function packageDenoArtifacts({
       ? [
           "__v8x_context_owns",
           "__v8x_context_get",
+          "__v8x_context_array_prototype",
           "__v8x_run_deno_core_script",
           "__v8x_deno_script_phase",
           "__v8x_stage_deno_core_wrappers",

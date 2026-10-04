@@ -392,3 +392,22 @@ watchdog kills timed-out tests. Obtain approval or disable that watchdog before
 using those cells. Direct per-test libtest replay remains available for the built
 Deno binary. No full-population baseline, matched Context rebuild or fresh
 performance result is credited.
+# Linked Array provider continuation (2026-10-04)
+
+The runtime and small Context builders now export
+`__v8x_context_array_prototype(): externref`. Script packaging imports it and
+the runtime allowlist admits it; the builder's owner ABI check requires it.
+This is native Context capability wiring, not a runtime compiler or interpreter.
+Build-side Script/options/source-literal controls pass 15/15.
+
+Companion compiler changes reuse native identity-keyed prototype edges for
+linked arrays, preserve explicit null/custom prototypes and avoid static
+getPrototypeOf shortcuts for mutated arrays. Focused controls pass 14/14 and
+the four-file compiler regression run passes 104/104 (including two existing
+expected failures). These are Node controls, not native integration credit.
+
+Existing Context native artifacts do not export the new provider. Rebuild clean,
+pinned Context and exact original Script packages before replaying unchanged
+Deno. Explicit Reflect receiver propagation and broader cross-module descriptor
+and prototype identity checks remain open. Last native unchanged WebIDL result
+is still 16/17; no new full-population or performance result is claimed.

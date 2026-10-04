@@ -21,6 +21,7 @@ globalThis.score=0;
 globalThis.published=0;
 export function __v8x_context_global_this():any {return globalThis;}
 export function __v8x_context_get(o:any,k:any,r:any):any {return Reflect.get(o,k,r);}
+export function __v8x_context_array_prototype():any {return Array.prototype;}
 export function __v8x_context_call(f:any,r:any,a:any):any {return f.apply(r,a);}
 export function __v8x_context_lexical(n:any,op:number,v:any):any {return scriptLexicalOperation(n,op,v);}
 export function __v8x_probe_script_score():number {return Number(globalThis.score);}
@@ -68,7 +69,8 @@ for (let index = 0; index < scripts.length; index++) {
     standaloneScriptCompletionImport: { module: "v8x:context", name: "__v8x_context_script_completion" },
     standaloneAllocationOwnerExport: "localOwns",
     standaloneGlobalThisImport: { module: "v8x:context", name: "__v8x_context_global_this",
-      owns: "__v8x_context_owns", get: "__v8x_context_get", exceptionTag: "__exn_tag" },
+      owns: "__v8x_context_owns", get: "__v8x_context_get",
+      arrayPrototype: "__v8x_context_array_prototype", exceptionTag: "__exn_tag" },
     link: ["v8x:context"],
   }));
 }

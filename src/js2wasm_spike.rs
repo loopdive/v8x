@@ -124,6 +124,7 @@ const CONTEXT_IMPORTS: &[&str] = &[
   "__v8x_context_call",
   "__v8x_context_owns",
   "__v8x_context_get",
+  "__v8x_context_array_prototype",
   "__v8x_context_lexical",
   "__v8x_context_script_completion",
 ];

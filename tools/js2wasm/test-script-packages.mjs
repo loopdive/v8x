@@ -19,6 +19,7 @@ test("trusted builder selects Script goal and native completion without dynamic 
   assert.equal(options.standaloneScriptCompletionImport.name, "__v8x_context_script_completion");
   assert.equal(options.standaloneScriptGetExport, "__v8x_script_get_export");
   assert.equal(options.standaloneScriptCallExport, "__v8x_script_call_export");
+  assert.equal(options.standaloneGlobalThisImport.arrayPrototype, "__v8x_context_array_prototype");
   options.link.push("unexpected");
   assert.deepEqual(scriptCompileOptions("x").link, ["v8x:context"]);
 });

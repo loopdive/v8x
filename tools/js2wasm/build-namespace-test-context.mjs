@@ -31,6 +31,7 @@ export function __v8x_context_global_this(): any { return globalThis; }
 export function __v8x_context_call(callable:any, receiver:any, args:any):any {
   return callable.apply(receiver,args);
 }
+export function __v8x_context_array_prototype():any {return Array.prototype;}
 export function __v8x_context_get(object:any, key:any, receiver:any):any {
   return Reflect.get(object,key,receiver);
 }
