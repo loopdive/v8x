@@ -4990,6 +4990,42 @@ pub extern "C" fn v8__Value__IntegerValue(
   unsafe { write_maybe(out, result) };
 }
 
+fn number_to_uint32(number: f64) -> u32 {
+  if !number.is_finite() || number == 0.0 {
+    return 0;
+  }
+  number.trunc().rem_euclid(4294967296.0) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__Uint32Value(
+  value: *const Value,
+  context: *const Context,
+  out: *mut Maybe<u32>,
+) {
+  unsafe {
+    write_maybe(
+      out,
+      coerce_numeric_value(value, context).map(number_to_uint32),
+    )
+  };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__Int32Value(
+  value: *const Value,
+  context: *const Context,
+  out: *mut Maybe<i32>,
+) {
+  unsafe {
+    write_maybe(
+      out,
+      coerce_numeric_value(value, context)
+        .map(|number| number_to_uint32(number) as i32),
+    )
+  };
+}
+
 fn coerce_numeric_value(
   value: *const Value,
   context: *const Context,

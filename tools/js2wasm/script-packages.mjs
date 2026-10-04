@@ -27,6 +27,8 @@ export function scriptCompileOptions(specifier) {
     standaloneScriptLexicalImport: { module: "v8x:context", name: "__v8x_context_lexical" },
     standaloneScriptCompletionImport: { module: "v8x:context", name: "__v8x_context_script_completion" },
     standaloneAllocationOwnerExport: "localOwns",
+    standaloneScriptGetExport: "__v8x_script_get_export",
+    standaloneScriptCallExport: "__v8x_script_call_export",
     standaloneGlobalThisImport: { module: "v8x:context", name: "__v8x_context_global_this",
       owns: "__v8x_context_owns", get: "__v8x_context_get", exceptionTag: "__exn_tag" },
     link: ["v8x:context"],

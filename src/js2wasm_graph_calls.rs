@@ -300,9 +300,26 @@ fn dispatch(
     .iter()
     .rev()
     .filter_map(|graph| {
-      graph
-        .get_func(&mut scope, matcher_name)
-        .map(|matcher| (*graph, matcher))
+      if let Some(matcher) = graph.get_func(&mut scope, matcher_name) {
+        Some((*graph, matcher, dispatch_name, false))
+      } else if matches!(
+        dispatch_name,
+        "__v8x_graph_get_export" | "__v8x_graph_call_export"
+      ) {
+        let script_export = if dispatch_name == "__v8x_graph_get_export" {
+          "__v8x_script_get_export"
+        } else {
+          "__v8x_script_call_export"
+        };
+        if graph.get_func(&mut scope, script_export).is_none() {
+          return None;
+        }
+        graph
+          .get_func(&mut scope, "localOwns")
+          .map(|matcher| (*graph, matcher, script_export, true))
+      } else {
+        None
+      }
     })
     .collect::<Vec<_>>();
   if routes.is_empty() {
@@ -318,12 +335,16 @@ fn dispatch(
   unwrap
     .call(&mut scope, &[Val::F64(handles[0].to_bits())], &mut callable)
     .map_err(|error| format!("unwrap graph callable: {error:#}"))?;
-  for (graph, matcher) in routes {
-    let mut matches = [Val::F64(0)];
+  for (graph, matcher, dispatch_name, script) in routes {
+    let mut matches = [if script { Val::I32(0) } else { Val::F64(0) }];
     matcher
       .call(&mut scope, &callable, &mut matches)
       .map_err(|error| format!("classify graph callable: {error:#}"))?;
-    if matches[0].f64() != Some(1.0) {
+    if if script {
+      matches[0].i32() != Some(1)
+    } else {
+      matches[0].f64() != Some(1.0)
+    } {
       continue;
     }
     let dispatch = graph

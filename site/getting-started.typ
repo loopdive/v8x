@@ -67,7 +67,7 @@ controls cover repeat execution, Context isolation and object/exception identity
 this is not full unchanged Deno conformance.
 The pinned core bootstrap runs before package lookup to create the Context owner.
 With a fresh optimized Context and five original Script packages, unchanged
-WebIDL checks pass 13 of 17; cross-module iterable behavior remains incomplete.
+WebIDL checks pass 15 of 17; Script-array conversion and getter-thrown errors remain incomplete.
 Arbitrary new classic scripts and REPL submissions still need general AOT
 compilation/cache routing. Build the full interpreter
 provider with a current js2wasm compiler, whose standalone target uses the

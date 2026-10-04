@@ -2400,6 +2400,36 @@ fn runs_source_bound_aot_scripts_through_public_api() {
 }
 
 #[test]
+fn native_integer_conversion_wraps_after_truncating() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  for (number, expected) in [
+    (0.0, 0),
+    (-0.0, 0),
+    (f64::NAN, 0),
+    (f64::INFINITY, 0),
+    (f64::NEG_INFINITY, 0),
+    (1.9, 1),
+    (-1.9, u32::MAX),
+    (2147483648.0, 2147483648),
+    (4294967296.0, 0),
+    (4294967297.0, 1),
+    (-4294967297.0, u32::MAX),
+  ] {
+    let value: v8::Local<v8::Value> = v8::Number::new(scope, number).into();
+    assert_eq!(value.uint32_value(scope), Some(expected));
+    assert_eq!(value.int32_value(scope), Some(expected as i32));
+  }
+  v8::tc_scope!(let caught, scope);
+  let symbol: v8::Local<v8::Value> = v8::Symbol::new(caught, None).into();
+  assert_eq!(symbol.uint32_value(caught), None);
+  assert!(caught.has_caught());
+}
+
+#[test]
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[ignore = "requires V8X_JS2WASM_CONTEXT_VALUES_WASM from test-context-value-bridge.mjs"]
 fn transfers_context_values_through_embedded_wasmtime() {

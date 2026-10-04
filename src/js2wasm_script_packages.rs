@@ -51,6 +51,51 @@ pub(super) fn validate(prepared: &PreparedModule) -> Result<(), String> {
       "AOT Script requires exactly one native completion sink".into(),
     );
   }
+  if let Some(get) = module.get_export("__v8x_script_get_export") {
+    let wasmtime::ExternType::Func(get) = get else {
+      return Err("AOT Script getter must be a function".into());
+    };
+    if get.params().len() != 2
+      || !get.params().all(|ty| ty.is_externref())
+      || get.results().len() != 1
+      || !get.results().all(|ty| ty.is_externref())
+    {
+      return Err(
+        "AOT Script getter must have (externref, externref) -> externref ABI"
+          .into(),
+      );
+    }
+    let Some(wasmtime::ExternType::Func(owns)) = module.get_export("localOwns")
+    else {
+      return Err("AOT Script getter requires allocation ownership".into());
+    };
+    if owns.params().len() != 1
+      || !owns.params().all(|ty| ty.is_externref())
+      || owns.results().len() != 1
+      || !owns
+        .results()
+        .all(|ty| matches!(ty, wasmtime::ValType::I32))
+    {
+      return Err(
+        "AOT Script ownership must have (externref) -> i32 ABI".into(),
+      );
+    }
+  }
+  if let Some(call) = module.get_export("__v8x_script_call_export") {
+    let wasmtime::ExternType::Func(call) = call else {
+      return Err("AOT Script call must be a function".into());
+    };
+    if call.params().len() != 3
+      || !call.params().all(|ty| ty.is_externref())
+      || call.results().len() != 1
+      || !call.results().all(|ty| ty.is_externref())
+    {
+      return Err("AOT Script call must have three externref parameters and one externref result".into());
+    }
+    if module.get_export("__v8x_script_get_export").is_none() {
+      return Err("AOT Script call requires validated getter/ownership".into());
+    }
+  }
   Ok(())
 }
 
@@ -102,49 +147,63 @@ mod tests {
   #[test]
   fn native_script_abi_rejects_wrong_signatures_and_interpreter_imports() {
     let shared = SharedDenoRuntime::new().unwrap();
-    let module = |sink_type, namespace: &str, init_params| {
-      let mut bytes = b"\0asm\x01\0\0\0".to_vec();
-      let mut section = |id, payload: Vec<u8>| {
-        bytes.extend([id, payload.len() as u8]);
-        bytes.extend(payload);
+    let module =
+      |sink_type, namespace: &str, init_params, extra: Option<&str>| {
+        let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+        let mut section = |id, payload: Vec<u8>| {
+          bytes.extend([id, payload.len() as u8]);
+          bytes.extend(payload);
+        };
+        let mut types = vec![2, 0x60, 1, sink_type, 0, 0x60, init_params];
+        if init_params == 1 {
+          types.push(0x7c);
+        }
+        types.push(0);
+        section(1, types);
+        let mut imports = vec![1, namespace.len() as u8];
+        imports.extend(namespace.as_bytes());
+        let name = "__v8x_context_script_completion";
+        imports.push(name.len() as u8);
+        imports.extend(name.as_bytes());
+        imports.extend([0, 0]);
+        section(2, imports);
+        section(3, vec![1, 1]);
+        let name = "__module_init";
+        let mut exports = vec![1, name.len() as u8];
+        exports.extend(name.as_bytes());
+        exports.extend([0, 1]);
+        if let Some(extra) = extra {
+          exports[0] = 2;
+          exports.push(extra.len() as u8);
+          exports.extend(extra.as_bytes());
+          exports.extend([0, 1]);
+        }
+        section(7, exports);
+        section(10, vec![1, 2, 0, 0x0b]);
+        PreparedModule::RuntimeEval(Module::new(&shared.engine, bytes).unwrap())
       };
-      let mut types = vec![2, 0x60, 1, sink_type, 0, 0x60, init_params];
-      if init_params == 1 {
-        types.push(0x7c);
-      }
-      types.push(0);
-      section(1, types);
-      let mut imports = vec![1, namespace.len() as u8];
-      imports.extend(namespace.as_bytes());
-      let name = "__v8x_context_script_completion";
-      imports.push(name.len() as u8);
-      imports.extend(name.as_bytes());
-      imports.extend([0, 0]);
-      section(2, imports);
-      section(3, vec![1, 1]);
-      let name = "__module_init";
-      let mut exports = vec![1, name.len() as u8];
-      exports.extend(name.as_bytes());
-      exports.extend([0, 1]);
-      section(7, exports);
-      section(10, vec![1, 2, 0, 0x0b]);
-      PreparedModule::RuntimeEval(Module::new(&shared.engine, bytes).unwrap())
-    };
-    validate(&module(0x6f, CONTEXT_IMPORT_MODULE, 0)).unwrap();
+    validate(&module(0x6f, CONTEXT_IMPORT_MODULE, 0, None)).unwrap();
     assert!(
-      validate(&module(0x7c, CONTEXT_IMPORT_MODULE, 0))
+      validate(&module(0x7c, CONTEXT_IMPORT_MODULE, 0, None))
         .unwrap_err()
         .contains("(externref)")
     );
     assert!(
-      validate(&module(0x6f, CONTEXT_IMPORT_MODULE, 1))
+      validate(&module(0x6f, CONTEXT_IMPORT_MODULE, 1, None))
         .unwrap_err()
         .contains("initializer")
     );
     assert!(
-      validate(&module(0x6f, RUNTIME_EVAL_IMPORT_MODULE, 0))
+      validate(&module(0x6f, RUNTIME_EVAL_IMPORT_MODULE, 0, None))
         .unwrap_err()
         .contains("forbids import")
     );
+    for export in ["__v8x_script_get_export", "__v8x_script_call_export"] {
+      assert!(
+        validate(&module(0x6f, CONTEXT_IMPORT_MODULE, 0, Some(export)))
+          .unwrap_err()
+          .contains("Script")
+      );
+    }
   }
 }
