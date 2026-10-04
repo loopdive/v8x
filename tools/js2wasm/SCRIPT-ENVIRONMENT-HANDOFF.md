@@ -1,5 +1,32 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Stop checkpoint
+
+Wrapped up at user request with existing draft PRs
+https://github.com/loopdive/v8x/pull/2 and
+https://github.com/loopdive/js2/pull/6468. Implementation/test heads before this
+docs checkpoint are adapter 4978e6bd83b411a7019a042d2380beaad0a597b6 and compiler
+b87dfe8cc95a8c9ceaab63b02f19bc109cdcf027. No CompileFunction code was started.
+No new benchmark or full-population result is claimed.
+
+Next factor same-store Script instantiation for both DenoRuntime and CallerRealm,
+using RealmAccess and realm_callback_access::with_owner during callbacks. Keep
+StoreData.aot_call_graphs retention, exception roots and outer completion state
+correct across nested function-factory execution. Then implement the vendored
+CompileFunction ABI using trusted packages binding exact body, parameter names
+and origin. Materialize a native owning-graph callable; verify Script closure
+classification. Reject unsupported context extensions and absent packages loudly.
+
+Entry points: src/js2wasm/mod.rs, src/js2wasm_spike.rs,
+src/js2wasm_realm_values.rs, src/js2wasm/realm_callback_access.rs,
+src/js2wasm/realm_objects.rs, src/js2wasm_script_packages.rs and
+tools/js2wasm/script-packages.mjs. Add native function/parameter/exception/reentry
+controls, replay unchanged test_lazy_loaded_script, then WebIDL, conversions and
+lazy-script-not-found regressions. Full graphs, snapshots, host capabilities,
+transport and matched comparative benchmarks remain required. Do not modify Deno
+or vendor tests, introduce an interpreter or silently emulate missing behavior.
+Preserve pre-existing .tmp/ files. Exact measured pins and artifacts follow.
+
 ## Fresh native evidence at the synchronized compiler
 
 Clean compiler 9bfee5a9c6893bc17313c226363648ebe1ccb6b3; builder adapter
