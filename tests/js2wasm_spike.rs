@@ -401,6 +401,139 @@ fn native_promise_rejection_reports_exact_identity_and_late_handler_once() {
 }
 
 #[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires freshly precompiled native Promise Context"]
+fn native_promise_mirror_retains_identity_and_single_rejection() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(record_promise_rejection);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+  let path =
+    std::env::var_os("V8X_JS2WASM_REJECTION_CONTEXT").expect("fresh Context");
+  v8::js2wasm_attach_precompiled_realm_for_test(&context, Path::new(&path))
+    .unwrap();
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "nativePromise").unwrap();
+  for pre_settled in [false, true] {
+    PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let reason = v8::Object::new(scope);
+    if pre_settled {
+      assert_eq!(resolver.reject(scope, reason.into()), Some(true));
+    }
+    assert_eq!(global.set(scope, key.into(), promise.into()), Some(true));
+    assert!(
+      global
+        .get(scope, key.into())
+        .unwrap()
+        .strict_equals(promise.into())
+    );
+    if !pre_settled {
+      assert_eq!(promise.state(), v8::PromiseState::Pending);
+    }
+    let identity = &*promise as *const v8::Promise as usize;
+    let reason_identity = &*reason as *const v8::Object as usize;
+    if !pre_settled {
+      assert_eq!(resolver.reject(scope, reason.into()), Some(true));
+    }
+    assert_eq!(promise.state(), v8::PromiseState::Rejected);
+    assert!(promise.result(scope).strict_equals(reason.into()));
+    scope.perform_microtask_checkpoint();
+    PROMISE_REJECTION_EVENTS.with(|events| {
+      assert_eq!(
+        &*events.borrow(),
+        &[(
+          v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+          identity,
+          Some(reason_identity)
+        ),]
+      )
+    });
+    let attach_key = v8::String::new(scope, "__v8x_test_attach").unwrap();
+    let attach = v8::Local::<v8::Function>::try_from(
+      global.get(scope, attach_key.into()).unwrap(),
+    )
+    .unwrap();
+    let derived = v8::Local::<v8::Promise>::try_from(
+      attach
+        .call(scope, global.into(), &[promise.into()])
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(derived.state(), v8::PromiseState::Pending);
+    scope.perform_microtask_checkpoint();
+    assert_eq!(derived.state(), v8::PromiseState::Fulfilled);
+    assert_eq!(derived.result(scope).number_value(scope), Some(42.0));
+    PROMISE_REJECTION_EVENTS.with(|events| {
+      assert_eq!(
+        &*events.borrow(),
+        &[
+          (
+            v8::PromiseRejectEvent::PromiseRejectWithNoHandler,
+            identity,
+            Some(reason_identity)
+          ),
+          (
+            v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+            identity,
+            None
+          ),
+        ]
+      )
+    });
+  }
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  for pre_settled in [false, true] {
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let result = v8::Object::new(scope);
+    if pre_settled {
+      assert_eq!(resolver.resolve(scope, result.into()), Some(true));
+    }
+    assert_eq!(global.set(scope, key.into(), promise.into()), Some(true));
+    if !pre_settled {
+      assert_eq!(resolver.resolve(scope, result.into()), Some(true));
+    }
+    assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+    assert!(promise.result(scope).strict_equals(result.into()));
+    let attach_key = v8::String::new(scope, "__v8x_test_attach").unwrap();
+    let attach = v8::Local::<v8::Function>::try_from(
+      global.get(scope, attach_key.into()).unwrap(),
+    )
+    .unwrap();
+    let derived = v8::Local::<v8::Promise>::try_from(
+      attach
+        .call(scope, global.into(), &[promise.into()])
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(derived.state(), v8::PromiseState::Pending);
+    scope.perform_microtask_checkpoint();
+    assert_eq!(derived.state(), v8::PromiseState::Fulfilled);
+    assert!(derived.result(scope).strict_equals(result.into()));
+  }
+  PROMISE_REJECTION_EVENTS.with(|events| assert!(events.borrow().is_empty()));
+  // Repeat a refused transfer: no stale binding may make the second attempt pass.
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  let unsupported = v8::BigInt::new_from_i64(scope, 1);
+  assert_eq!(resolver.resolve(scope, unsupported.into()), Some(true));
+  for _ in 0..2 {
+    v8::tc_scope!(let caught, scope);
+    assert_ne!(global.set(caught, key.into(), promise.into()), Some(true));
+    assert!(caught.has_caught());
+  }
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
 fn native_promise_rejection_respects_early_handlers_and_explicit_handling() {
   initialize();
   PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());

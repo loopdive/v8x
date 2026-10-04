@@ -13,6 +13,9 @@ pub(super) fn transfer(
   owner: &Rc<RefCell<DenoRuntime>>,
   host: *const Promise,
 ) -> Result<RealmValue, String> {
+  // Inspect settled payload graphs before publishing cyclic identity bindings.
+  // Unsupported nested values must not leave a pending mirror behind.
+  host_values::validate(owner, host.cast())?;
   let (settlement, result, handled) = unsafe { promise_state(host) }
     .map(|state| (state.settlement, state.result, state.handled))
     .ok_or_else(|| "native Promise disappeared".to_string())?;
@@ -38,13 +41,26 @@ pub(super) fn transfer(
   unsafe { isolate_state(current_isolate()) }
     .native_promise_mirrors
     .push(mirror.clone());
-  if handled {
-    access
-      .realm_promise_handler(access.realm_check(promise)?, true)?
-      .ok_or_else(|| "native Promise copy lacks handler ABI".to_string())?;
-  }
-  if settlement != PromiseSettlement::Pending {
-    synchronize(access, &mirror, result, settlement)?;
+  let initialized = (|| -> Result<(), String> {
+    if handled {
+      access
+        .realm_promise_handler(access.realm_check(promise)?, true)?
+        .ok_or_else(|| "native Promise copy lacks handler ABI".to_string())?;
+    }
+    if settlement != PromiseSettlement::Pending {
+      synchronize(access, &mirror, result, settlement)?;
+    }
+    Ok(())
+  })();
+  if let Err(error) = initialized {
+    let state = unsafe { isolate_state(current_isolate()) };
+    state
+      .realm_objects
+      .retain(|entry| entry.host != host.cast());
+    state
+      .native_promise_mirrors
+      .retain(|entry| entry.host != host);
+    return Err(error);
   }
   Ok(promise)
 }

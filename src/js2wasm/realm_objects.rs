@@ -867,6 +867,9 @@ fn attach_realm_for_test(
   runtime: Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
 ) -> Result<(), String> {
   runtime.borrow_mut().configure_heap_limit(current_isolate());
+  runtime
+    .borrow_mut()
+    .configure_realm_owner(Rc::as_ptr(&runtime) as usize)?;
   let value = runtime.borrow_mut().realm_global()?;
   let global = v8__Context__Global(context);
   if global.is_null() {

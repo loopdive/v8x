@@ -39,8 +39,25 @@ fn snapshot(
         | HeapValue::Number(_)
         | HeapValue::String(_)
         | HeapValue::Symbol(_)
-        | HeapValue::Promise(_),
+        | HeapValue::Error { .. }
+        | HeapValue::ArrayBuffer(_),
       ) => continue,
+      Some(HeapValue::Promise(state)) => {
+        if state.settlement != PromiseSettlement::Pending {
+          pending.push(state.result);
+        }
+        continue;
+      }
+      Some(HeapValue::TypedArray(state)) => {
+        if !state.properties.is_empty() {
+          return Err(
+            "host typed-array custom properties are not transferable yet"
+              .into(),
+          );
+        }
+        pending.push(state.buffer.cast());
+        continue;
+      }
       Some(HeapValue::Object(state)) => {
         prototype = state.prototype;
         if let Some(value) = prototype {
@@ -107,6 +124,13 @@ pub(super) fn transfer(
   root: *const Value,
 ) -> Result<RealmValue, String> {
   transfer_into(runtime, owner, root, None)
+}
+
+pub(super) fn validate(
+  owner: &Rc<RefCell<DenoRuntime>>,
+  root: *const Value,
+) -> Result<(), String> {
+  snapshot(owner, root).map(|_| ())
 }
 
 // A seeded root uses an existing realm object rather than creating a detached

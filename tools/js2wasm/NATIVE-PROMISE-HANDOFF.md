@@ -1,5 +1,43 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Native validation continuation
+
+The native mirror now has an executed compiler-free control: 1/1, 48 filtered
+/49, covering fulfillment/rejection before and after transfer, exact native
+Promise and payload identity, queued compiled reactions, one rejection event,
+one late-handler event and repeated refusal of unsupported BigInt payloads.
+Runtime compilations and interpreter instances are zero. Existing compiled
+rejection controls pass 3/3, 46 filtered /49, including reentry and cross-realm
+enqueue ordering. These are adapter controls, not unchanged Deno coverage.
+
+Settled payload graphs are inspected before publication, including Promise
+payload edges. Errors, buffers and supported typed arrays remain transferable.
+Failed mirror initialization removes its identity binding and registry entry.
+Test Context attachment now publishes runtime owner identity. Settling an
+already-published mirror with an unsupported value and arbitrary Wasmtime-call
+failure rollback still need broader handling; do not claim full transactionality.
+
+Fresh small Context: `/private/tmp/deno-native-promise.6898GB/context.cwasm`,
+19,883,016 bytes, SHA256
+`52530264bf83966d5049409029fa4b7819dc1e881758c775fd8e3f7234e23123`.
+Raw Context SHA256 `507b7f9135de83edafeb26f57e26b3dccbe9cbb55ede856415226577374896d7`;
+optimized SHA256 `6f91022d2ed54e8d72074bda2e92a509cc17dccbf0b2826f75dc5b39ff1563c3`.
+Built with compiler implementation 74ed7007fb and adapter bridge 830a3f8;
+Binaryen 125 `-O3 --all-features --disable-custom-descriptors -g --no-inline=*`,
+Wasmtime 47.0.3 build-side precompile test passed 1/1, 73 filtered /74 (108.83s).
+
+Replay command in adapter checkout:
+
+```sh
+V8X_JS2WASM_REJECTION_CONTEXT=/private/tmp/deno-native-promise.6898GB/context.cwasm target/debug/deps/js2wasm_spike-e7e456f13e693536 --exact native_promise_mirror_retains_identity_and_single_rejection --ignored --nocapture --test-threads=1
+```
+
+Next: rebuild full clean pinned Deno Context with the new bridge, then replay
+the original missing-graph rejection and positive main/side tests. The full
+Context is still old. No new unchanged Deno result or performance measurement.
+
+## Original checkpoint (historical)
+
 Unfinished implementation, not merge-ready. Paired PRs:
 https://github.com/loopdive/v8x/pull/2 and https://github.com/loopdive/js2/pull/6468.
 Compiler checkpoint: 74ed7007fb. Preceding verified adapter: 37923f2.
