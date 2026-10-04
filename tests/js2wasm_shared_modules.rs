@@ -10,7 +10,10 @@ fn resolve_shared<'s>(
   _referrer: v8::Local<'s, v8::Module>,
 ) -> Option<v8::Local<'s, v8::Module>> {
   v8::callback_scope!(unsafe scope, context);
-  assert_eq!(specifier.to_rust_string_lossy(scope), "./shared.js");
+  assert!(matches!(
+    specifier.to_rust_string_lossy(scope).as_str(),
+    "./shared.js" | "./shared.ts"
+  ));
   Some(v8::Local::new(
     scope,
     &context.get_slot::<SharedModule>()?.0,
@@ -27,6 +30,114 @@ fn compile<'s>(
   let origin = origin(scope, resource.into());
   let mut source = v8::script_compiler::Source::new(text, Some(&origin));
   v8::script_compiler::compile_module(scope, &mut source).unwrap()
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound typed module graphs"]
+fn aot_typed_dependency_reads_original_numeric_export() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let shared = compile(
+    scope,
+    "file:///typed-module/shared.ts",
+    include_str!("fixtures/js2wasm-typed-module/shared.ts"),
+  );
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, shared))));
+  for name in ["first", "second"] {
+    let entry = compile(
+      scope,
+      &format!("file:///typed-module/{name}.ts"),
+      if name == "first" {
+        include_str!("fixtures/js2wasm-typed-module/first.ts")
+      } else {
+        include_str!("fixtures/js2wasm-typed-module/second.ts")
+      },
+    );
+    assert_eq!(entry.instantiate_module(scope, resolve_shared), Some(true));
+    let result = entry.evaluate(scope).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+    assert_eq!(
+      promise.state(),
+      v8::PromiseState::Fulfilled,
+      "{name} evaluation"
+    );
+    let shared_namespace =
+      v8::Local::<v8::Object>::try_from(shared.get_module_namespace()).unwrap();
+    let bump_key = v8::String::new(scope, "bump").unwrap();
+    let bump = v8::Local::<v8::Function>::try_from(
+      shared_namespace.get(scope, bump_key.into()).unwrap(),
+    )
+    .unwrap();
+    if name == "first" {
+      assert_eq!(
+        bump
+          .call(scope, shared_namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(78.0)
+      );
+    }
+    if name == "second" {
+      let namespace =
+        v8::Local::<v8::Object>::try_from(entry.get_module_namespace())
+          .unwrap();
+      let key = v8::String::new(scope, "observed").unwrap();
+      assert_eq!(
+        namespace
+          .get(scope, key.into())
+          .unwrap()
+          .number_value(scope),
+        Some(81.0)
+      );
+      let key = v8::String::new(scope, "read").unwrap();
+      let function = v8::Local::<v8::Function>::try_from(
+        namespace.get(scope, key.into()).unwrap(),
+      )
+      .unwrap();
+      assert_eq!(
+        function
+          .call(scope, namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(81.0)
+      );
+      assert_eq!(
+        bump
+          .call(scope, shared_namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(79.0)
+      );
+      assert_eq!(
+        function
+          .call(scope, namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(82.0)
+      );
+      let key = v8::String::new(scope, "observed").unwrap();
+      assert_eq!(
+        namespace
+          .get(scope, key.into())
+          .unwrap()
+          .number_value(scope),
+        Some(81.0)
+      );
+    }
+  }
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
 }
 
 #[test]

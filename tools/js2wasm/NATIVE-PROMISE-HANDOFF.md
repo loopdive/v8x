@@ -1,5 +1,51 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Typed live imports through the native module lifecycle
+
+New test `shared_modules::aot_typed_dependency_reads_original_numeric_export`
+passes **1/1**, 52 filtered /53. Raw .ts sources are packaged without JS
+transpilation. After first graph evaluation, a native call mutates the original
+dependency from 77 to 78. Second graph initialization and its reader return 81.
+A second native bump to 79 makes the reader return 82; the initialized export
+remains 81. Compiler and interpreter runtime counters are zero.
+This prevents copied globals or compile-time folding from passing the control.
+
+The earlier compiler lower-level NaN probe is not reproduced here. A public
+compiler control under Node/V8 fails on untransported foreign native string
+keys and passes with explicit key transport. Native getter currently forwards
+raw references and succeeds on these fixtures. Do not credit a production
+transport fix or claim the adapter already translates keys.
+
+Clean compiler c5b251bc5f, packages `/private/tmp/deno-typed-live-module.Ijsoss`,
+Binaryen 125 O3, Wasmtime 47.0.3. The small Context is unchanged. Build:
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-typed-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-typed-live-module.Ijsoss
+```
+
+Replay from this adapter checkout:
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-typed-live-module.Ijsoss target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_typed_dependency_reads_original_numeric_export --ignored --nocapture --test-threads=1
+```
+
+| Entry | Binding | Native SHA256 | Optimized Wasm SHA256 |
+| --- | --- | --- | --- |
+| first | 9a739035354e76d4cac68e93c6417e4bfe233b40b18b88107acd46978e532831 | 72631428024e839ad0e613dd5acad9e602a3c85709ca8283e72290d7b28e6da0 | c702978e9c92e9b642905801ebf22abc61b3874925f510dbaf68194ea54d9c57 |
+| second | deb7babc6071cd1c536da22163b55ea65a965dc53aa5400a0cdd3b01c5508a58 | 133c6eb2cb01d88377e0ba2dc2b1ea1fe7db31756d915d08ed5058d48569d434 | 1b6e7451e3db572ec63eed4c8bca89f738e4e7b57d0a64cd52a9d57e2934f945 |
+
+Missing graph directory `missing-graphs` under this package root fails **0/1**,
+exit 101, on missing exact binding and rejected first evaluation. Existing
+shared-module test passes **1/1**, 52 filtered /53, using clean c5b251bc5f
+packages `/private/tmp/deno-module-prepared-checkpoint.UMyMtG`.
+Ordinary controls pass 34 with 18 ignored and 1 environment-dependent Script
+test filtered /53. Without the correct filter that test fails on its missing
+V8X_JS2WASM_DENO_CORE_FIXTURES input, not a backend regression.
+
+No native prepared-IR floor, full Deno population, snapshots or fresh benchmark
+is claimed. Compiler-free typed live imports are verified for this fixture,
+not complete Deno integration.
+
 ## Clean selected unchanged Deno replay
 
 All five selected unchanged Deno module tests pass **5/5**, each **1/1** with
