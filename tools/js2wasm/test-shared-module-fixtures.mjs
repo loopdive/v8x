@@ -32,4 +32,10 @@ test("shared fixture preserves single evaluation, namespace identity and live im
   assert.equal(second.namespace.mutateNamed(), 5);
   assert.equal(second.namespace.receiverNamespace(), shared.namespace);
   assert.equal(second.namespace.receiverNamed(), undefined);
+  assert.equal(second.namespace.spreadNamespace(), 10);
+  assert.equal(second.namespace.spreadNamed(), 15);
+  assert.equal(second.namespace.spreadMixed(), 20);
+  assert.equal(second.namespace.spreadNested(), 65);
+  assert.equal(second.namespace.spreadInvalid(), 1);
+  assert.equal(shared.namespace.count, 65);
 });

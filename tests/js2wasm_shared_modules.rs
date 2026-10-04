@@ -190,6 +190,28 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
     }
   }
 
+  for (name, expected) in [
+    ("spreadNamespace", 10.0),
+    ("spreadNamed", 15.0),
+    ("spreadMixed", 20.0),
+    ("spreadNested", 65.0),
+    ("spreadInvalid", 1.0),
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected),
+      "{name}"
+    );
+  }
+
   // A different Module with the same URL must not reuse the previous binding.
   let replacement = compile(
     scope,
@@ -226,7 +248,7 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
       .get(scope, count.into())
       .unwrap()
       .number_value(scope),
-    Some(5.0)
+    Some(65.0)
   );
   assert_eq!(
     global.get(scope, runs.into()).unwrap().number_value(scope),

@@ -1,5 +1,33 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Imported spread calls verified
+
+Compiler `c6dbe274881465e039490d94ec35bbc76ded7437` fixes imported spread
+calls that previously bypassed the original allocation owner. Strict native
+iteration builds a local argument vector; inline literals use native vector
+carriers. Fresh shared-module packages pass **1/1**, 51 filtered /52, covering
+namespace/named, empty/mixed, nested spread arguments and non-iterable rejection.
+Final runtime compilations and interpreter instantiations are zero. Node V8
+control passes **1/1**; ordinary native controls remain 34 passed, 17 ignored,
+1 filtered /52. No new unchanged Deno or performance result is claimed.
+
+Packages: `/private/tmp/deno-module-spread.JjnDxv`, clean committed compiler,
+Binaryen 125 O3 /Wasmtime 47.0.3. Fixtures changed, so the previous owner-only
+packages below are historical and do not match the rebuilt native test.
+
+| Entry | Binding digest | Optimized Wasm SHA256 | Native SHA256 |
+| --- | --- | --- | --- |
+| first | 9492db3feaba6bd436243124e9035685d36f9ce5d84f416fe8b0c1768248ec94 | 7dc45e5cb25ca74028b6e4810cc094f9462787f637ca5fddd88967e24e443ebe | 9ab1653d9151c512ea593c3d5c082d08d2d8a8d4ed49e54d027a3f77d454897d |
+| second | 709e0943115c3db89bd1ec5118fc813a59b5c76ca4c78f0c2d2c47523d6f1d46 | cbaecf7cf841f7ff0eb893999eafcbcb68a14e4515a1db60441fab47bbd3018c | 444df2544f217ac6fddd005a5c54451886d63d8f7c13b2b6e7951efbc5b7b1f8 |
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-spread.JjnDxv target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_shared_dependency_keeps_namespace_live_exports_and_single_execution --ignored --nocapture --test-threads=1
+```
+
+Next: optional imported calls, getter/iterator ordering controls, prepared IR
+initializer guards, cycles/TDZ and cached failures, then clean unchanged Deno
+artifacts and broader tests. Both PRs remain incomplete drafts.
+
 ## Owner-aware Module calls verified
 
 ### Clean shared-module artifact replay
