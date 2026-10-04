@@ -1,5 +1,40 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## First source dependency failure: failing lifecycle control
+
+New ignored public test
+`shared_modules::aot_first_dependency_failure_preserves_execution_states`
+reproduces 0/1 (54 filtered /55) with packages built from clean compiler
+c5b251bc5f. The executing prefix remains Instantiated instead of Evaluated
+after a later source dependency throws. The final test also requires original
+object identity, prefix side effect once, untouched later module, exact cached
+entry Promise and zero compiler/interpreter activity; those later assertions
+are not yet reached. An earlier assertion order also found Context global Get
+returned None for the thrown token. Do not claim the full control passes.
+Identical fixture sources under Node V8 pass 1/1 (prefix once, later skipped,
+same cached thrown object). Ordinary native controls: 35 passed, 19 ignored,
+1 environment-dependent Script control filtered /55.
+
+Build-side builder `tools/js2wasm/build-failed-module-test-packages.mjs` retains
+raw source fixtures. Binaryen 125 O3, Wasmtime 47.0.3, existing small Context.
+Package directory `/private/tmp/deno-first-failure.8HQICU`; binding digest
+be525cd78823a793aa884e091cf1753e2e03edd299e7dd918285299501ab7f43.
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-failed-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-first-failure.8HQICU
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-first-failure.8HQICU target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_first_dependency_failure_preserves_execution_states --ignored --nocapture --test-threads=1
+```
+
+Paired compiler adds default-off evaluationHooks with () -> void imports
+`<namespace capability>_enter` / `_complete`. Prepared events are inside the
+owner guard before body sealing; legacy enter repeats per source entry and
+must be idempotent, complete occurs after the last source entry. Native sidecar
+does not enable these imports yet. Next bind exact Module/Context events,
+publish completed namespaces before later failure, and propagate active source
+errors without changing untouched sibling state. Current namespace registry
+is published only at the end of entry initialization. Property-read capability
+calls are not reliable execution boundaries and must not be used as events.
+
 ## Cached dependency failure checkpoint
 
 Continuation: a fresh leading synthetic dependency now executes its callback
