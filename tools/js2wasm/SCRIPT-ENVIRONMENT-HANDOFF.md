@@ -222,3 +222,84 @@ from these fixture results. Both existing PRs remain draft.
 Site text is updated for this public path. Rendering is still unverified:
 `make -C site all` fails because `/opt/homebrew/bin/typst` is absent. No Deno
 or vendor test was modified and no conformance baseline was advanced.
+
+## Wrap-up checkpoint: fresh Context and unchanged WebIDL (2026-10-04)
+
+This section supersedes the earlier bootstrap ordering and outstanding fresh
+Context rebuild statements. The audited, pinned prelinked core bootstrap now
+runs before generic package lookup because it creates the Context owner that
+independent Scripts require. Original Script state is cloned before callbacks.
+Application packages still run before legacy usage matchers; a missing configured
+package does not silently fall back. With the same older artifact, unchanged
+`webidl::tests::any` changes from 0/1 to 1/1, isolating this ordering repair.
+
+Fresh build directory: `/private/tmp/deno-current-aot-build.q7MC1w`.
+Clean source pins are compiler `3d4c1dfdaf61f101cb07c7139b5a3ed65052d520`,
+adapter `064423ac4254cc7d2c74e6ad4e1939f8e85c9e8c`, and Deno
+`1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`. The runtime test binary includes
+the bootstrap fix in this checkpoint, which is newer than the adapter build pin.
+The raw provenance manifest is not edited to pretend otherwise.
+
+The strict runtime/AOT builder produced `deno-core.wasm` (2,709,108 bytes),
+SHA-256 `189b1d4aa344bcfb7aba7ddf6ef952cd40d9d0dbed87f1f7972473c80a1b2fe9`,
+without interpreter imports. Binaryen 125 `wasm-opt --no-inline -O3
+'--pass-arg=no-inline@__new_*' --all-features --disable-custom-descriptors -g`
+produced `deno-core.opt.wasm` (2,008,044 bytes), SHA-256
+`008a11dd2cda5df5f39c711e94becc550a7af8a41314499712460bbc505fba73`.
+Native packaging passed 1/1 (64 filtered) in 208.38 seconds and produced
+`deno-core.cwasm` (43,907,288 bytes), SHA-256
+`4fc5bbaa0227c00e3b45ab5a893f34c850ab52c861fb4df318db1f0c6c27d284`.
+These are artifact sizes and build cost, not RSS, deployment startup or throughput.
+The original raw provenance and optimized native attestation remain separate.
+
+`build-webidl-script-packages.mjs` reads the five original literal Script inputs
+from the pinned Git version of `libs/core/webidl.rs`, preserving bytes and resource
+names. The count is floored at exactly five. Unsupported expressions fail loudly;
+the extractor is not a general Rust parser. Packages and input manifest are at
+`deno-current-aot-build.q7MC1w/webidl-scripts`. Packaging now supplies a local
+attestation output, as required by a precompiler built with the Deno POC feature.
+
+The unchanged Deno checkout is `/private/tmp/deno-upstream-conformance.H6HA4g/deno`;
+only Cargo.toml/Cargo.lock are patched. Test binary:
+`target/debug/deps/deno_core-87206ac56a2fccad`. With the fresh Context, both the
+unconfigured baseline and the five-package candidate report 13/17 passing,
+four failing, zero ignored, 414 filtered out of 431. Baseline took 21.56 seconds;
+candidate took 20.99 seconds. These timings are not performance benchmarks.
+The candidate replaces unknown-source refusals with real assertion failures:
+
+- `dictionary`: field `b` fails conversion to a sequence.
+- `sequence_check_next_method_once`: sequence conversion fails.
+- `sequence_next_method_must_be_callable`: expected next-method error is absent.
+- `sequence_propagates_next_getter_exception`: expected `boom` is absent.
+
+No passing gain or baseline update is claimed. Public AOT Script fixture remains
+1/1 (37 filtered). Combined build-side controls pass 15/15. Previous ordinary
+adapter results of 30 passing/eight ignored and native ABI controls 2/2 were not
+rerun as a full suite after this ordering fix.
+
+Resume by probing owning-module property/call dispatch, not changing Deno tests.
+Scripts are retained in `aot_call_graphs` but do not export
+`__v8x_graph_can_access_export`/`__v8x_graph_get_export` or the call dispatch pair.
+`realm_objects::get` therefore falls back to the Context getter for foreign
+Script-created objects. This is a lead, not an attributed root cause. Well-known
+Symbol IDs are already stable (iterator is 1); do not blame separate counters
+without a probe. Existing Module dispatch is in `js2wasm_graph_calls.rs` and
+compiler `examples/v8x-js2wasm-spike/compile-graph.ts`. Do not append Module
+exports to original Script sources: preserve Script goal and declarations.
+Investigate compiler-owned native interop exports and existing host inspection
+helpers, prove attribution with controls, then rerun the unchanged 17 tests.
+
+Remaining scope: full unchanged deno_core population, native host capabilities,
+BigInt/lossless UTF-16 result adoption, pure Program completion, runtime AOT
+source routing, shared-library factoring and fresh footprint/performance measures.
+No new benchmark is credited. Existing draft PRs are loopdive/v8x#2 and
+loopdive/js2#6468; the compiler PR is stacked on
+`codex/4376-deno-callback-construction-20260930`, not main. Preserve adapter
+`.tmp/` and unrelated compiler worktree edits. No test process is left running.
+
+Reproduce the unchanged candidate with the built binary:
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-current-aot-build.q7MC1w/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-current-aot-build.q7MC1w/webidl-scripts target/debug/deps/deno_core-87206ac56a2fccad webidl::tests:: --nocapture --test-threads=1
+node --test tools/js2wasm/test-runtime-compile-options.mjs tools/js2wasm/test-script-packages.mjs tools/js2wasm/test-rust-script-literals.mjs
+```

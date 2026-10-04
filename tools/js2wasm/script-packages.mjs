@@ -54,9 +54,11 @@ export async function packageScript(compilerPath, precompiler, specifier, source
   const staging = mkdtempSync(join(output, ".script-package-"));
   const raw = join(staging, "script.wasm");
   const native = join(staging, "script.cwasm");
+  const attestation = join(staging, "script.attestation.json");
   writeFileSync(raw, result.binary);
   const run = spawnSync(resolve(precompiler), ["--exact", "precompiles_exact_deno_core_artifact", "--nocapture"], {
-    encoding: "utf8", env: { ...process.env, V8X_JS2WASM_DENO_CORE_WASM: raw, V8X_JS2WASM_DENO_CORE_AOT_OUTPUT: native },
+    encoding: "utf8", env: { ...process.env, V8X_JS2WASM_DENO_CORE_WASM: raw,
+      V8X_JS2WASM_DENO_CORE_AOT_OUTPUT: native, V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION: attestation },
   });
   assert.equal(run.status, 0, run.error?.message ?? run.stdout + run.stderr);
   assert.match(run.stdout, /1 passed; 0 failed/, "precompiler must execute one real packaging test");

@@ -64,8 +64,12 @@ binding, validates native completion signatures before instantiation, and adopts
 results and thrown values through the owning Context. A configured missing or
 mismatched package fails without interpreter fallback. Focused compiler-free
 controls cover repeat execution, Context isolation and object/exception identity;
-this is not full unchanged Deno conformance. Arbitrary new classic scripts and
-REPL submissions still need general AOT compilation/cache routing. Build the full interpreter
+this is not full unchanged Deno conformance.
+The pinned core bootstrap runs before package lookup to create the Context owner.
+With a fresh optimized Context and five original Script packages, unchanged
+WebIDL checks pass 13 of 17; cross-module iterable behavior remains incomplete.
+Arbitrary new classic scripts and REPL submissions still need general AOT
+compilation/cache routing. Build the full interpreter
 provider with a current js2wasm compiler, whose standalone target uses the
 standardized `try_table` encoding accepted by Wasmtime, statically binds Acorn,
 and preserves an ordinary `call; return` boundary instead of `return_call` for

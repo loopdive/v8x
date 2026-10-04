@@ -6495,10 +6495,22 @@ pub extern "C" fn v8__Script__Run(
   let Some(HeapValue::Script(state)) = (unsafe { heap_value(script) }) else {
     return ptr::null();
   };
+  // Bootstrap creates the Context owner needed by independent AOT Scripts.
+  // Only the audited pinned core sources enter this prelinked transaction.
+  // Clone before either path can allocate through a synchronous host callback.
+  let state = ScriptState {
+    source: state.source.clone(),
+    specifier: state.specifier.clone(),
+  };
+  match run_prelinked_deno_core_script(context, &state) {
+    Ok(true) => return v8__Undefined(current_isolate()).cast(),
+    Ok(false) => {}
+    Err(error) => {
+      eprintln!("v8x/js2wasm: {error}");
+      return ptr::null();
+    }
+  }
   if crate::js2wasm_spike::script_packages::configured() {
-    // Clone before entering Wasmtime: callbacks can allocate into the heap.
-    let source = state.source.clone();
-    let specifier = state.specifier.clone();
     let result = (|| {
       let owner = match unsafe { heap_value(context) } {
         Some(HeapValue::Context(state)) => state
@@ -6511,7 +6523,7 @@ pub extern "C" fn v8__Script__Run(
       .ok_or("AOT Script has no live Context runtime")?;
       with_runtime_owner(&owner, "AOT Script execution", |runtime| {
         let (normal, value) = runtime
-          .run_aot_script(&specifier, &source)?
+          .run_aot_script(&state.specifier, &state.source)?
           .ok_or("AOT Script package configuration disappeared")?;
         let value = realm_objects::from_realm(runtime, &owner, value)?;
         Ok((normal, value))
@@ -6539,16 +6551,8 @@ pub extern "C" fn v8__Script__Run(
       }
     };
   }
-  match run_prelinked_deno_core_script(context, state) {
-    Ok(true) => return v8__Undefined(current_isolate()).cast(),
-    Ok(false) => {}
-    Err(error) => {
-      eprintln!("v8x/js2wasm: {error}");
-      return ptr::null();
-    }
-  }
   #[cfg(not(feature = "js2wasm_deno_poc_replay"))]
-  match run_runtime_deno_usage_stage(context, state) {
+  match run_runtime_deno_usage_stage(context, &state) {
     Ok(Some(result)) => {
       return materialize_deno_script_result(&state.source, result);
     }
@@ -6561,7 +6565,7 @@ pub extern "C" fn v8__Script__Run(
       return ptr::null();
     }
   }
-  match run_prelinked_deno_usage_script(context, state) {
+  match run_prelinked_deno_usage_script(context, &state) {
     Ok(true) => return v8__Undefined(current_isolate()).cast(),
     Ok(false) => {}
     Err(error) => {
