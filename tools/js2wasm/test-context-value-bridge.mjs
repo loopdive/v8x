@@ -57,6 +57,7 @@ Object.defineProperty(numericNameFunction, "name", { value: 17, configurable: tr
 (globalThis as any).exerciseSharedBuffer = function(host:any,view:any):number { view[0]=7; host(); return view[0]; };
 (globalThis as any).throwSharedBuffer = function(view:any):void { view[0]=11; throw new Error("buffer throw"); };
 (globalThis as any).identity = function (value: any): any { return value; };
+(globalThis as any).liveExportGetter = function (): any { return (globalThis as any).liveExportSlot; };
 (globalThis as any).registeredSymbol = Symbol.for("errorAdditionalPropertyKeys");
 (globalThis as any).freshSymbolA = Symbol("same");
 (globalThis as any).freshSymbolB = Symbol("same");
@@ -264,6 +265,36 @@ for (let flags = 0; flags <= 7; flags++)
   e.__v8x_value_define_data(e.__v8x_value_object(), integerKey, positiveZero, flags);
 assert.throws(() => e.__v8x_value_define_data(obj, integerKey, positiveZero, 8));
 console.log("PASS: integer validation, NaN/infinities/signed zero, and descriptor flags");
+const liveObject = e.__v8x_value_object(), liveKey = str("live-export");
+const originalExport = e.__v8x_value_object(), replacementExport = e.__v8x_value_object();
+let currentExport = originalExport, getterCalls = 0;
+activeHostCall = (id, receiver, args) => {
+  assert.equal(id, 2001);
+  assert.equal(receiver, liveObject);
+  assert.equal(e.__v8x_value_as_number(e.__v8x_value_get(args, str("length"))), 0);
+  getterCalls++;
+  return currentExport;
+};
+const liveGetter = e.__v8x_value_host_function(2001);
+e.__v8x_value_define_getter(liveObject, liveKey, liveGetter, 4);
+assert.equal(getterCalls, 0, "defining a getter must not read the export");
+assert.equal(e.__v8x_value_get(liveObject, liveKey), originalExport);
+currentExport = replacementExport;
+assert.equal(e.__v8x_value_get(liveObject, liveKey), replacementExport);
+const liveDescriptor = e.__v8x_value_descriptor(liveObject, liveKey);
+assert.equal(e.__v8x_value_get(liveDescriptor, str("get")), liveGetter);
+assert.equal(e.__v8x_value_kind(e.__v8x_value_get(liveDescriptor, str("set"))), 0);
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(liveDescriptor, str("enumerable"))), 1);
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(liveDescriptor, str("configurable"))), 0);
+assert.throws(() => e.__v8x_value_set(liveObject, liveKey, originalExport));
+assert.throws(() => e.__v8x_value_define_data(liveObject, liveKey, originalExport, 0));
+assert.equal(e.__v8x_value_get(liveObject, liveKey), replacementExport);
+for (const invalid of [-1, 1, 3, 5, 7, 8, 0.5, NaN, Infinity])
+  assert.throws(() => e.__v8x_value_define_getter(e.__v8x_value_object(), liveKey, liveGetter, invalid));
+assert.throws(() => e.__v8x_value_define_getter(e.__v8x_value_object(), liveKey, originalExport, 4));
+assert.equal(getterCalls, 3);
+activeHostCall = undefined;
+console.log("PASS: live getter identity, deferred reads, descriptor flags and write protection");
 activeHostCall = (id, receiver, args) => {
   const arg = i => e.__v8x_value_get(args,str(String(i)));
   if (id === 1002) return e.__v8x_value_number(e.__v8x_value_as_number(arg(0))+1);

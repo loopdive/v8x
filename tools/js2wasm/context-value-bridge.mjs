@@ -244,6 +244,15 @@ export function __v8x_value_define_data(owner: number, key: number, value: numbe
 export function __v8x_value_call(callable: number, receiver: number, args: number): number {
   return __v8xKeepValue(__v8xValueAt(callable).apply(__v8xValueAt(receiver), __v8xValueAt(args)));
 }
+export function __v8x_value_define_getter(owner: number, key: number, getter: number, flags: number): void {
+  if (flags < 0 || flags > 6 || flags !== Math.floor(flags) || (flags & 1) !== 0)
+    throw new RangeError("invalid getter attributes");
+  const callable = __v8xValueAt(getter);
+  if (typeof callable !== "function") throw new TypeError("getter must be callable");
+  Object.defineProperty(__v8xValueAt(owner), __v8xValueAt(key), {
+    get: callable, enumerable: (flags & 2) === 0, configurable: (flags & 4) === 0,
+  });
+}
 export function __v8x_value_utf16_length(id: number): number {
   const value = __v8xValueAt(id);
   if (typeof value !== "string") throw new TypeError("expected string handle");
@@ -305,6 +314,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_descriptor",
   "__v8x_value_set",
   "__v8x_value_define_data",
+  "__v8x_value_define_getter",
   "__v8x_value_call",
   "__v8x_value_utf16_length",
   "__v8x_value_string_storage",

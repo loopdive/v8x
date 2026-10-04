@@ -572,6 +572,24 @@ pub(crate) trait RealmAccess {
     Ok(())
   }
 
+  fn realm_define_getter(
+    &mut self,
+    object: RealmValue,
+    key: RealmValue,
+    getter: RealmValue,
+    attributes: u32,
+  ) -> Result<(), String> {
+    let object = self.realm_check(object)?;
+    let key = self.realm_check(key)?;
+    let getter = self.realm_check(getter)?;
+    self.realm_raw(
+      "__v8x_value_define_getter",
+      &[object, key, getter, attributes as f64],
+      false,
+    )?;
+    Ok(())
+  }
+
   fn realm_define_many(
     &mut self,
     object: RealmValue,
@@ -688,6 +706,29 @@ pub fn js2wasm_test_realm_values(path: &Path) -> Result<(), String> {
     runtime.realm_string(&"identity".encode_utf16().collect::<Vec<_>>())?;
   let callable = runtime.realm_get(global, name)?;
   assert_eq!(runtime.realm_call(callable, global, args)?, obj);
+  if runtime.realm_has_export("__v8x_value_define_getter") {
+    let getter_name = runtime
+      .realm_string(&"liveExportGetter".encode_utf16().collect::<Vec<_>>())?;
+    let getter = runtime.realm_get(global, getter_name)?;
+    let slot = runtime
+      .realm_string(&"liveExportSlot".encode_utf16().collect::<Vec<_>>())?;
+    let property = runtime
+      .realm_string(&"live-export".encode_utf16().collect::<Vec<_>>())?;
+    let receiver = runtime.realm_object()?;
+    runtime.realm_set(global, slot, obj)?;
+    runtime.realm_define_getter(receiver, property, getter, 4)?;
+    assert_eq!(runtime.realm_get(receiver, property)?, obj);
+    let replacement = runtime.realm_object()?;
+    runtime.realm_set(global, slot, replacement)?;
+    assert_eq!(runtime.realm_get(receiver, property)?, replacement);
+    runtime.store.gc(None).map_err(|error| error.to_string())?;
+    assert_eq!(runtime.realm_get(receiver, property)?, replacement);
+    assert!(runtime.realm_set(receiver, property, obj).is_err());
+    assert_eq!(runtime.realm_get(receiver, property)?, replacement);
+    eprintln!(
+      "PASS: native live getter dispatch, replacement identity and GC retention"
+    );
+  }
   let negative_zero = runtime.realm_number(-0.0)?;
   assert_eq!(
     runtime.realm_as_number(negative_zero)?.to_bits(),

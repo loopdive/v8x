@@ -41,6 +41,11 @@ dependency prevents this shortcut so its execution order is retained.
 Leading synthetic dependencies execute their native callbacks before source
 graph packaging. A first callback failure retains the original exception too.
 Successful synthetic/source graph composition is not yet supported.
+The Context value bridge can define live getter properties backed by native
+callbacks. Compiled-Wasm and Wasmtime controls verify deferred reads, replacement
+object identity and write protection. This is an accessor transport primitive,
+not a complete module namespace: namespace data descriptors, native export slots
+and authenticated mixed-graph packaging remain unfinished.
 Opt-in source lifecycle packages publish a completed dependency's namespace
 before a later source fails. Completed dependencies remain usable, executing
 sources and their consumers retain the original exception, and later siblings
