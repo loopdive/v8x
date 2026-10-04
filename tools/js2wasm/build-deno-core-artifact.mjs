@@ -30,7 +30,7 @@ const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
-const RUNTIME_JS2_REF = "b37d12382a9a2632130c8b9b2088a1f14470a0fa";
+const RUNTIME_JS2_REF = "cafc1769ccb45074064c5ca88f0262aae1388aa4";
 export function compilerRefForProfile(profile) {
   if (profile === "poc") return EXPECTED_JS2_REF;
   if (profile === "runtime") return RUNTIME_JS2_REF;
@@ -1048,7 +1048,14 @@ export function __v8x_context_call(callable: any, receiver: any, args: any): any
 `;
 
   if (profile === "runtime") {
+    files[`${appRoot}/script-lexical-provider.ts`] = readFileSync(
+      join(js2, "examples/v8x-js2wasm-spike/script-lexical-provider.ts"), "utf8",
+    );
     files[`${appRoot}/entry.ts`] += `
+import { scriptLexicalOperation } from "./script-lexical-provider.ts";
+export function __v8x_context_lexical(name:any, operation:number, value:any):any {
+  return scriptLexicalOperation(name,operation,value);
+}
 export function __v8x_context_get(object: any, key: any, receiver: any): any {
   return Reflect.get(object, key, receiver);
 }
@@ -1091,6 +1098,7 @@ export function __v8x_deno_core_namespace_handle(): number {
 
   const graphInputs = [
     ...lockSources,
+    ...(profile === "runtime" ? [recordInput("generated/script-lexical-provider.ts", Buffer.from(files[`${appRoot}/script-lexical-provider.ts`]), { role: "context-lexical-provider" })] : []),
     ...(profile === "runtime" ? [recordInput("generated/staged-core.ts", Buffer.from(files[`${appRoot}/staged-core.ts`]), { role: "deferred-core-scripts" })] : []),
     ...(profile === "runtime" ? ["core-bindings.ts", "core-namespace.ts"].map(name =>
       recordInput(`generated/${name}`, Buffer.from(files[`${appRoot}/${name}`]), { role: "native-core-namespace" })) : []),

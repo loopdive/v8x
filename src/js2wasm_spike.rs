@@ -56,6 +56,12 @@ pub(crate) use realm_values::{
   bootstrap_context_for_test, load_graph_for_test, load_realm_for_test,
 };
 static NEXT_REALM_ID: AtomicUsize = AtomicUsize::new(1);
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[path = "js2wasm_script_environment_tests.rs"]
+mod script_environment_tests;
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[doc(hidden)]
+pub use script_environment_tests::precompiled_scripts_share_context_lexicals as js2wasm_test_precompiled_script_environment;
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[path = "js2wasm_context_store_tests.rs"]
 mod context_store_tests;
@@ -116,6 +122,7 @@ const CONTEXT_IMPORTS: &[&str] = &[
   "__v8x_context_call",
   "__v8x_context_owns",
   "__v8x_context_get",
+  "__v8x_context_lexical",
 ];
 const CONTEXT_SYMBOL_GLOBALS: &[&str] = &[
   "__symbol_counter",

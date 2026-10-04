@@ -160,3 +160,9 @@ also passes the retained live-mutation iterator control after the compiler's
 first-class values factory was changed to read the original receiver live.
 The bounded compiler-free adapter suite passes 31 tests with six ignored.
 This does not establish full WebIDL or Deno compatibility.
+
+Context artifacts also export a lexical operation for independently compiled
+Scripts. The linker resolves it against the retained Context, without requiring
+a runtime-eval provider. A separate native fixture covers persistent lexical
+state; it is not the public Script compilation path. General completion values,
+typed lexical bindings and unchanged Deno conformance remain incomplete.

@@ -2212,6 +2212,15 @@ fn context_store_preserves_primary_after_initialization_error() {
 }
 
 #[test]
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[ignore = "requires separately precompiled Script environment fixtures"]
+fn precompiled_scripts_share_context_lexicals_without_interpreter() {
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR")
+    .expect("trusted local precompiled Script environment fixtures");
+  v8::js2wasm_test_precompiled_script_environment(Path::new(&path)).unwrap();
+}
+
+#[test]
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[ignore = "requires V8X_JS2WASM_CONTEXT_VALUES_WASM from test-context-value-bridge.mjs"]
 fn transfers_context_values_through_embedded_wasmtime() {
