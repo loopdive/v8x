@@ -2,6 +2,29 @@
 
 ## Owner-aware Module calls verified
 
+### Clean shared-module artifact replay
+
+Clean detached compiler `e840ca2ce08b8bc970c60c907ddd23dd0abae9bf`, adapter
+builder/native implementation `90323467c858f278db8294e8d068121f311146da`.
+Rebuilt shared packages in `/private/tmp/deno-module-owners-clean.WynXRu`,
+Binaryen 125 O3 /Wasmtime 47.0.3. Expanded native control passes **1/1**,
+51 filtered /52, including final zero compiler/interpreter counters.
+This clean receipt covers the shared-module control, not the five Deno packages.
+
+| Entry | Binding digest | Optimized Wasm SHA256 | Native SHA256 |
+| --- | --- | --- | --- |
+| first | 16173d5026e480a4bd48ea39dc737035903323c69199ae9013700996314520f0 | 8d0de7aa4e091b97200fe02a98a0843ca6a5f13e709b626c8a51abe5621a3de0 | 7a9715fe5ac0821598149b26df91dbb6c2cb9f4267ec23c62c439c44834f33f8 |
+| second | c10d47605cf2ed1389e52c98fc37b1fda72e7c86601eacc166b9a7ccb9dbbea5 | d45414789500a3d28bea6ca2b0ba2a4ed99e581c4a4ba4e541dbb7172996f89d | 886c90659420c8b4f5b4d92108918692adea82b3afe9cb816ed4173ea75ade49 |
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-owners-clean.WynXRu target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_shared_dependency_keeps_namespace_live_exports_and_single_execution --ignored --nocapture --test-threads=1
+```
+
+Compiler focused controls pass **11/11**; typechecking, scoped lint, formatting
+and source ratchet command chain pass. Script/graph/extractor controls pass
+**10/10**. Typst remains unavailable. Clean Deno artifact replay and remaining
+integration work are still next.
+
 The expanded shared dependency control now passes **1/1**, 51 filtered /52,
 including live reads, mutations, namespace/bare receivers, same-URL distinct
 Modules and zero compiler/interpreter counts. Compiler function-value reads
