@@ -1,5 +1,74 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Final handoff: native namespace carrier is unfinished
+
+Wrap-up requested by the user. Existing draft PRs are adapter
+https://github.com/loopdive/v8x/pull/2 (base main) and compiler
+https://github.com/loopdive/js2/pull/6468 (stacked on
+codex/4376-deno-callback-construction-20260930). Neither is merge-ready.
+
+src/js2wasm/realm_synthetic_namespace.rs retains exact Module/export-key
+identity in isolate-owned callback data and reads the authoritative native
+slot, not a copied export value. Construction publishes one Context-owned
+carrier only after completion. The namespace capability invokes this path for
+evaluated synthetic Modules. Mixed collect_graph still loudly refuses synthetic
+Modules, so this is not successful mixed-graph integration.
+
+The first accessor-carrier native test passed 1/1 (57 filtered /58): replacement
+objects, callable/Symbol/undefined exports, stable namespace and evaluation
+Promise identity, one callback, zero runtime compilation/interpreters. That
+implementation was then replaced by a Proxy carrier requiring the new optional
+__v8x_value_module_namespace ABI. The earlier native pass does NOT verify the
+final implementation. No fresh precompiled Context exists for the final ABI.
+
+Current compiled-Wasm test fails own-key ordering. It expects
+["10", "2", "__proto__", "value"] and receives
+["2", "10", "__proto__", "value"]. Live reads, null prototype and live
+data-descriptor assertions pass before it; subsequent write/branding/
+extensibility assertions are not reached. Do not remove or relax this assertion.
+Reproduction uses historical clean compiler
+4a98f06ae239f6e32b65e52a4b4de3bab8eb88e1, so first check the current compiler
+before assigning the defect to current compiler code.
+
+Run from /private/tmp/deno-promise-full.X2WdwN/js2:
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/test-context-value-bridge.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/deno-live-getter.TkzjTi/namespace-context.wasm
+```
+
+The builder writes only after every assertion succeeds. Existing
+namespace-context.wasm predates this expanded failure and is not final evidence.
+The older context.cwasm only has the live-getter ABI, not the Proxy carrier.
+It is 19,572,240 bytes, SHA256
+cf39cff68342c28fa380fe9f00b1603694f06e4f80383c401b2b43a57d69dd65,
+built from the optimized getter artifact below with Wasmtime 47.0.3.
+
+Final compiler-free runner builds. Ordinary controls: 35 passed, 0 failed,
+22 ignored, 1 environment-dependent core Script test filtered /58. Node
+fixture/binding/V8 controls: 10/10. cargo fmt and diff whitespace checks pass.
+Filtered adapter library: 17/17, 16 filtered /33. Node syntax checks pass.
+No new unchanged Deno population result or benchmark. Typst remains unavailable.
+
+Resume order:
+
+1. Diagnose default sort versus Proxy ownKeys normalization without weakening
+   namespace semantics. Pass the whole compiled control.
+2. wasm-opt O3 and precompile a fresh Context with the final ABI. Replay
+   shared_modules::native_synthetic_namespace_reads_authoritative_export_slots
+   through the actual namespace capability. Add missing-ABI, cross-Context and
+   reflection negative controls. Current final native test is explicitly ignored
+   until this artifact is supplied.
+3. Authenticate native export declarations in graph metadata, never snapshot
+   values or run generated placeholder initializers. Run native callbacks at
+   the correct dependency position through active Caller access.
+4. Make aot_source_imports_live_synthetic_exports pass, then replay unchanged
+   Deno tests. Broader host services, snapshots, cycles/TDZ, full conformance,
+   packaging and matched benchmarks remain incomplete.
+
+Preserve adapter .tmp/ and unrelated compiler dirt. Do not stash, clean, prune,
+kill unrelated tests or merge/push main. Historical sections below retain earlier
+receipts, not final-carrier claims.
+
 ## Live getter transport primitive implemented and verified
 
 The Context bridge now exports __v8x_value_define_getter and RealmAccess

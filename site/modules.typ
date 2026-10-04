@@ -44,8 +44,10 @@ Successful synthetic/source graph composition is not yet supported.
 The Context value bridge can define live getter properties backed by native
 callbacks. Compiled-Wasm and Wasmtime controls verify deferred reads, replacement
 object identity and write protection. This is an accessor transport primitive,
-not a complete module namespace: namespace data descriptors, native export slots
-and authenticated mixed-graph packaging remain unfinished.
+not a complete module namespace. An experimental carrier reads authoritative
+native export slots and supplies live data descriptors, but its compiled
+own-key ordering control fails. The final carrier's native replay and
+authenticated mixed-graph packaging remain unfinished.
 Opt-in source lifecycle packages publish a completed dependency's namespace
 before a later source fails. Completed dependencies remain usable, executing
 sources and their consumers retain the original exception, and later siblings

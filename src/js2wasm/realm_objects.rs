@@ -14,10 +14,37 @@ mod property_names;
 mod stack_trace;
 #[path = "realm_symbols.rs"]
 mod symbols;
+#[path = "realm_synthetic_namespace.rs"]
+mod synthetic_namespace;
 pub(super) use host_callbacks::HostCallbackBinding;
 pub(crate) use host_callbacks::invoke_host;
 pub(super) use native_promises::NativePromiseMirror;
 pub(super) use native_promises::settle as settle_native_promise_mirror;
+
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[doc(hidden)]
+pub fn js2wasm_bind_synthetic_namespace_for_test(
+  context: &Context,
+  module: &Module,
+) -> Result<(), String> {
+  let owner = binding(v8__Context__Global(context))
+    .ok_or("native namespace test requires an attached Context")?
+    .runtime;
+  callback_access::with_owner(&owner, |access| match existing_module_namespace(
+    context,
+    module,
+    Rc::as_ptr(&owner) as usize,
+    access,
+  )? {
+    ModuleNamespaceCapability::Namespace(_) => Ok(()),
+    ModuleNamespaceCapability::Pending => {
+      Err("native namespace requires an evaluated Module".into())
+    }
+    ModuleNamespaceCapability::Exception(_) => {
+      Err("native namespace requires successful evaluation".into())
+    }
+  })
+}
 
 pub(crate) fn instantiate_callback_graph(
   owner: &Rc<RefCell<DenoRuntime>>,
@@ -141,6 +168,10 @@ pub(crate) fn existing_module_namespace(
   }
   if state.status != STATUS_EVALUATED {
     return Ok(ModuleNamespaceCapability::Pending);
+  }
+  if state.synthetic.is_some() {
+    return synthetic_namespace::bind(access, &owner, module)
+      .map(ModuleNamespaceCapability::Namespace);
   }
   let previous = binding(state.namespace).ok_or_else(|| {
     "evaluated Module has no canonical namespace binding".to_string()

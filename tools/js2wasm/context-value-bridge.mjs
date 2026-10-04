@@ -253,6 +253,52 @@ export function __v8x_value_define_getter(owner: number, key: number, getter: nu
     get: callable, enumerable: (flags & 2) === 0, configurable: (flags & 4) === 0,
   });
 }
+export function __v8x_value_module_namespace(keys: number, callbacks: number): number {
+  const names: any = __v8xValueAt(keys);
+  const getters: any = __v8xValueAt(callbacks);
+  if (!Array.isArray(names) || !Array.isArray(getters) || names.length !== getters.length)
+    throw new TypeError("namespace requires matching name and getter arrays");
+  const target: any = Object.create(null);
+  const provider: any = Object.create(null);
+  const exports = new Map<any, boolean>();
+  const ordered: any[] = [];
+  for (let index = 0; index < names.length; index++) {
+    const name: any = names[index];
+    const getter: any = getters[index];
+    if (typeof name !== "string" || typeof getter !== "function" || exports.has(name))
+      throw new TypeError("invalid native namespace export declaration");
+    exports.set(name, true);
+    ordered.push(name);
+    Object.defineProperty(provider, name, { get: getter, enumerable: true, configurable: false });
+    // A namespace descriptor is a writable data descriptor even though [[Set]]
+    // always refuses. The proxy reads its current value from the native slot.
+    Object.defineProperty(target, name, { value: undefined, writable: true, enumerable: true, configurable: false });
+  }
+  ordered.sort();
+  ordered.push(Symbol.toStringTag);
+  Object.defineProperty(target, Symbol.toStringTag, { value: "Module", writable: false, enumerable: false, configurable: false });
+  Object.preventExtensions(target);
+  const namespace: any = new Proxy(target, {
+    get(_target: any, key: any): any {
+      return exports.has(key) ? Reflect.get(provider, key) : Reflect.get(target, key);
+    },
+    set(): boolean { return false; },
+    ownKeys(): any { return ordered.slice(); },
+    getOwnPropertyDescriptor(_target: any, key: any): any {
+      if (exports.has(key)) return { value: Reflect.get(provider, key), writable: true, enumerable: true, configurable: false };
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    defineProperty(_target: any, key: any, descriptor: any): boolean {
+      if (!exports.has(key)) return Reflect.defineProperty(target, key, descriptor);
+      if (descriptor.configurable === true || descriptor.enumerable === false || descriptor.writable === false ||
+          "get" in descriptor || "set" in descriptor) return false;
+      return !("value" in descriptor) || Object.is(descriptor.value, Reflect.get(provider, key));
+    },
+    deleteProperty(_target: any, key: any): boolean { return !Reflect.has(target, key); },
+    setPrototypeOf(_target: any, prototype: any): boolean { return prototype === null; },
+  });
+  return __v8xKeepValue(namespace);
+}
 export function __v8x_value_utf16_length(id: number): number {
   const value = __v8xValueAt(id);
   if (typeof value !== "string") throw new TypeError("expected string handle");
@@ -315,6 +361,7 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_set",
   "__v8x_value_define_data",
   "__v8x_value_define_getter",
+  "__v8x_value_module_namespace",
   "__v8x_value_call",
   "__v8x_value_utf16_length",
   "__v8x_value_string_storage",

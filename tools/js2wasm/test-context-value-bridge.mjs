@@ -58,6 +58,8 @@ Object.defineProperty(numericNameFunction, "name", { value: 17, configurable: tr
 (globalThis as any).throwSharedBuffer = function(view:any):void { view[0]=11; throw new Error("buffer throw"); };
 (globalThis as any).identity = function (value: any): any { return value; };
 (globalThis as any).liveExportGetter = function (): any { return (globalThis as any).liveExportSlot; };
+(globalThis as any).namespaceTag = Symbol.toStringTag;
+(globalThis as any).namespaceExtensible = function(value:any):boolean {return Object.isExtensible(value);};
 (globalThis as any).registeredSymbol = Symbol.for("errorAdditionalPropertyKeys");
 (globalThis as any).freshSymbolA = Symbol("same");
 (globalThis as any).freshSymbolB = Symbol("same");
@@ -295,6 +297,39 @@ assert.throws(() => e.__v8x_value_define_getter(e.__v8x_value_object(), liveKey,
 assert.equal(getterCalls, 3);
 activeHostCall = undefined;
 console.log("PASS: live getter identity, deferred reads, descriptor flags and write protection");
+const namespaceNames = e.__v8x_value_array(), namespaceGetters = e.__v8x_value_array();
+for (const [index, name] of ["2", "10", "__proto__", "value"].entries()) {
+  e.__v8x_value_set(namespaceNames, str(String(index)), str(name));
+  e.__v8x_value_set(namespaceGetters, str(String(index)), e.__v8x_value_host_function(3001));
+}
+currentExport = originalExport;
+activeHostCall = id => { assert.equal(id, 3001); return currentExport; };
+const namespace = e.__v8x_value_module_namespace(namespaceNames, namespaceGetters);
+assert.equal(e.__v8x_value_get_prototype(namespace), nil);
+assert.equal(e.__v8x_value_get(namespace, str("value")), originalExport);
+currentExport = replacementExport;
+assert.equal(e.__v8x_value_get(namespace, str("value")), replacementExport);
+const namespaceDescriptor = e.__v8x_value_descriptor(namespace, str("value"));
+assert.equal(e.__v8x_value_get(namespaceDescriptor, str("value")), replacementExport);
+assert.equal(e.__v8x_value_kind(e.__v8x_value_get(namespaceDescriptor, str("get"))), 0);
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(namespaceDescriptor, str("writable"))), 1);
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(namespaceDescriptor, str("enumerable"))), 1);
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_get(namespaceDescriptor, str("configurable"))), 0);
+const ownNames = e.__v8x_value_own_names(namespace);
+assert.deepEqual([0,1,2,3].map(index => decode(e.__v8x_value_get(ownNames, str(String(index))))), ["10","2","__proto__","value"]);
+const tag = e.__v8x_value_get(global, str("namespaceTag"));
+assert.equal(decode(e.__v8x_value_get(namespace, tag)), "Module");
+assert.throws(() => e.__v8x_value_set(namespace, str("value"), originalExport));
+assert.throws(() => e.__v8x_value_set(namespace, str("added"), originalExport));
+assert.throws(() => e.__v8x_value_define_data(namespace, str("value"), originalExport, 4));
+assert.throws(() => e.__v8x_value_define_data(namespace, str("value"), replacementExport, 5));
+e.__v8x_value_define_data(namespace, str("value"), replacementExport, 4);
+assert.equal(e.__v8x_value_get(namespace, str("value")), replacementExport);
+const extensibleArgs = e.__v8x_value_array();
+e.__v8x_value_set(extensibleArgs, str("0"), namespace);
+assert.equal(e.__v8x_value_as_boolean(e.__v8x_value_call(e.__v8x_value_get(global, str("namespaceExtensible")), global, extensibleArgs)), 0);
+activeHostCall = undefined;
+console.log("PASS: live namespace data descriptors, sorted keys, null prototype, branding and write restrictions");
 activeHostCall = (id, receiver, args) => {
   const arg = i => e.__v8x_value_get(args,str(String(i)));
   if (id === 1002) return e.__v8x_value_number(e.__v8x_value_as_number(arg(0))+1);

@@ -145,17 +145,20 @@ pub use js2wasm_spike::{
 
 #[cfg(feature = "engine_js2wasm")]
 mod js2wasm;
-#[cfg(all(
-  feature = "engine_js2wasm",
-  not(feature = "js2wasm_deno_poc_replay")
-))]
-#[doc(hidden)]
-pub use js2wasm::realm_objects::js2wasm_attach_precompiled_realm_for_test;
 #[cfg(feature = "js2wasm_runtime_compile")]
 #[doc(hidden)]
 pub use js2wasm::realm_objects::{
   js2wasm_attach_graph_for_test, js2wasm_attach_realm_for_test,
   js2wasm_bootstrap_context_for_test, js2wasm_run_core_script_for_test,
+};
+#[cfg(all(
+  feature = "engine_js2wasm",
+  not(feature = "js2wasm_deno_poc_replay")
+))]
+#[doc(hidden)]
+pub use js2wasm::realm_objects::{
+  js2wasm_attach_precompiled_realm_for_test,
+  js2wasm_bind_synthetic_namespace_for_test,
 };
 #[cfg(all(
   feature = "engine_js2wasm",

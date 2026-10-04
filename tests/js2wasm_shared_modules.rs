@@ -16,6 +16,166 @@ struct NativeSourceDependency {
   calls: Cell<u32>,
 }
 
+fn native_export_evaluation<'s>(
+  context: v8::Local<'s, v8::Context>,
+  module: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Value>> {
+  v8::callback_scope!(unsafe scope, context);
+  let state = context.get_slot::<NativeSourceDependency>().unwrap();
+  state.calls.set(state.calls.get() + 1);
+  let marker = v8::Local::new(scope, &state.marker);
+  let key = v8::String::new(scope, "value").unwrap();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, marker),
+    Some(true)
+  );
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let undefined = v8::undefined(scope);
+  assert_eq!(resolver.resolve(scope, undefined.into()), Some(true));
+  Some(resolver.get_promise(scope).into())
+}
+
+#[test]
+#[ignore = "requires precompiled Context with live getter bridge"]
+fn native_synthetic_namespace_reads_authoritative_export_slots() {
+  unsafe extern "C" fn exported_callback(
+    info: *const v8::FunctionCallbackInfo,
+  ) {
+    let parts = unsafe { &*info }.get_parts();
+    let mut result = parts.return_value;
+    result.set_double(42.0);
+  }
+  fn resolve<'s>(
+    _context: v8::Local<'s, v8::Context>,
+    _specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    panic!("synthetic Module cannot have imports");
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let marker: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  let name = v8::String::new(scope, "custom:native").unwrap();
+  let key = v8::String::new(scope, "value").unwrap();
+  let module = v8::Module::create_synthetic_module(
+    scope,
+    name,
+    &[key],
+    native_export_evaluation,
+  );
+  context.set_slot(Rc::new(NativeSourceDependency {
+    module: v8::Global::new(scope, module),
+    marker: v8::Global::new(scope, marker),
+    calls: Cell::new(0),
+  }));
+  assert_eq!(module.instantiate_module(scope, resolve), Some(true));
+  assert!(
+    v8::js2wasm_bind_synthetic_namespace_for_test(&context, &module).is_err()
+  );
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    0
+  );
+  let result = module.evaluate(scope).unwrap();
+  assert_eq!(
+    v8::Local::<v8::Promise>::try_from(result).unwrap().state(),
+    v8::PromiseState::Fulfilled
+  );
+  let namespace = module.get_module_namespace();
+  v8::js2wasm_bind_synthetic_namespace_for_test(&context, &module).unwrap();
+  let namespace_object = v8::Local::<v8::Object>::try_from(namespace).unwrap();
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(marker)
+  );
+  assert!(namespace_object.get_prototype(scope).unwrap().is_null());
+  let replacement: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, replacement),
+    Some(true)
+  );
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  assert_eq!(namespace_object.set(scope, key.into(), marker), Some(false));
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  let callable = v8::Function::new_raw(scope, exported_callback).unwrap();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, callable.into()),
+    Some(true)
+  );
+  let observed = namespace_object.get(scope, key.into()).unwrap();
+  assert!(observed.strict_equals(callable.into()));
+  let observed = v8::Local::<v8::Function>::try_from(observed).unwrap();
+  assert_eq!(
+    observed
+      .call(scope, namespace, &[])
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let symbol: v8::Local<v8::Value> = v8::Symbol::new(scope, None).into();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, symbol),
+    Some(true)
+  );
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(symbol)
+  );
+  let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, undefined),
+    Some(true)
+  );
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .is_undefined()
+  );
+  v8::js2wasm_bind_synthetic_namespace_for_test(&context, &module).unwrap();
+  assert!(module.get_module_namespace().strict_equals(namespace));
+  assert!(module.evaluate(scope).unwrap().strict_equals(result));
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    1
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 #[test]
 #[ignore = "requires trusted Context and source-bound synthetic/source graph"]
 fn aot_source_imports_live_synthetic_exports() {

@@ -590,6 +590,16 @@ pub(crate) trait RealmAccess {
     Ok(())
   }
 
+  fn realm_module_namespace(
+    &mut self,
+    names: RealmValue,
+    getters: RealmValue,
+  ) -> Result<RealmValue, String> {
+    let names = self.realm_check(names)?;
+    let getters = self.realm_check(getters)?;
+    self.realm_handle("__v8x_value_module_namespace", &[names, getters])
+  }
+
   fn realm_define_many(
     &mut self,
     object: RealmValue,
