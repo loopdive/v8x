@@ -27,8 +27,11 @@ export function scriptCompileOptions(specifier) {
     standaloneScriptLexicalImport: { module: "v8x:context", name: "__v8x_context_lexical" },
     standaloneScriptCompletionImport: { module: "v8x:context", name: "__v8x_context_script_completion" },
     standaloneAllocationOwnerExport: "localOwns",
+    standaloneSymbolState: {module:"v8x:context"},
     standaloneScriptGetExport: "__v8x_script_get_export",
     standaloneScriptCallExport: "__v8x_script_call_export",
+    standaloneScriptOwnNamesExport: "__v8x_script_own_names_export",
+    standaloneScriptReflectionExports: { ownSymbols: "__v8x_script_own_symbols_export", descriptor: "__v8x_script_descriptor_export" },
     standaloneGlobalThisImport: { module: "v8x:context", name: "__v8x_context_global_this",
       owns: "__v8x_context_owns", get: "__v8x_context_get",
       arrayPrototype: "__v8x_context_array_prototype", exceptionTag: "__exn_tag" },
@@ -56,11 +59,21 @@ export async function packageScript(compilerPath, precompiler, specifier, source
   // Stage on the destination filesystem so publication can use atomic rename.
   const staging = mkdtempSync(join(output, ".script-package-"));
   const raw = join(staging, "script.wasm");
+  const optimized = join(staging, "script.opt.wasm");
   const native = join(staging, "script.cwasm");
   const attestation = join(staging, "script.attestation.json");
   writeFileSync(raw, result.binary);
+  const optimizer = join(resolve(compilerPath), "node_modules/binaryen/bin/wasm-opt");
+  const version = spawnSync(process.execPath, [optimizer, "--version"], {encoding:"utf8"});
+  assert.equal(version.status, 0, version.error?.message ?? version.stdout + version.stderr);
+  const optimize = spawnSync(process.execPath, [optimizer, raw, "--no-inline", "-O3", "--pass-arg=no-inline@__new_*", "--all-features", "--disable-custom-descriptors", "-g", "-o", optimized], {encoding:"utf8"});
+  assert.equal(optimize.status, 0, optimize.error?.message ?? optimize.stdout + optimize.stderr);
+  const optimizedBytes = readFileSync(optimized);
+  const optimizedModule = new WebAssembly.Module(optimizedBytes);
+  assertScriptABI(optimizedModule);
+  assert.deepEqual(WebAssembly.Module.imports(optimizedModule), WebAssembly.Module.imports(new WebAssembly.Module(result.binary)), "optimizer changed native Script imports");
   const run = spawnSync(resolve(precompiler), ["--exact", "precompiles_exact_deno_core_artifact", "--nocapture"], {
-    encoding: "utf8", env: { ...process.env, V8X_JS2WASM_DENO_CORE_WASM: raw,
+    encoding: "utf8", env: { ...process.env, V8X_JS2WASM_DENO_CORE_WASM: optimized,
       V8X_JS2WASM_DENO_CORE_AOT_OUTPUT: native, V8X_JS2WASM_DENO_CORE_AOT_ATTESTATION: attestation },
   });
   assert.equal(run.status, 0, run.error?.message ?? run.stdout + run.stderr);
@@ -73,7 +86,9 @@ export async function packageScript(compilerPath, precompiler, specifier, source
   writeFileSync(join(staging, "binding"), `graph-sha256 ${digest}\nartifact-sha256 ${nativeDigest}\n`);
   writeFileSync(join(staging, "manifest"), JSON.stringify({ goal: "script", completionABI: 1,
     specifier, source, sourceSha256: createHash("sha256").update(source).digest("hex"),
-    wasmSha256: createHash("sha256").update(result.binary).digest("hex"), nativeSha256: nativeDigest, options }, null, 2) + "\n");
+    rawWasmSha256: createHash("sha256").update(result.binary).digest("hex"),
+    wasmSha256: createHash("sha256").update(optimizedBytes).digest("hex"),
+    optimizer: version.stdout.trim(), nativeSha256: nativeDigest, options }, null, 2) + "\n");
   renameSync(native, target);
   renameSync(join(staging, "manifest"), target + ".json");
   renameSync(join(staging, "binding"), target + ".graph-sha256");

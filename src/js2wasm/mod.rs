@@ -3391,6 +3391,14 @@ pub extern "C" fn v8__Object__GetOwnPropertyNames(
   if object.is_null() {
     return ptr::null();
   }
+  if let Some(result) =
+    realm_objects::own_property_names(object, filter, key_conversion)
+  {
+    return result.unwrap_or_else(|error| {
+      realm_objects::report(error);
+      ptr::null()
+    });
+  }
 
   let isolate = current_isolate();
   let mut elements = Vec::new();

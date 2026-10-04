@@ -45,6 +45,18 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_try_graph_reflection(
+    &mut self,
+    handles: &[f64],
+    operation: &str,
+  ) -> Result<Option<(bool, f64)>, String> {
+    graph_calls::reflection(
+      &mut self.store,
+      self.realm_instance,
+      handles,
+      operation,
+    )
+  }
   fn realm_native_error_snapshot(
     &mut self,
     handle: f64,
@@ -203,6 +215,13 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_try_graph_reflection(
+    &mut self,
+    _handles: &[f64],
+    _operation: &str,
+  ) -> Result<Option<(bool, f64)>, String> {
+    Ok(None)
+  }
   fn realm_native_error_snapshot(
     &mut self,
     _handle: f64,
@@ -747,6 +766,18 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_try_graph_reflection(
+    &mut self,
+    handles: &[f64],
+    operation: &str,
+  ) -> Result<Option<(bool, f64)>, String> {
+    graph_calls::reflection(
+      &mut self.caller,
+      self.realm_instance,
+      handles,
+      operation,
+    )
+  }
   fn realm_native_error_snapshot(
     &mut self,
     handle: f64,

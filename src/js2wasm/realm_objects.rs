@@ -6,12 +6,15 @@ mod callback_access;
 mod host_callbacks;
 #[path = "realm_host_values.rs"]
 mod host_values;
+#[path = "realm_property_names.rs"]
+mod property_names;
 #[path = "realm_stack_trace.rs"]
 mod stack_trace;
 #[path = "realm_symbols.rs"]
 mod symbols;
 pub(super) use host_callbacks::HostCallbackBinding;
 pub(crate) use host_callbacks::invoke_host;
+pub(super) use property_names::own_property_names;
 
 #[derive(Clone)]
 pub(super) struct RealmObjectBinding {

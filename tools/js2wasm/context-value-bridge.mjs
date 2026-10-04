@@ -206,6 +206,15 @@ export function __v8x_value_set_prototype(owner: number, prototype: number): num
 export function __v8x_value_get(owner: number, key: number): number {
   return __v8xKeepValue(__v8xValueAt(owner)[__v8xValueAt(key)]);
 }
+export function __v8x_value_own_names(owner: number): number {
+  return __v8xKeepValue(Object.getOwnPropertyNames(__v8xValueAt(owner)));
+}
+export function __v8x_value_own_symbols(owner: number): number {
+  return __v8xKeepValue(Object.getOwnPropertySymbols(__v8xValueAt(owner)));
+}
+export function __v8x_value_descriptor(owner: number, key: number): number {
+  return __v8xKeepValue(Object.getOwnPropertyDescriptor(__v8xValueAt(owner), __v8xValueAt(key)));
+}
 export function __v8x_value_set(owner: number, key: number, value: number): void {
   __v8xValueAt(owner)[__v8xValueAt(key)] = __v8xValueAt(value);
 }
@@ -273,6 +282,9 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_get_prototype",
   "__v8x_value_set_prototype",
   "__v8x_value_get",
+  "__v8x_value_own_names",
+  "__v8x_value_own_symbols",
+  "__v8x_value_descriptor",
   "__v8x_value_set",
   "__v8x_value_define_data",
   "__v8x_value_call",

@@ -96,6 +96,31 @@ pub(super) fn validate(prepared: &PreparedModule) -> Result<(), String> {
       return Err("AOT Script call requires validated getter/ownership".into());
     }
   }
+  for (name, params) in [
+    ("__v8x_script_own_names_export", 1),
+    ("__v8x_script_own_symbols_export", 1),
+    ("__v8x_script_descriptor_export", 2),
+  ] {
+    if let Some(export) = module.get_export(name) {
+      let wasmtime::ExternType::Func(function) = export else {
+        return Err("AOT Script reflection export must be a function".into());
+      };
+      if function.params().len() != params
+        || !function.params().all(|ty| ty.is_externref())
+        || function.results().len() != 1
+        || !function.results().all(|ty| ty.is_externref())
+      {
+        return Err(
+          "AOT Script reflection export has invalid externref ABI".into(),
+        );
+      }
+      if module.get_export("__v8x_script_get_export").is_none() {
+        return Err(
+          "AOT Script reflection requires validated getter/ownership".into(),
+        );
+      }
+    }
+  }
   Ok(())
 }
 
@@ -198,7 +223,13 @@ mod tests {
         .unwrap_err()
         .contains("forbids import")
     );
-    for export in ["__v8x_script_get_export", "__v8x_script_call_export"] {
+    for export in [
+      "__v8x_script_get_export",
+      "__v8x_script_call_export",
+      "__v8x_script_own_names_export",
+      "__v8x_script_own_symbols_export",
+      "__v8x_script_descriptor_export",
+    ] {
       assert!(
         validate(&module(0x6f, CONTEXT_IMPORT_MODULE, 0, Some(export)))
           .unwrap_err()

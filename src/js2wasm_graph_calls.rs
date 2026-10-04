@@ -333,6 +333,27 @@ pub(super) fn get_prototype(
   )
 }
 
+pub(super) fn reflection(
+  context: impl AsContextMut<Data = DenoHostState>,
+  realm: Instance,
+  handles: &[f64],
+  operation: &str,
+) -> Result<Option<(bool, f64)>, String> {
+  let export = match operation {
+    "names" => "__v8x_graph_own_names_export",
+    "symbols" => "__v8x_graph_own_symbols_export",
+    "descriptor" => "__v8x_graph_descriptor_export",
+    _ => return Err("unknown native reflection operation".into()),
+  };
+  dispatch(
+    context,
+    realm,
+    handles,
+    "__v8x_graph_can_access_export",
+    export,
+  )
+}
+
 pub(super) fn set_prototype(
   context: impl AsContextMut<Data = DenoHostState>,
   realm: Instance,
@@ -365,23 +386,29 @@ fn dispatch(
     .filter_map(|graph| {
       if let Some(matcher) = graph.get_func(&mut scope, matcher_name) {
         Some((*graph, matcher, dispatch_name, false))
-      } else if matches!(
-        dispatch_name,
-        "__v8x_graph_get_export" | "__v8x_graph_call_export"
-      ) {
-        let script_export = if dispatch_name == "__v8x_graph_get_export" {
-          "__v8x_script_get_export"
-        } else {
-          "__v8x_script_call_export"
+      } else {
+        let script_export = match dispatch_name {
+          "__v8x_graph_get_export" => "__v8x_script_get_export",
+          "__v8x_graph_call_export" => "__v8x_script_call_export",
+          "__v8x_graph_own_names_export" => "__v8x_script_own_names_export",
+          "__v8x_graph_own_symbols_export" => "__v8x_script_own_symbols_export",
+          "__v8x_graph_descriptor_export" => "__v8x_script_descriptor_export",
+          _ => return None,
         };
-        if graph.get_func(&mut scope, script_export).is_none() {
+        // Missing reflection on a matching Script is an error below, not an
+        // empty wrapper enumeration or fallback through a foreign Context.
+        if !matches!(
+          dispatch_name,
+          "__v8x_graph_own_names_export"
+            | "__v8x_graph_own_symbols_export"
+            | "__v8x_graph_descriptor_export"
+        ) && graph.get_func(&mut scope, script_export).is_none()
+        {
           return None;
         }
         graph
           .get_func(&mut scope, "localOwns")
           .map(|matcher| (*graph, matcher, script_export, true))
-      } else {
-        None
       }
     })
     .collect::<Vec<_>>();

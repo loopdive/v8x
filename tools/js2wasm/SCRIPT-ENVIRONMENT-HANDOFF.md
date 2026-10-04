@@ -1,5 +1,31 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Native reflection continuation, 2026-10-04
+
+Runtime compiler pin: `c98082082b163165ed6c5ba7f726c24d01ee1ba7`.
+
+The adapter now routes native own-name, own-symbol and descriptor queries to the
+allocation's owning Script. It applies writable/enumerable/configurable filters
+and canonical array-index conversions without executing getters or copying a
+Script object into a Context object. Missing exports for a matching owner fail
+loudly. Context bridge exports provide equivalent native reflection operations.
+Compiler-free cargo check passes. Fresh native reflection/filter execution tests
+and unchanged Deno replay have NOT yet been run for this checkpoint.
+
+The compiler now actually implements shared Symbol state: six mutable native
+globals. Previous compiler options requested this state but did not implement it.
+Focused compiler controls pass 31/31, including cross-Script identity and closed
+computed Symbol fields. Verify all six exports in the next full Context build.
+
+Script packaging now invokes Binaryen before Wasmtime and records raw/optimized
+hashes and the optimizer version. End-to-end packaging has NOT been rerun; its
+strict optimized-import equality check may need validation against actual output.
+Rebuild clean pinned Context and all five original Scripts, rebuild unchanged
+Deno tests and replay WebIDL next. Old native results below remain 16/17, not a
+claim that record conversion has been fixed. Full conformance, UTF-16 key fidelity,
+Context exception identity, host capabilities and comparative benchmarks remain
+open. Neither existing draft PR is merge-ready. Preserve the historical POC pin.
+
 ## Final checkpoint and resume handoff, 2026-10-04
 
 Published implementation: compiler `dbe49bf307d635bd5c838ac6b36051597c5aa253`;
