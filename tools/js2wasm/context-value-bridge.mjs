@@ -17,6 +17,9 @@ function __v8xValueAt(id: number): any {
   return __v8xValues[id];
 }
 function __v8xKeepValue(value: any): number {
+  // Independently compiled Scripts own distinct GC undefined singletons.
+  // Normalize the JavaScript value before consulting reference-keyed roots.
+  if (value === undefined) return 0;
   const negativeZero = typeof value === "number" && value === 0 && 1 / value < 0;
   if (negativeZero && __v8xNegativeZeroId >= 0) return __v8xNegativeZeroId;
   if (!negativeZero) {
@@ -297,6 +300,18 @@ export function contextValueBridgeEntrypoints(modulePath) {
     return `import { ${name} as imported${name} } from ${JSON.stringify(modulePath)};\n` +
       `export function ${name}(${parameters}): ${result} { ${result === "void" ? "" : "return "}imported${name}(${args}); }\n`;
   }).join("\n");
+}
+
+// Script completion stays a native reference until the owning Context roots it.
+// The keeper is a compiler-owned identifier, never user-provided source text.
+export function contextScriptCompletionSource(keeper = "__v8x_value_keep") {
+  if (!/^[A-Za-z_$][\w$]*$/.test(keeper)) throw new Error("invalid completion keeper identifier");
+  return `
+let __v8xScriptCompletion: any = undefined;
+export function __v8x_context_script_completion(value: any): void { __v8xScriptCompletion = value; }
+export function __v8x_script_completion_reset(): void { __v8xScriptCompletion = undefined; }
+export function __v8x_script_completion_handle(): number { return ${keeper}(__v8xScriptCompletion); }
+`;
 }
 
 export function contextPromiseRejectionDispatcherSource(keeper = "__v8x_value_keep") {

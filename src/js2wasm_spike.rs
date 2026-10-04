@@ -123,6 +123,7 @@ const CONTEXT_IMPORTS: &[&str] = &[
   "__v8x_context_owns",
   "__v8x_context_get",
   "__v8x_context_lexical",
+  "__v8x_context_script_completion",
 ];
 const CONTEXT_SYMBOL_GLOBALS: &[&str] = &[
   "__symbol_counter",
@@ -2753,6 +2754,32 @@ impl DenoRuntime {
     })();
     self.instance = primary;
     result
+  }
+
+  fn instantiate_script(
+    &mut self,
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+  ) -> Result<f64, String> {
+    self
+      .realm_instance
+      .get_typed_func::<(), ()>(
+        &mut self.store,
+        "__v8x_script_completion_reset",
+      )
+      .map_err(|error| format!("Script completion reset: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("Script completion reset: {error}"))?;
+    self.instantiate_graph(shared, prepared)?;
+    self
+      .realm_instance
+      .get_typed_func::<(), f64>(
+        &mut self.store,
+        "__v8x_script_completion_handle",
+      )
+      .map_err(|error| format!("Script completion handle: {error}"))?
+      .call(&mut self.store, ())
+      .map_err(|error| format!("Script completion handle: {error}"))
   }
 
   pub(crate) fn bind_deno_ops(

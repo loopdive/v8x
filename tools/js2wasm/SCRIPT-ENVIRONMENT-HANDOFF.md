@@ -2,7 +2,7 @@
 
 PR: https://github.com/loopdive/v8x/pull/2 (draft).
 Compiler dependency: https://github.com/loopdive/js2/pull/6468 (draft),
-commit `ce9b93df3560db237c82eb4a47ad7f4ddc3a7643`.
+commit `3d4c1dfdaf61f101cb07c7139b5a3ed65052d520`.
 
 The retained Context linker now accepts `__v8x_context_lexical`. Runtime
 and namespace-test Context builders export the compiler's lexical provider.
@@ -30,7 +30,7 @@ cargo test --offline --no-default-features --features js2wasm_spike,js2wasm_gc_c
 ```
 
 Use the test executable printed by Cargo. For each of `context`, `script-0`
-through `script-7`, run the packaging helper with the corresponding paths:
+through `script-10`, run the packaging helper with the corresponding paths:
 
 ```sh
 V8X_JS2WASM_DENO_CORE_WASM="$FIXTURE_DIR/context.wasm" V8X_JS2WASM_DENO_CORE_AOT_OUTPUT="$FIXTURE_DIR/context.cwasm" "$PACKAGING_TEST_BINARY" --exact precompiles_exact_deno_core_artifact --nocapture
@@ -45,6 +45,33 @@ is explicitly ignored by default because its trusted local artifacts must
 be generated first. No Deno or rusty_v8 vendored test was changed.
 
 ## Remaining integration work
+
+Completion continuation: the Context exports a native reference sink, reset
+and rooted-handle getter. `DenoRuntime::instantiate_script` resets completion,
+executes an independent artifact in the retained Context and returns its native
+root handle. The source stays unwrapped. The real Context value bridge roots
+returned objects without JSON copying and normalizes foreign Script undefined
+singletons to handle zero. Strong roots still live until Context teardown; this
+does not implement per-handle release.
+
+One Context plus eleven Scripts (twelve artifacts) pass Node/Wasm controls at
+`/private/tmp/deno-script-completion.8HrA0L`. Both Cargo profiles build; the full
+existing Context-value-bridge probe passes its identity, scalar, callback,
+buffer and root-growth assertions. Runtime option checks pass 10/10. All twelve
+native packaging invocations pass (each 1/1, 61 filtered). Compiler-free replay
+passes 1/1 (36 filtered, 0.11 seconds), asserting zero runtime compilations and
+zero runtime-eval provider instantiations. The ordinary compiler-free adapter
+suite reports 30 passes, zero failures and seven explicit ignored tests out
+of 37; those ignored tests are not conformance credit. The first Context
+precompilation took 126.95 seconds, not a deployment startup measurement.
+The compiler completion suite passes 36/36 ordinary tests; its persistent Script
+and older result regressions pass 89/89 including two existing expected failures.
+
+This is not public Script dispatch yet: the private instantiation method is
+exercised by the fixture. Production public Run still needs exact-source-bound
+independent AOT package lookup and exception/result handle adoption. The full
+Context has not been rebuilt and unchanged Deno conformance is not credited.
+Both PRs remain draft. The older nine-artifact results below are historical.
 
 Latest scalar/callable continuation: one Context and eight Scripts (nine
 artifacts) pass raw controls and all nine packaging runs. The final compiler-free

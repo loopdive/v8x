@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints, contextPromiseRejectionDispatcherSource } from "./context-value-bridge.mjs";
+import { CONTEXT_VALUE_BRIDGE_SOURCE, CONTEXT_VALUE_BRIDGE_EXPORTS, contextValueBridgeEntrypoints, contextPromiseRejectionDispatcherSource, contextScriptCompletionSource } from "./context-value-bridge.mjs";
 
 import { stagedCoreSource, stagedCoreNamespaceSources } from "./staged-core.mjs";
 import { aotHelloWorldSource } from "./aot-hello-world.mjs";
@@ -30,7 +30,7 @@ const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_V8X_ROOT = realpathSync(resolve(TOOL_DIR, "../.."));
 
 const EXPECTED_JS2_REF = "8fd489a918dee3be51bb1e75d191f9815a830eb0";
-const RUNTIME_JS2_REF = "ce9b93df3560db237c82eb4a47ad7f4ddc3a7643";
+const RUNTIME_JS2_REF = "3d4c1dfdaf61f101cb07c7139b5a3ed65052d520";
 export function compilerRefForProfile(profile) {
   if (profile === "poc") return EXPECTED_JS2_REF;
   if (profile === "runtime") return RUNTIME_JS2_REF;
@@ -1077,6 +1077,7 @@ export function __v8x_context_get(object: any, key: any, receiver: any): any {
       .replace("if (stage !== 0) throw new Error(\"Deno core wrappers stage order mismatch\");", "if (stage !== 0 || scriptPhase() !== 4) throw new Error(\"Deno core wrappers stage order mismatch\");")
       .replace("if (stage !== 1) throw new Error(\"Deno core module stage order mismatch\");", "if (stage !== 1) throw new Error(\"Deno core module stage order mismatch\");\n  const namespace = runModule();\n  moduleCore = namespace.core;\n  moduleInternals = namespace.internals;\n  modulePrimordials = namespace.primordials;");
     files[`${appRoot}/entry.ts`] += contextValueBridgeEntrypoints("./runtime-seed.ts");
+    files[`${appRoot}/entry.ts`] += contextScriptCompletionSource("imported__v8x_value_keep");
     files[`${appRoot}/entry.ts`] += `
 import * as nativeCoreNamespace from "./core-namespace.ts";
 ${contextPromiseRejectionDispatcherSource("imported__v8x_value_keep")}

@@ -2,7 +2,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { COMPILE_OPTIONS, runtimeCompileOptions, assertRuntimeSchedulerABI, assertRuntimeAllocationOwnerABI, compilerRefForProfile } from "./build-deno-core-artifact.mjs";
-import { contextPromiseRejectionDispatcherSource } from "./context-value-bridge.mjs";
+import { contextPromiseRejectionDispatcherSource, contextScriptCompletionSource } from "./context-value-bridge.mjs";
+
+test("Script completion roots native references through the owning keeper", () => {
+  const source = contextScriptCompletionSource("imported__v8x_value_keep");
+  assert(source.includes("__v8x_context_script_completion(value: any): void"));
+  assert(source.includes("__v8xScriptCompletion = undefined"));
+  assert(source.includes("return imported__v8x_value_keep(__v8xScriptCompletion)"));
+  assert(!source.includes("JSON"));
+  assert.throws(() => contextScriptCompletionSource("keeper(); injected()"), /invalid completion keeper/);
+});
 
 test("event dispatcher roots both values through the supplied realm keeper", () => {
   const source = contextPromiseRejectionDispatcherSource("imported__v8x_value_keep");
@@ -13,7 +22,7 @@ test("event dispatcher roots both values through the supplied realm keeper", () 
 
 test("runtime compiler pin advances independently of the historical POC", () => {
   assert.equal(compilerRefForProfile("poc"), "8fd489a918dee3be51bb1e75d191f9815a830eb0");
-  assert.equal(compilerRefForProfile("runtime"), "ce9b93df3560db237c82eb4a47ad7f4ddc3a7643");
+  assert.equal(compilerRefForProfile("runtime"), "3d4c1dfdaf61f101cb07c7139b5a3ed65052d520");
   assert.throws(() => compilerRefForProfile("unknown"), /unknown compiler profile/);
 });
 

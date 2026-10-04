@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { CONTEXT_VALUE_BRIDGE_SOURCE, contextScriptCompletionSource } from "./context-value-bridge.mjs";
 
 const [compilerPath, outputPath] = process.argv.slice(2);
 if (!compilerPath || !outputPath) throw new Error("usage: build-script-environment-test-artifacts.mjs JS2_CHECKOUT OUTPUT_DIR");
@@ -13,7 +14,9 @@ const output = resolve(outputPath);
 mkdirSync(output, { recursive: true });
 const { compile } = await import(pathToFileURL(join(compiler, "src/index.ts")).href);
 const provider = readFileSync(join(compiler, "examples/v8x-js2wasm-spike/script-lexical-provider.ts"), "utf8");
-const contextSource = provider + `
+const contextSource = provider + CONTEXT_VALUE_BRIDGE_SOURCE + contextScriptCompletionSource() + `
+export function __v8x_probe_completion_number():number {return __v8x_value_as_number(__v8x_script_completion_handle());}
+export function __v8x_probe_completion_identity():boolean {return __v8x_value_unwrap(__v8x_script_completion_handle())===globalThis.completionSaved;}
 globalThis.score=0;
 globalThis.published=0;
 export function __v8x_context_global_this():any {return globalThis;}
@@ -36,6 +39,9 @@ const scripts = [
   "try {fixed=42;} catch(error){globalThis.caught=error;}",
   "const active=true; globalThis.reader=()=>{globalThis.published=active?43:0;};",
   "globalThis.alias=globalThis.reader; globalThis.alias();",
+  "41;42;",
+  "void 0;",
+  "globalThis.completionSaved={marker:42}; globalThis.completionSaved;",
 ];
 const records = [];
 async function build(name, source, options) {
@@ -43,22 +49,23 @@ async function build(name, source, options) {
   assert.equal(result.success, true, JSON.stringify(result.errors));
   const module = new WebAssembly.Module(result.binary);
   const imports = WebAssembly.Module.imports(module);
-  assert(imports.every(item => item.module === "v8x:context"), JSON.stringify(imports));
+  assert(imports.every(item => item.module === "v8x:context" || (item.module === "v8x:deno" && item.name === "__v8x_host_call")), JSON.stringify(imports));
   writeFileSync(join(output, name + ".wasm"), result.binary);
   records.push({ name, source, sourceSha256: createHash("sha256").update(source).digest("hex"),
     wasmSha256: createHash("sha256").update(result.binary).digest("hex"), bytes: result.binary.byteLength, imports });
   return { result, module };
 }
 const context = await build("context", contextSource, {
-  target: "standalone", standaloneAllocationOwnerExport: "__v8x_context_owns",
+  target: "standalone", platform:"deno", hostBridge:"always", externImportModule:"v8x:deno", standaloneAllocationOwnerExport: "__v8x_context_owns",
 });
-const owner = new WebAssembly.Instance(context.module, context.result.importObject);
+const owner = new WebAssembly.Instance(context.module, {"v8x:deno": {__v8x_host_call(){throw new Error("unexpected host callback in completion fixture");}}});
 const compiled = [];
 for (let index = 0; index < scripts.length; index++) {
   compiled.push(await build(`script-${index}`, scripts[index], {
     target: "standalone", scriptGoal: true, allowJs: true, fileName: "script.ts",
     hostBridge: "always", deferTopLevelInit: true, standaloneScriptVarBindings: true,
     standaloneScriptLexicalImport: { module: "v8x:context", name: "__v8x_context_lexical" },
+    standaloneScriptCompletionImport: { module: "v8x:context", name: "__v8x_context_script_completion" },
     standaloneAllocationOwnerExport: "localOwns",
     standaloneGlobalThisImport: { module: "v8x:context", name: "__v8x_context_global_this",
       owns: "__v8x_context_owns", get: "__v8x_context_get", exceptionTag: "__exn_tag" },
@@ -67,6 +74,7 @@ for (let index = 0; index < scripts.length; index++) {
 }
 function run(index) {
   const instance = new WebAssembly.Instance(compiled[index].module, { "v8x:context": owner.exports });
+  owner.exports.__v8x_script_completion_reset();
   instance.exports.__module_init();
 }
 run(0); run(1); run(2);
@@ -80,6 +88,12 @@ assert.equal(owner.exports.__v8x_probe_script_fixed(), 41);
 assert.equal(owner.exports.__v8x_probe_script_caught(), 42);
 run(6); run(7);
 assert.equal(owner.exports.__v8x_probe_script_observed(), 43);
+run(8);
+assert.equal(owner.exports.__v8x_probe_completion_number(),42);
+run(9);
+assert.equal(owner.exports.__v8x_script_completion_handle(),0);
+run(10);
+assert.equal(owner.exports.__v8x_probe_completion_identity(),1);
 writeFileSync(join(output, "test-inputs.json"), JSON.stringify({
   kind: "local-native-script-environment-test-not-production-package", compiler, records,
 }, null, 2) + "\n");
