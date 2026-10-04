@@ -1,5 +1,34 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Fresh native evidence at the synchronized compiler
+
+Clean compiler 9bfee5a9c6893bc17313c226363648ebe1ccb6b3; builder adapter
+f236d22698bfe60bd82e4bbea9415c2e70176dd4; unchanged Deno
+1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44. Artifacts are in
+/private/tmp/deno-call-order-native.dBQZ3T. The existing native replay binary
+deno_core-87206ac56a2fccad is reused (no Rust adapter change this checkpoint).
+
+Unchanged lazy-script-not-found now passes 1/1 in 1.68s; WebIDL 17/17 in 23.95s;
+derived conversions 2/2 in 2.96s. The real lazy-script test aborts at missing
+v8__ScriptCompiler__CompileFunction (exit 134). Deno compiles a strict function
+body returning the original IIFE with one __bootstrap parameter and no context
+extensions. Implement generic trusted-AOT function-body packaging and parameter
+bindings, then return a native owning-graph callable. Preserve cache, closure,
+object and exception identity. Compilation/execution occurs within a Rust host
+callback: use active CallerRealm rather than reborrow DenoRuntime's RefCell.
+No runtime compiler, interpreter or Deno source rewrite should be introduced.
+
+Raw Context: 2,724,683 bytes, SHA
+5e1e00422b3979354bc8f64772423f8323a48870b3fd23143b5685914f2bb3a6.
+Binaryen 125 optimized: 2,019,396 bytes, SHA
+02cf9fc795a8e946ffee2c11783456508b2bdcb44606541400407a5056d8006c.
+Wasmtime 47.0.3 precompile 1/1 in 211.59s; native 44,121,952 bytes, SHA
+cbb13265e36297f5bedca29b7e31d4439568dc08bc3a239082faab8054037aad.
+All 16 literal module-test Scripts and five WebIDL Scripts package; conversions
+have 4 packaged and 2 unresolved macro inputs /6 sites (exit 1, not success).
+Default-off compiler controls match pre-fix merged compiler bytes 3/3. Full
+population, snapshots, graphs, host operations, transport and benchmarks remain open.
+
 ## Continuation: main sync and method ordering
 
 Runtime compiler pin: 9bfee5a9c6893bc17313c226363648ebe1ccb6b3, after merging
