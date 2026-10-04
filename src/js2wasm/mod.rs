@@ -8353,6 +8353,13 @@ pub extern "C" fn v8__Module__Evaluate(
       Ok(runtime) => runtime,
       Err(error) => {
         eprintln!("{error}");
+        if let Some(owner) = unsafe { module_state(module) }
+          .and_then(|state| state.runtime.clone())
+        {
+          if let Err(capture) = realm_objects::record_module_exception(&owner) {
+            eprintln!("capture original module exception: {capture}");
+          }
+        }
         return reject_module_evaluation(module, &error);
       }
     };

@@ -19,6 +19,23 @@ pub(crate) use host_callbacks::invoke_host;
 pub(super) use native_promises::NativePromiseMirror;
 pub(super) use native_promises::settle as settle_native_promise_mirror;
 
+pub(crate) fn record_module_exception(
+  owner: &Rc<RefCell<DenoRuntime>>,
+) -> Result<bool, String> {
+  let value = owner
+    .try_borrow_mut()
+    .map_err(|_| "module exception owner is already executing")?
+    .take_module_exception();
+  let Some(value) = value else {
+    return Ok(false);
+  };
+  let value = callback_access::with_owner(owner, |access| {
+    from_realm(access, owner, value)
+  })?;
+  record_exception(current_isolate(), value);
+  Ok(true)
+}
+
 pub(crate) fn import_meta_handle(
   access: &mut dyn RealmAccess,
   owner: &Rc<RefCell<DenoRuntime>>,

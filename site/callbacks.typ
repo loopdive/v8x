@@ -188,12 +188,16 @@ exception value. A Promise reaction uses its own exception scope, so a surroundi
 TryCatch cannot turn a thrown callback into a fulfilled derived Promise. Native
 controls cover missing graph artifacts and synthetic thrown-value identity; a
 precompiled source graph also verifies observable global writes and namespace
-publication. Native Promise transfer into the compiled realm remains incomplete.
+publication. A throwing AOT graph retains its original payload in the Context
+keeper. Its rejected Promise and Module exception preserve that object's identity;
+property reads use proven graph allocation ownership even when initialization
+never reached namespace publication. Native Promise transport remains incomplete.
 A mirror path uses a real compiled Promise and native identity bindings. Native
 controls verify fulfillment and rejection before and after transfer, exact
 payload identity and single rejection delivery. Unsupported settled payloads
-are refused before publication. The full Deno Context still needs rebuilding
-with these exports, and unchanged Deno transport coverage is not established.
+are refused before publication. The full Deno Context has been rebuilt with these
+exports. The unchanged main/side module test passes, and missing packages report
+the original loading error. Full Deno transport coverage is not established.
 
 The native import-meta callback registration and lazy object cache now retain
 Module identity across repeated and reentrant initialization. Modules with the

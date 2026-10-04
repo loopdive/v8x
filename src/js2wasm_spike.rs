@@ -2508,9 +2508,13 @@ pub(crate) struct DenoRuntime {
   instance: Instance,
   _runtime_eval_provider: Option<Instance>,
   graph_instances: Vec<Instance>,
+  pending_module_exception: Option<RealmValue>,
 }
 
 impl DenoRuntime {
+  pub(crate) fn take_module_exception(&mut self) -> Option<RealmValue> {
+    self.pending_module_exception.take()
+  }
   pub(crate) fn realm_id(&self) -> usize {
     self.realm_id
   }
@@ -2654,6 +2658,7 @@ impl DenoRuntime {
       realm_instance: instance,
       _runtime_eval_provider: runtime_eval_provider,
       graph_instances: Vec::new(),
+      pending_module_exception: None,
     })
   }
 
@@ -2812,11 +2817,12 @@ impl DenoRuntime {
     prepared: &PreparedModule,
     graph_bindings: Option<&NativeModuleGraph>,
   ) -> Result<(), String> {
+    self.pending_module_exception = None;
     let instance =
       self.retain_graph_instance(shared, prepared, graph_bindings)?;
     let primary = std::mem::replace(&mut self.instance, instance);
     let result = (|| {
-      self.run_deferred_module_init()?;
+      self.run_graph_module_init()?;
       self.verify_cwd_probe()?;
       self.verify_runtime_eval_state_probe()
     })();
@@ -3287,6 +3293,45 @@ impl DenoRuntime {
           render_pending_wasm_exception(&mut self.store, self.instance);
         format!("run __module_init: {error:#}; {payload}")
       })
+  }
+
+  fn run_graph_module_init(&mut self) -> Result<(), String> {
+    let Some(init) = self.instance.get_func(&mut self.store, "__module_init")
+    else {
+      return Ok(());
+    };
+    let init = init
+      .typed::<(), ()>(&self.store)
+      .map_err(|error| format!("type graph __module_init: {error}"))?;
+    if let Err(error) = init.call(&mut self.store, ()) {
+      use wasmtime::{AsContextMut, RootScope, Val};
+      let handle = {
+        let mut scope = RootScope::new(&mut self.store);
+        let exception = scope
+          .as_context_mut()
+          .take_pending_exception()
+          .ok_or_else(|| format!("graph initializer trapped: {error:#}"))?;
+        let fields = exception
+          .fields(&mut scope)
+          .map_err(|error| format!("graph exception fields: {error}"))?
+          .collect::<Vec<_>>();
+        let [payload @ Val::ExternRef(_)] = fields.as_slice() else {
+          return Err("graph exception must carry exactly one JS value".into());
+        };
+        let keep = self
+          .realm_instance
+          .get_func(&mut scope, "__v8x_value_keep")
+          .ok_or("Context lacks module exception rooting ABI")?;
+        let mut results = [Val::F64(0)];
+        keep
+          .call(&mut scope, &[*payload], &mut results)
+          .map_err(|error| format!("root graph exception: {error:#}"))?;
+        results[0].f64().ok_or("invalid graph exception handle")?
+      };
+      self.pending_module_exception = Some(self.realm_from_handle(handle)?);
+      return Err(format!("run graph __module_init: {error:#}"));
+    }
+    Ok(())
   }
 
   fn verify_cwd_probe(&mut self) -> Result<(), String> {

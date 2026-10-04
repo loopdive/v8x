@@ -1,5 +1,74 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Full Context and rooted module exceptions
+
+The full Context was rebuilt from clean detached checkouts: compiler
+`b5f6cbae636d22d5c9e7901f779b4f1727003adc`, adapter builder
+`7b31b4ef839bbd4646b85441725e65c7f6a95dc6`, original Deno
+`1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44`.
+Directory `/private/tmp/deno-promise-full.X2WdwN` retains these checkouts,
+provenance, raw/optimized/native artifacts and attestation.
+Raw SHA256 `c157e9ddab1c7108d3b4c72b93bcf114063194edc260b6b8a7f11263a46cfc59`;
+optimized SHA256 `6d3e47c8b926b0e43e0143812101cb8feae3cb78ab1fe39fdfb31f278dec8e79`;
+native SHA256 `78aa8a50726f61577cdc54267d912af63acc7b85d24a931fa53e71a63ab2b237`,
+44,646,992 bytes. Binaryen 125 O3, all features, no custom descriptors,
+debug names and no-inline wildcard. Wasmtime 47.0.3 build-side precompile
+passed 1/1, 73 filtered /74, 224.14s. No interpreter provider emitted.
+
+The compiler-free Deno binary was rebuilt against the current adapter:
+
+```sh
+RUSTFLAGS='--cfg tokio_unstable' cargo test --offline -p deno_core --lib --no-run
+```
+
+Unchanged main/side passes 1/1, 430 filtered /431 (latest 1.94s).
+With graph packages absent it fails 0/1 with the actual missing-artifact error
+in `exception_message`, no longer an unsupported Promise conversion error.
+Lazy loading passes 1/1 and WebIDL 17/17. These remain subset evidence, not
+full population credit. Replay from the patched Deno checkout:
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-promise-full.X2WdwN/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-reentrant-script.MZdH2Q/deno-scripts V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-promise-full.X2WdwN/graphs-owned-get target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::main_and_side_module --nocapture --test-threads=1
+```
+
+For the negative control omit only V8X_JS2WASM_AOT_GRAPH_DIR. For WebIDL use
+`webidl::tests::` instead of the exact main/side selector.
+
+`run_graph_module_init` now roots a pending externref payload in the Context
+keeper before returning an error. The native module rejection captures that
+handle into the original exception value. A new throwing graph test verifies
+the rejected Promise result, Module exception and escaped global object have
+the same identity. Initially marker reads returned NaN/42 because the namespace
+matcher stays unready after an abrupt initializer. The compiler sidecar now
+exports a getter for allocation-proven objects; native dispatch checks the
+graph's ownership predicate before using it. Old packages with proven ownership
+but no getter fail loudly. No bypass is allowed for foreign objects.
+
+Native positive/throwing AOT module controls pass 2/2, 48 filtered /50, including
+marker 42, cached evaluation Promise and zero compilation/interpreter counts.
+Compiler namespace controls pass 4/4, including foreign-instance allocation
+refusal with the same GC layout. TS7 passes; scoped lint retains one existing
+explicit-any warning. Ordinary adapter suite 34 passed, 0 failed, 16 ignored
+/50; scoped units 15/15, 16 filtered /31. Formatting and diff checks pass.
+
+Candidate graph packages in `graphs-owned-get` were built from the working
+compiler with this sidecar change, not the clean full-Context compiler pin.
+Each inventory records exact source and optimized/native SHA256. The source-bound
+throw digest is `053279d44c82aaa1fedc04b365481ae3cfe294b5ebf6816dc4293753f0cfa8fe`.
+Native control:
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-promise-full.X2WdwN/graphs-owned-get target/debug/deps/js2wasm_spike-e7e456f13e693536 aot_module_ --ignored --nocapture --test-threads=1
+```
+
+Next derive the full unchanged test/source population, package its exact module
+graphs and continue snapshots and host services. Startup-module exceptions,
+arbitrary thrown callables, failure after mirror adoption and full snapshot
+semantics remain unverified. No new benchmark. Typst still unavailable.
+
+The sections below are historical and superseded where this section provides
+new evidence. Neither PR is merge-ready and the full integration goal remains.
+
 ## Native validation continuation
 
 The native mirror now has an executed compiler-free control: 1/1, 48 filtered

@@ -383,9 +383,15 @@ fn dispatch(
   let routes = graphs
     .iter()
     .rev()
-    .filter_map(|graph| {
+    .flat_map(|graph| {
+      let mut routes = Vec::new();
+      if dispatch_name == "__v8x_graph_get_export"
+        && let Some(owns) = graph.get_func(&mut scope, "__v8x_graph_owns")
+      {
+        routes.push((*graph, owns, "__v8x_graph_get_owned_export", true));
+      }
       if let Some(matcher) = graph.get_func(&mut scope, matcher_name) {
-        Some((*graph, matcher, dispatch_name, false))
+        routes.insert(0, (*graph, matcher, dispatch_name, false));
       } else {
         let script_export = match dispatch_name {
           "__v8x_graph_get_export" => "__v8x_script_get_export",
@@ -393,7 +399,7 @@ fn dispatch(
           "__v8x_graph_own_names_export" => "__v8x_script_own_names_export",
           "__v8x_graph_own_symbols_export" => "__v8x_script_own_symbols_export",
           "__v8x_graph_descriptor_export" => "__v8x_script_descriptor_export",
-          _ => return None,
+          _ => return routes,
         };
         // Missing reflection on a matching Script is an error below, not an
         // empty wrapper enumeration or fallback through a foreign Context.
@@ -404,12 +410,13 @@ fn dispatch(
             | "__v8x_graph_descriptor_export"
         ) && graph.get_func(&mut scope, script_export).is_none()
         {
-          return None;
+          return routes;
         }
-        graph
-          .get_func(&mut scope, "localOwns")
-          .map(|matcher| (*graph, matcher, script_export, true))
+        if let Some(matcher) = graph.get_func(&mut scope, "localOwns") {
+          routes.push((*graph, matcher, script_export, true));
+        }
       }
+      routes
     })
     .collect::<Vec<_>>();
   if routes.is_empty() {

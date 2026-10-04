@@ -1319,6 +1319,59 @@ thread_local! {
   static IMPORT_META_INITIALIZATIONS: Cell<u32> = const { Cell::new(0) };
 }
 
+#[test]
+#[ignore = "requires trusted Context and source-bound throwing module graph"]
+fn aot_module_rejection_retains_original_thrown_object() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let text = v8::String::new(
+    scope,
+    "const token={marker:42}; globalThis.moduleThrownToken=token; throw token;",
+  )
+  .unwrap();
+  let resource =
+    v8::String::new(scope, "file:///module-throw-probe.js").unwrap();
+  let origin = origin(scope, resource.into());
+  let mut source = v8::script_compiler::Source::new(text, Some(&origin));
+  let module = v8::script_compiler::compile_module(scope, &mut source).unwrap();
+  assert_eq!(
+    module.instantiate_module(scope, resolve_dependency),
+    Some(true)
+  );
+  let result = module.evaluate(scope).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "moduleThrownToken").unwrap();
+  let token = global.get(scope, key.into()).unwrap();
+  assert!(token.is_object());
+  assert!(promise.result(scope).strict_equals(token));
+  assert!(module.get_exception().strict_equals(token));
+  assert!(module.evaluate(scope).unwrap().strict_equals(result));
+  let object = v8::Local::<v8::Object>::try_from(token).unwrap();
+  let marker = v8::String::new(scope, "marker").unwrap();
+  assert_eq!(
+    object
+      .get(scope, marker.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 unsafe extern "C" fn initialize_import_meta_probe(
   context: v8::Local<v8::Context>,
   _module: v8::Local<v8::Module>,
