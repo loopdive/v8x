@@ -386,7 +386,9 @@ V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-script-completion.8HrA0L V8
 ```
 
 Full unchanged population measurement remains outstanding. Cargo nextest is
-not installed here; the repository harness has a libtest runner, whose default
+not installed here, and the repository's deno_core cell requires it. Its libtest
+runner is for the separate cargo-self cells, not a Deno fallback, and its default
 watchdog kills timed-out tests. Obtain approval or disable that watchdog before
-using it, in accordance with the no-test-kill rule. No full-population baseline,
-matched Context rebuild or fresh performance result is credited.
+using those cells. Direct per-test libtest replay remains available for the built
+Deno binary. No full-population baseline, matched Context rebuild or fresh
+performance result is credited.
