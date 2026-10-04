@@ -1127,6 +1127,185 @@ fn evaluates_synthetic_module_once_with_stable_namespace_and_promise() {
 }
 
 #[test]
+#[ignore = "requires trusted Context and source-bound module execution graph"]
+fn aot_module_evaluation_executes_body_and_publishes_namespace() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let global = context.global(scope);
+  let key = v8::String::new(scope, "moduleExecutionProbe").unwrap();
+  assert!(global.get(scope, key.into()).unwrap().is_undefined());
+  let text = v8::String::new(
+    scope,
+    "globalThis.moduleExecutionProbe=42; export const answer=42;",
+  )
+  .unwrap();
+  let resource =
+    v8::String::new(scope, "file:///module-execution-probe.js").unwrap();
+  let origin = origin(scope, resource.into());
+  let mut source = v8::script_compiler::Source::new(text, Some(&origin));
+  let module = v8::script_compiler::compile_module(scope, &mut source).unwrap();
+  assert_eq!(
+    module.instantiate_module(scope, resolve_dependency),
+    Some(true)
+  );
+  let result = module.evaluate(scope).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  assert_eq!(module.get_status(), v8::ModuleStatus::Evaluated);
+  assert_eq!(
+    global.get(scope, key.into()).unwrap().number_value(scope),
+    Some(42.0)
+  );
+  let namespace =
+    v8::Local::<v8::Object>::try_from(module.get_module_namespace()).unwrap();
+  let answer = v8::String::new(scope, "answer").unwrap();
+  assert_eq!(
+    namespace
+      .get(scope, answer.into())
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  assert!(result.strict_equals(module.evaluate(scope).unwrap()));
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+fn promise_reaction_throw_rejects_under_an_outer_try_catch() {
+  initialize();
+  PROMISE_REJECTION_EVENTS.with(|events| events.borrow_mut().clear());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_reject_callback(record_promise_rejection);
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let marker = v8::Object::new(scope);
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let promise = resolver.get_promise(scope);
+  fn fail(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+  ) {
+    scope.throw_exception(args.get(0));
+  }
+  let handler = v8::Function::new(scope, fail).unwrap();
+  let derived = promise.then(scope, handler).unwrap();
+  assert_eq!(resolver.resolve(scope, marker.into()), Some(true));
+  v8::tc_scope!(let caught, scope);
+  caught.perform_microtask_checkpoint();
+  assert!(!caught.has_caught());
+  assert_eq!(derived.state(), v8::PromiseState::Rejected);
+  assert!(derived.result(caught).strict_equals(marker.into()));
+  PROMISE_REJECTION_EVENTS.with(|events| {
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+      events[0].0,
+      v8::PromiseRejectEvent::PromiseRejectWithNoHandler
+    );
+    assert_eq!(events[0].1, &*derived as *const v8::Promise as usize);
+    assert_eq!(events[0].2, Some(&*marker as *const v8::Object as usize));
+  });
+  derived.mark_as_handled();
+}
+
+#[test]
+fn synthetic_module_failures_reject_with_exact_payload_and_cached_promise() {
+  fn fail<'s>(
+    context: v8::Local<'s, v8::Context>,
+    _module: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+    SYNTHETIC_CALLBACK_COUNT.with(|count| count.set(count.get() + 1));
+    let payload = SYNTHETIC_LABEL_VALUE
+      .with(|value| v8::Local::new(scope, value.borrow().as_ref().unwrap()));
+    scope.throw_exception(payload);
+    None
+  }
+  initialize();
+  SYNTHETIC_CALLBACK_COUNT.with(|count| count.set(0));
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let marker = v8::Object::new(scope);
+  let marker_value: v8::Local<v8::Value> = marker.into();
+  SYNTHETIC_LABEL_VALUE.with(|value| {
+    *value.borrow_mut() = Some(v8::Global::new(scope, marker_value));
+  });
+  let name = v8::String::new(scope, "ext:failure/synthetic").unwrap();
+  let module = v8::Module::create_synthetic_module(scope, name, &[], fail);
+  assert_eq!(
+    module.instantiate_module(scope, resolve_dependency),
+    Some(true)
+  );
+  v8::tc_scope!(let caught, scope);
+  let result = module
+    .evaluate(caught)
+    .expect("evaluation returns a Promise");
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(caught).strict_equals(marker.into()));
+  assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+  assert!(module.get_exception().strict_equals(marker.into()));
+  assert!(!caught.has_caught(), "rejection is not a synchronous throw");
+  let repeated = module.evaluate(caught).unwrap();
+  assert!(result.strict_equals(repeated));
+  SYNTHETIC_CALLBACK_COUNT.with(|count| assert_eq!(count.get(), 1));
+  promise.mark_as_handled();
+  SYNTHETIC_LABEL_VALUE.with(|value| value.borrow_mut().take());
+}
+
+#[test]
+#[cfg(not(feature = "js2wasm_runtime_compile"))]
+fn missing_aot_graph_rejects_module_evaluation_instead_of_returning_empty() {
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let text =
+    v8::String::new(scope, "export const missingArtifactProbe=42;").unwrap();
+  let resource =
+    v8::String::new(scope, "file:///missing-artifact-probe.js").unwrap();
+  let origin = origin(scope, resource.into());
+  let mut source = v8::script_compiler::Source::new(text, Some(&origin));
+  let module = v8::script_compiler::compile_module(scope, &mut source).unwrap();
+  assert_eq!(
+    module.instantiate_module(scope, resolve_dependency),
+    Some(true)
+  );
+  v8::tc_scope!(let caught, scope);
+  let result = module
+    .evaluate(caught)
+    .expect("missing artifact rejects a Promise");
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+  assert!(promise.result(caught).strict_equals(module.get_exception()));
+  assert!(promise.result(caught).is_native_error());
+  assert!(!caught.has_caught());
+  assert!(result.strict_equals(module.evaluate(caught).unwrap()));
+  promise.mark_as_handled();
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
 fn global_module_hash_map_preserves_key_and_value_identity() {
   initialize();
   let isolate = &mut v8::Isolate::new(Default::default());

@@ -158,8 +158,8 @@ Native arrays acquire that realm's intrinsic iterator on demand. The unchanged
 Deno WebIDL integer and basic sequence conversions pass. A clean core build
 also passes the retained live-mutation iterator control after the compiler's
 first-class values factory was changed to read the original receiver live.
-The ordinary compiler-free adapter run passes 31 tests with 12 ignored; four
-additional artifact-backed function and foreign-value controls pass separately.
+The ordinary compiler-free adapter run passes 34 tests with 13 ignored; additional
+artifact-backed controls cover function, foreign-value and module execution paths.
 This does not establish full WebIDL or Deno compatibility.
 
 Context artifacts also export a lexical operation for independently compiled
@@ -182,3 +182,11 @@ identity. New Script packages also export the three-reference Reflect getter ABI
 so an explicit receiver from another graph reaches the owning accessor unchanged.
 Old packages keep their two-reference getter; alternate receivers are refused
 when that extended export is absent.
+
+Module evaluation failures return a cached rejected Promise, preserving the native
+exception value. A Promise reaction uses its own exception scope, so a surrounding
+TryCatch cannot turn a thrown callback into a fulfilled derived Promise. Native
+controls cover missing graph artifacts and synthetic thrown-value identity; a
+precompiled source graph also verifies observable global writes and namespace
+publication. Deno main-versus-side import metadata and native Promise transfer
+into the compiled realm remain incomplete.

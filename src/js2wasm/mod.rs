@@ -2291,9 +2291,16 @@ pub extern "C" fn v8__Isolate__PerformMicrotaskCheckpoint(
         } else {
           let receiver = v8__Undefined(isolate).cast();
           let arguments = [argument];
+          // A caller such as Deno's ModuleMap has its own active TryCatch.
+          // Capture this reaction's throw locally before checkpoint cleanup;
+          // otherwise record_exception writes the outer catcher, not the
+          // pending slot below, and the derived Promise falsely fulfills.
+          let mut catcher = [0usize; 6];
+          v8__TryCatch__CONSTRUCT(catcher.as_mut_ptr(), isolate);
           let result =
             invoke_function(handler, receiver, 1, arguments.as_ptr(), false);
-          let exception = unsafe { isolate_state(isolate).pending_exception };
+          let exception = v8__TryCatch__Exception(catcher.as_ptr());
+          v8__TryCatch__DESTRUCT(catcher.as_mut_ptr());
           if exception.is_null() && !result.is_null() {
             settle_promise_value(derived, result, PromiseSettlement::Fulfilled);
           } else {
@@ -8045,6 +8052,38 @@ fn fail_module_evaluation(module: *const Module, message: &str) {
   );
 }
 
+// Evaluation failures are Promise rejections, not synchronous API failures.
+// In particular, returning null here lets Deno discard an evaluation future
+// without ever registering the rejection with its event loop.
+fn reject_module_evaluation(
+  module: *const Module,
+  message: &str,
+) -> *const Value {
+  fail_module_evaluation(module, message);
+  let Some(state) = (unsafe { module_state(module) }) else {
+    return ptr::null();
+  };
+  let exception = state.exception;
+  let isolate = current_isolate();
+  // Move only this evaluation's exception from synchronous delivery to the
+  // Promise. Never clear a different pending/caught exception.
+  let isolate_state = unsafe { isolate_state(isolate) };
+  if isolate_state.pending_exception == exception {
+    isolate_state.pending_exception = ptr::null();
+  }
+  if let Some(caught) = unsafe { isolate_state.active_try_catch.as_mut() }
+    && caught.exception == exception
+  {
+    caught.exception = ptr::null();
+  }
+  let promise =
+    allocate_promise(isolate, PromiseSettlement::Pending, ptr::null());
+  // Publish before rejection notification, which can reenter native APIs.
+  state.evaluation_result = promise.cast();
+  settle_promise_value(promise, exception, PromiseSettlement::Rejected);
+  promise.cast()
+}
+
 fn evaluate_synthetic_module(
   module: *const Module,
   context: *const Context,
@@ -8077,11 +8116,10 @@ fn evaluate_synthetic_module(
   };
 
   if result.is_null() {
-    fail_module_evaluation(
+    return reject_module_evaluation(
       module,
       "synthetic module evaluation callback returned an empty value",
     );
-    return ptr::null();
   }
   if let Some(state) = unsafe { module_state(module) } {
     state.status = STATUS_EVALUATED;
@@ -8112,8 +8150,7 @@ fn evaluate_prelinked_deno_module(
         phase,
         DENO_CORE_PRELINKED_SCRIPTS.len(),
       );
-      fail_module_evaluation(module, &error);
-      return ptr::null();
+      return reject_module_evaluation(module, &error);
     }
   }
 
@@ -8125,8 +8162,7 @@ fn evaluate_prelinked_deno_module(
       });
     if let Err(error) = result {
       eprintln!("v8x/js2wasm: {error}");
-      fail_module_evaluation(module, &error);
-      return ptr::null();
+      return reject_module_evaluation(module, &error);
     }
     let publication = (|| {
       let owner = deno_core_runtime(context)?;
@@ -8143,8 +8179,7 @@ fn evaluate_prelinked_deno_module(
       Ok::<(), String>(())
     })();
     if let Err(error) = publication {
-      fail_module_evaluation(module, &error);
-      return ptr::null();
+      return reject_module_evaluation(module, &error);
     }
   }
 
@@ -8167,6 +8202,9 @@ pub extern "C" fn v8__Module__Evaluate(
   let Some(state) = (unsafe { module_state(module) }) else {
     return ptr::null();
   };
+  if state.status == STATUS_ERRORED && !state.evaluation_result.is_null() {
+    return state.evaluation_result;
+  }
   if state.status == STATUS_EVALUATED {
     if !state.evaluation_result.is_null() {
       return state.evaluation_result;
@@ -8236,8 +8274,7 @@ pub extern "C" fn v8__Module__Evaluate(
       Ok(runtime) => runtime,
       Err(error) => {
         eprintln!("{error}");
-        fail_module_evaluation(module, &error);
-        return ptr::null();
+        return reject_module_evaluation(module, &error);
       }
     };
   if let Some(HeapValue::Context(state)) = unsafe { heap_value_mut(context) } {
@@ -8249,8 +8286,7 @@ pub extern "C" fn v8__Module__Evaluate(
   if let Err(error) =
     publish_source_namespaces(module, &runtime, &mut HashSet::new())
   {
-    fail_module_evaluation(module, &error);
-    return ptr::null();
+    return reject_module_evaluation(module, &error);
   }
   let undefined = allocate::<Value>(current_isolate(), HeapValue::Undefined);
   let promise = allocate_fulfilled_promise(current_isolate(), undefined).cast();
