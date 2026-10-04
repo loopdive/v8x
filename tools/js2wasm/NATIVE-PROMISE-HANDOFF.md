@@ -2,6 +2,33 @@
 
 ## Shared dependency regression control
 
+### Within-graph identity fix verified natively
+
+Compiler 1c2f7c35fd3c92cddabd484a07d4881f81ac3446 replaces declaration-keyed
+namespace caches with canonical module-symbol caches and handles named imports
+of namespace re-exports through that getter. Compiler namespace controls pass
+6/6, including gc and standalone identity/liveness checks. Initial six-file run
+reports 25 passed /1 failed /26; the same standalone TypeScript namespace
+Hole-global failure reproduces on clean ba14fcaedb (7/8) with unchanged tests
+and the same harness. No full regression-suite pass is claimed.
+
+The native test now first checks the entry's exported namespace against its
+dependency's native namespace. Old packages fail that first check (0/1).
+Fresh clean compiler packages make it pass, then retain the measured
+cross-graph failure: executions=2, observed=1, same namespace=false, rejected.
+Complete regression still fails 0/1, 51 filtered /52; no new Deno test passes.
+
+New package directory: /private/tmp/deno-shared-module-fixed.MBUdR1. Sources,
+graph digests, Binaryen/Wasmtime versions and small Context are unchanged.
+First native SHA256:
+77c6c4c04b5d3ab628eda33fc557329ecdba32c677c1ddc88cca5fc9d7a5d396.
+Second native SHA256:
+840a62e53aeb58aadca69c58c76a98ed7d7d1c58fd098dc323f50ba6c9cc007c.
+Replay the command below with V8X_JS2WASM_AOT_GRAPH_DIR set to that directory.
+The clean staged compiler checkout is now 1c2f7c35fd, not ba14fcaedb; historical
+artifact build pins remain unchanged. Next implement cross-graph native Module
+reuse and live imports together with once-only dependency evaluation.
+
 The generic two-entry control fails **0 passed /1 failed, 51 filtered /52**.
 The first entry succeeds and bumps the dependency's mutable count to 2.
 Evaluating the second entry then reports executions=2 (expected 1), observed

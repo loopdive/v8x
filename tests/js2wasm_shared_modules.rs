@@ -61,6 +61,18 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
   assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
   let namespace =
     v8::Local::<v8::Object>::try_from(shared.get_module_namespace()).unwrap();
+  let first_namespace =
+    v8::Local::<v8::Object>::try_from(first.get_module_namespace()).unwrap();
+  let shared_key = v8::String::new(scope, "shared").unwrap();
+  let first_identity = first_namespace
+    .get(scope, shared_key.into())
+    .unwrap()
+    .strict_equals(namespace.into());
+  eprintln!("first entry namespace matches native dependency={first_identity}");
+  assert!(
+    first_identity,
+    "the first graph must already have one canonical namespace"
+  );
   let count = v8::String::new(scope, "count").unwrap();
   assert_eq!(
     namespace
@@ -116,7 +128,6 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
     );
   }
   assert!(same_identity);
-  let shared_key = v8::String::new(scope, "shared").unwrap();
   assert!(
     second_namespace
       .get(scope, shared_key.into())

@@ -216,3 +216,6 @@ its mutable export resets, and the entries observe different namespace objects.
 The same fixture preserves these semantics under Node's V8 module evaluator.
 Canonical shared-module linking is not yet supported; the existing binding is
 never silently replaced.
+Within one graph, repeated namespace imports, namespace re-exports and native
+publication share one object. Compiler controls and the first entry of the
+native shared-dependency control verify this identity.
