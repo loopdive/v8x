@@ -2,6 +2,15 @@
 
 ## Explicit foreign getter receivers, 2026-10-04
 
+Population evidence caution: unchanged builtin_core_module and main_and_side_module
+each report 1/1 while emitting missing trusted graph-artifact errors. Their Deno
+code discards the mod_evaluate future and only awaits run_event_loop, so those
+results do not prove module bodies executed. Module::Evaluate currently records
+failure and returns null when compile_and_instantiate lacks an artifact. Next
+audit evaluation-result propagation and add positive execution/negative missing
+artifact controls before crediting module conformance; do not count these green
+rows as integration coverage. Keep original Deno tests unchanged.
+
 Compiler implementation a675081032 and adapter implementation
 1214214dcc0627d9d0cb61c4042a7413173c1558 add the optional
 `__v8x_script_get_export_receiver` three-reference export. The old two-reference
