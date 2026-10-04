@@ -13,9 +13,23 @@ pub(super) fn bind(
     let wasmtime::ExternType::Func(ty) = import.ty() else {
       return Err("module namespace capability must be a function".into());
     };
-    if ty.params().len() != 0
-      || ty.results().len() != 1
-      || !ty.results().all(|ty| ty.is_externref())
+    let event = import
+      .name()
+      .strip_suffix("_enter")
+      .map(|name| (name, false))
+      .or_else(|| {
+        import
+          .name()
+          .strip_suffix("_complete")
+          .map(|name| (name, true))
+      });
+    if event.is_some() && (ty.params().len() != 0 || ty.results().len() != 0) {
+      return Err("module evaluation event must have () -> void ABI".into());
+    }
+    if event.is_none()
+      && (ty.params().len() != 0
+        || ty.results().len() != 1
+        || !ty.results().all(|ty| ty.is_externref()))
     {
       return Err(
         "module namespace capability must have () -> externref ABI".into(),
@@ -33,7 +47,8 @@ pub(super) fn bind(
           .map(|byte| format!("{byte:02x}"))
           .collect();
         let suffix = if suffix.is_empty() { "00" } else { &suffix };
-        import.name() == format!("__v8x_module_namespace_{suffix}")
+        event.map_or(import.name(), |(name, _)| name)
+          == format!("__v8x_module_namespace_{suffix}")
       })
       .collect();
     if matching.len() != 1 {
@@ -44,6 +59,29 @@ pub(super) fn bind(
     }
     let target = matching[0].1;
     let context = bindings.context;
+    if let Some((_, complete)) = event {
+      linker
+        .func_new(
+          DENO_IMPORT_MODULE,
+          import.name(),
+          ty,
+          move |caller, _, _| {
+            let identity = caller.data().realm_owner_identity;
+            let mut access =
+              CallerRealm::new(caller).map_err(wasmtime::Error::msg)?;
+            crate::js2wasm::module_evaluation_event(
+              context as *const crate::Context,
+              target as *const crate::Module,
+              identity,
+              complete,
+              &mut access,
+            )
+            .map_err(wasmtime::Error::msg)
+          },
+        )
+        .map_err(|error| format!("bind module evaluation event: {error:#}"))?;
+      continue;
+    }
     linker
       .func_new(
         DENO_IMPORT_MODULE,

@@ -390,6 +390,17 @@ fn dispatch(
       {
         routes.push((*graph, owns, "__v8x_graph_get_owned_export", true));
       }
+      if dispatch_name == "__v8x_graph_call_export"
+        && let Some(owns) = graph.get_func(&mut scope, "__v8x_graph_owns")
+        && graph
+          .get_func(&mut scope, "__v8x_graph_call_owned_export")
+          .is_some()
+      {
+        // A completed dependency's callable can escape before the entry's
+        // export registry becomes ready. Allocation ownership still proves
+        // the original dispatcher and receiver globals, not URL reachability.
+        routes.push((*graph, owns, "__v8x_graph_call_owned_export", true));
+      }
       if let Some(matcher) = graph.get_func(&mut scope, matcher_name) {
         routes.insert(0, (*graph, matcher, dispatch_name, false));
       } else {

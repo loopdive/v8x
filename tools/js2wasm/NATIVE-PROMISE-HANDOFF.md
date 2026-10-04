@@ -1,5 +1,66 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Clean native source failure lifecycle replay
+
+The previously failing source-dependency control now passes 1/1 (54 filtered
+/55) with clean compiler 4a98f06ae2 packages. Module/Context lifecycle imports
+are validated, completion binds the original live namespace using Caller realm
+access before publishing Evaluated, and failure propagates only through
+executing sources and their consumers. Completed dependencies are not re-read
+from a user-visible registry during failure handling. Untouched siblings and
+unrelated same-URL Modules are not marked errored.
+
+The strengthened graph includes a successful prefix, a throwing dependency
+behind an intermediate module, and an untouched later dependency. Native
+exception, rejection and repeated-evaluation identity are retained. Prefix
+namespace stays usable after failure; original-owner bump changes 7 to 8,
+snapshot returns an object containing 8, a second graph imports the identical
+namespace and initializes at 8, and a later bump produces live 9 while that
+initialized export remains 8. Prefix executes exactly once and intermediate/
+later side effects remain absent. Runtime compiler/interpreter counters are
+zero. Identical V8 fixture control passes 1/1.
+
+Additional fixes: generated graph readiness must be hoisted, not an unentered
+lexical TDZ; escaped-value tracking initializes lazily; calls can route through
+the original proven allocation owner even before entry export readiness.
+Compatible closure types or reachability do not authorize another dispatcher.
+This call path was verified with mutations, not just a successful return.
+
+Packages `/private/tmp/deno-lifecycle-clean.EsCrQw` are built from the clean
+independent compiler checkout `/private/tmp/deno-promise-full.X2WdwN/js2` at
+4a98f06ae2. Binaryen 125 O3, Wasmtime 47.0.3, existing small Context unchanged.
+The builder explicitly requests `--module-lifecycle true`; normal sidecar
+packaging still defaults off. Earlier failing baseline receipts below are
+historical and do not describe this expanded fixture.
+
+| Graph | Binding digest | Native SHA256 | Optimized Wasm SHA256 |
+| --- | --- | --- | --- |
+| entry | a71944ffa13b7807eb408afa60431e6468d1fd0ccf0f33405ae5b97ab4a40ab4 | ec3c2fc5799e83a28e2f47abb3f5d8c30779f2842220279bbe91d3cd21c3677f | ad745734d5c42d55fb0294a0510eb2ecbeb537063042936c658c617dcf781b32 |
+| consumer | 2c254348d8b9195dd5359e9b73d4a0235a2beb5206a57ac908cba7c7a9cd6655 | 525f019878683d3d2a097095c36b3fe8ba09bec679fdf0f0d6ab0cdda1e86608 | e0fd2cfb1bcb98da619784fe656a16b140212125f69e8f8d36c20ed5e917d37f |
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-failed-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-lifecycle-clean.EsCrQw
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-lifecycle-clean.EsCrQw target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_first_dependency_failure_preserves_execution_states --ignored --nocapture --test-threads=1
+```
+
+Missing package directory `missing-graphs` fails 0/1, exit 101, at missing
+exact binding and prefix-state floor. Filtered adapter library passes 17/17
+(16 filtered /33), including preservation of completed/unentered/unrelated
+same-URL Modules. Ordinary native controls pass 35 with 19 ignored and one
+input-dependent Script test filtered /55. Typed and shared-owner AOT replays
+each pass 1/1 (54 filtered /55). Compiler focused controls pass 18/18 across
+four files, with typechecking/format/scoped lint/source ratchets passing;
+retirement is still not certified. Selected unchanged Deno controls pass 5/5
+against the final rebuilt adapter, each 430 filtered /431, using existing older
+graph/Script packages and unchanged Context. The full 431-test population is
+not certified. Site rendering remains unavailable because Typst is absent.
+
+Next: enable/rebuild ordinary shared module packages with lifecycle events and
+verify broader unchanged Deno modules; fix mixed fresh-prefix/cached-failure
+delivery using the original JS exception tag; prove native prepared-IR
+participation; general cycles/TDZ, synthetic/source composition, snapshots,
+remaining host integration and matched benchmarks. Both PRs remain drafts.
+
 ## First source dependency failure: failing lifecycle control
 
 New ignored public test

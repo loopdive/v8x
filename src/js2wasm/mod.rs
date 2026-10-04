@@ -8049,6 +8049,77 @@ fn mark_evaluated(module: *const Module, seen: &mut HashSet<usize>) {
   }
 }
 
+pub(crate) fn module_evaluation_event(
+  context: *const Context,
+  module: *const Module,
+  identity: usize,
+  complete: bool,
+  access: &mut dyn crate::js2wasm_spike::RealmAccess,
+) -> Result<(), String> {
+  let owner = realm_objects::import_meta_owner(context, identity)?;
+  let state = unsafe { module_state(module) }
+    .ok_or("module evaluation event lost its native Module")?;
+  if state.synthetic.is_some()
+    || !matches!(state.status, STATUS_INSTANTIATED | STATUS_EVALUATING)
+  {
+    return Err(
+      "module evaluation event has incompatible execution state".into(),
+    );
+  }
+  if complete && state.status != STATUS_EVALUATING {
+    return Err("module completed without entering evaluation".into());
+  }
+  if complete {
+    let namespace = state.namespace;
+    let specifier = state.specifier.clone();
+    realm_objects::bind_source_namespace_access(
+      namespace, &owner, &specifier, access,
+    )?;
+  }
+  let state = unsafe { module_state(module) }
+    .ok_or("Module disappeared during completion")?;
+  state.runtime = Some(owner);
+  state.status = if complete {
+    STATUS_EVALUATED
+  } else {
+    STATUS_EVALUATING
+  };
+  Ok(())
+}
+
+// Postorder preserves completed and untouched siblings while propagating an
+// executing source's abrupt completion through its not-yet-entered consumers.
+fn finish_failed_source_graph(
+  module: *const Module,
+  exception: *const Value,
+  seen: &mut HashSet<usize>,
+) -> Result<bool, String> {
+  if !seen.insert(module as usize) {
+    return Ok(false);
+  }
+  let (status, dependencies) = unsafe { module_state(module) }
+    .map(|state| (state.status, state.dependencies.clone()))
+    .ok_or("failed source graph lost its native Module")?;
+  // Normal completion already bound the canonical namespace before publishing
+  // Evaluated. Do not reread a user-visible registry after another source fails.
+  if status == STATUS_EVALUATED {
+    return Ok(false);
+  }
+  let mut failed_dependency = false;
+  for dependency in dependencies {
+    failed_dependency |=
+      finish_failed_source_graph(dependency, exception, seen)?;
+  }
+  if status == STATUS_EVALUATING || failed_dependency {
+    let state =
+      unsafe { module_state(module) }.ok_or("failed Module disappeared")?;
+    state.status = STATUS_ERRORED;
+    state.exception = exception;
+    return Ok(true);
+  }
+  Ok(status == STATUS_ERRORED)
+}
+
 fn publish_source_namespaces(
   module: *const Module,
   owner: &Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
@@ -8455,6 +8526,14 @@ pub extern "C" fn v8__Module__Evaluate(
           if let Err(capture) = realm_objects::record_module_exception(&owner) {
             eprintln!("capture original module exception: {capture}");
           }
+          let exception = current_recorded_exception();
+          if !exception.is_null() {
+            if let Err(publication) =
+              finish_failed_source_graph(module, exception, &mut HashSet::new())
+            {
+              eprintln!("publish partial source evaluation: {publication}");
+            }
+          }
         }
         return reject_module_evaluation(module, &error);
       }
@@ -8538,6 +8617,58 @@ mod tests {
       attributes: Vec::new(),
       phase: StaticImportPhase::Evaluation,
     }
+  }
+
+  #[test]
+  fn failed_source_graph_preserves_completed_and_unentered_modules() {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    let modules: Vec<_> = (0..6)
+      .map(|_| test_source_module(isolate, "same-url", Vec::new()))
+      .collect();
+    let [root, prefix, middle, failed, later, unrelated] = modules.as_slice()
+    else {
+      panic!("six native Modules required");
+    };
+    let marker = new_object(isolate).cast();
+    for (&module, status) in modules.iter().zip([
+      STATUS_EVALUATING,
+      STATUS_EVALUATED,
+      STATUS_INSTANTIATED,
+      STATUS_EVALUATING,
+      STATUS_INSTANTIATED,
+      STATUS_EVALUATING,
+    ]) {
+      unsafe { module_state(module) }.unwrap().status = status;
+    }
+    unsafe { module_state(*root) }.unwrap().dependencies =
+      vec![*prefix, *middle, *later];
+    unsafe { module_state(*middle) }.unwrap().dependencies = vec![*failed];
+    assert!(
+      finish_failed_source_graph(*root, marker, &mut HashSet::new()).unwrap()
+    );
+    for (&module, expected) in modules.iter().zip([
+      STATUS_ERRORED,
+      STATUS_EVALUATED,
+      STATUS_ERRORED,
+      STATUS_ERRORED,
+      STATUS_INSTANTIATED,
+      STATUS_EVALUATING,
+    ]) {
+      let state = unsafe { module_state(module) }.unwrap();
+      assert_eq!(state.status, expected);
+      assert_eq!(
+        state.exception,
+        if expected == STATUS_ERRORED {
+          marker
+        } else {
+          ptr::null()
+        }
+      );
+    }
+    assert_ne!(*root, *unrelated, "same URL is not the same graph identity");
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
   }
 
   #[test]

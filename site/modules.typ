@@ -41,8 +41,12 @@ dependency prevents this shortcut so its execution order is retained.
 Leading synthetic dependencies execute their native callbacks before source
 graph packaging. A first callback failure retains the original exception too.
 Successful synthetic/source graph composition is not yet supported.
-After a source dependency fails inside a flattened graph, the entry records
-failure but dependency execution states are not yet preserved correctly.
+Opt-in source lifecycle packages publish a completed dependency's namespace
+before a later source fails. Completed dependencies remain usable, executing
+sources and their consumers retain the original exception, and later siblings
+remain untouched. Calls into the completed dependency retain its original
+allocation owner even before the failed entry's export registry is ready.
+Packages without lifecycle events cannot recover these per-source states.
 General cyclic evaluation, snapshots, and complete Deno integration remain
 unverified.
 

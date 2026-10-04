@@ -511,6 +511,15 @@ pub(super) fn bind_source_namespace(
   let mut runtime = owner.try_borrow_mut().map_err(|_| {
     "namespace publication re-entered an executing realm".to_string()
   })?;
+  bind_source_namespace_access(host, owner, specifier, &mut *runtime)
+}
+
+pub(crate) fn bind_source_namespace_access(
+  host: *const Object,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  specifier: &str,
+  runtime: &mut dyn RealmAccess,
+) -> Result<(), String> {
   let global = runtime.realm_global()?;
   let registry_key = runtime.realm_string(
     &"__v8x_source_module_namespaces"

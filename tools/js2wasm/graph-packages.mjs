@@ -23,7 +23,7 @@ export function graphDigest(entry, modules) {
   return hash.digest("hex");
 }
 
-export function packageGraph(compiler, precompiler, entry, modules, directory) {
+export function packageGraph(compiler, precompiler, entry, modules, directory, options = {}) {
   assert(modules.length > 0);
   assert.equal(new Set(modules.map(m => m.specifier)).size, modules.length);
   assert(modules.some(m => m.specifier === entry));
@@ -46,7 +46,8 @@ export function packageGraph(compiler, precompiler, entry, modules, directory) {
   };
   run(process.execPath, ["--experimental-wasm-exnref", "--import", "tsx",
     join(resolve(compiler), "examples/v8x-js2wasm-spike/compile-graph.ts"),
-    "--manifest", manifest, "--entry", entry, "--output", raw], {cwd:resolve(compiler)});
+    "--manifest", manifest, "--entry", entry, "--output", raw,
+    ...(options.lifecycle ? ["--module-lifecycle", "true"] : [])], {cwd:resolve(compiler)});
   const optimizer = join(resolve(compiler), "node_modules/binaryen/bin/wasm-opt");
   run(process.execPath, [optimizer, raw, "--no-inline", "-O3",
     "--pass-arg=no-inline@__new_*", "--all-features", "--disable-custom-descriptors", "-g", "-o", optimized]);

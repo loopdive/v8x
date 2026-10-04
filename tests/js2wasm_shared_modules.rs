@@ -51,6 +51,10 @@ fn aot_first_dependency_failure_preserves_execution_states() {
       "later",
       include_str!("fixtures/js2wasm-failed-module/later.js"),
     ),
+    (
+      "middle",
+      include_str!("fixtures/js2wasm-failed-module/middle.js"),
+    ),
   ] {
     let module =
       compile(scope, &format!("file:///failed-module/{name}.js"), text);
@@ -68,17 +72,28 @@ fn aot_first_dependency_failure_preserves_execution_states() {
   let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
   assert_eq!(promise.state(), v8::PromiseState::Rejected);
   let modules = context.get_slot::<FailureGraphModules>().unwrap();
+  assert_eq!(modules.0.len(), 4);
   for ((name, module), expected) in modules.0.iter().zip([
     v8::ModuleStatus::Evaluated,
     v8::ModuleStatus::Errored,
     v8::ModuleStatus::Instantiated,
+    v8::ModuleStatus::Errored,
   ]) {
     let module = v8::Local::new(caught, module);
     assert_eq!(module.get_status(), expected, "{name} execution state");
   }
   let global = context.global(caught);
   let key = v8::String::new(caught, "moduleThrownToken").unwrap();
-  let token = global.get(caught, key.into()).unwrap();
+  let token = global.get(caught, key.into());
+  if token.is_none() {
+    let exception = caught.exception().unwrap();
+    let text = exception
+      .to_string(caught)
+      .unwrap()
+      .to_rust_string_lossy(caught);
+    panic!("failed graph global Get: {text}");
+  }
+  let token = token.unwrap();
   assert!(token.is_object(), "failure fixture must actually execute");
   assert!(promise.result(caught).strict_equals(token));
   assert!(entry.get_exception().strict_equals(token));
@@ -91,19 +106,133 @@ fn aot_first_dependency_failure_preserves_execution_states() {
   );
   let key = v8::String::new(caught, "laterRuns").unwrap();
   assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  let key = v8::String::new(caught, "middleRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
   let modules = context.get_slot::<FailureGraphModules>().unwrap();
   for ((name, module), expected) in modules.0.iter().zip([
     v8::ModuleStatus::Evaluated,
     v8::ModuleStatus::Errored,
     v8::ModuleStatus::Instantiated,
+    v8::ModuleStatus::Errored,
   ]) {
     let module = v8::Local::new(caught, module);
     assert_eq!(module.get_status(), expected, "{name} execution state");
     if expected == v8::ModuleStatus::Errored {
       assert!(module.get_exception().strict_equals(token));
+      let result = module.evaluate(caught).unwrap();
+      let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+      assert_eq!(promise.state(), v8::PromiseState::Rejected);
+      assert!(promise.result(caught).strict_equals(token));
+      assert!(module.evaluate(caught).unwrap().strict_equals(result));
+      promise.mark_as_handled();
+    }
+    if expected == v8::ModuleStatus::Evaluated {
+      let namespace =
+        v8::Local::<v8::Object>::try_from(module.get_module_namespace())
+          .unwrap();
+      let key = v8::String::new(caught, "value").unwrap();
+      assert_eq!(
+        namespace
+          .get(caught, key.into())
+          .unwrap()
+          .number_value(caught),
+        Some(7.0)
+      );
+      let result = module.evaluate(caught).unwrap();
+      let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+      assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+      assert!(module.evaluate(caught).unwrap().strict_equals(result));
     }
   }
   assert!(entry.evaluate(caught).unwrap().strict_equals(result));
+  let prefix = v8::Local::new(caught, &modules.0[0].1);
+  let prefix_namespace = prefix.get_module_namespace();
+  let prefix_object =
+    v8::Local::<v8::Object>::try_from(prefix_namespace).unwrap();
+  let key = v8::String::new(caught, "bump").unwrap();
+  let bump = v8::Local::<v8::Function>::try_from(
+    prefix_object.get(caught, key.into()).unwrap(),
+  )
+  .unwrap();
+  assert!(bump.call(caught, prefix_namespace, &[]).is_some());
+  let key = v8::String::new(caught, "value").unwrap();
+  assert_eq!(
+    prefix_object
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let key = v8::String::new(caught, "snapshot").unwrap();
+  let snapshot = v8::Local::<v8::Function>::try_from(
+    prefix_object.get(caught, key.into()).unwrap(),
+  )
+  .unwrap();
+  let snapshot = v8::Local::<v8::Object>::try_from(
+    snapshot.call(caught, prefix_namespace, &[]).unwrap(),
+  )
+  .unwrap();
+  let key = v8::String::new(caught, "value").unwrap();
+  assert_eq!(
+    snapshot
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let consumer = compile(
+    caught,
+    "file:///failed-module/consumer.js",
+    include_str!("fixtures/js2wasm-failed-module/consumer.js"),
+  );
+  assert_eq!(consumer.instantiate_module(caught, resolve), Some(true));
+  let result = consumer.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  let namespace =
+    v8::Local::<v8::Object>::try_from(consumer.get_module_namespace()).unwrap();
+  let key = v8::String::new(caught, "observed").unwrap();
+  assert_eq!(
+    namespace
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let key = v8::String::new(caught, "prefix").unwrap();
+  assert!(
+    namespace
+      .get(caught, key.into())
+      .unwrap()
+      .strict_equals(prefix_namespace)
+  );
+  assert!(bump.call(caught, prefix_namespace, &[]).is_some());
+  let key = v8::String::new(caught, "live").unwrap();
+  let live = v8::Local::<v8::Function>::try_from(
+    namespace.get(caught, key.into()).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(
+    live
+      .call(caught, namespace.into(), &[])
+      .unwrap()
+      .number_value(caught),
+    Some(9.0)
+  );
+  let key = v8::String::new(caught, "observed").unwrap();
+  assert_eq!(
+    namespace
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let key = v8::String::new(caught, "prefixRuns").unwrap();
+  assert_eq!(
+    global.get(caught, key.into()).unwrap().number_value(caught),
+    Some(1.0)
+  );
+  assert!(!caught.has_caught());
   let stats = v8::js2wasm_runtime_stats().unwrap();
   assert_eq!(stats.compilations, 0);
   assert_eq!(stats.runtime_eval_instantiations, 0);

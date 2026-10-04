@@ -12,4 +12,7 @@ const fixture = name => ({
 });
 const entry = fixture("entry");
 console.log(packageGraph(compiler, precompiler, entry.specifier,
-  [entry, fixture("prefix"), fixture("shared"), fixture("later")], output));
+  [entry, fixture("prefix"), fixture("middle"), fixture("shared"), fixture("later")], output, { lifecycle: true }));
+const consumer = fixture("consumer");
+console.log(packageGraph(compiler, precompiler, consumer.specifier,
+  [consumer, fixture("prefix")], output, { lifecycle: true }));
