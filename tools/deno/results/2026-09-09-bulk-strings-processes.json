@@ -1,0 +1,289 @@
+{
+  "date": "2026-09-09T16:46:01.718Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "repeats": 7,
+  "engines": [
+    {
+      "name": "v8",
+      "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "db2e9e9be6037207ae3e50f6e580db8ae60e9b4b63f1b44951005c77c0db93c7"
+      },
+      "sharedLibraries": [],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk-strings/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "94c39f2c0896a9d9c721c08fca08ddb9264000c044d2df95031997691e4c1db9"
+      },
+      "payloadBytes": 39078032
+    },
+    {
+      "name": "quickjs",
+      "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "4c5d27efb48bc976e822846e6ccfb22c59f416318e29f2475d3238752b7d6893"
+      },
+      "sharedLibraries": [],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk-strings/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "ce1239d2fd39efcafe1a8c317da9c554f67ba94ec8bf9465b14b2478949fa054"
+      },
+      "payloadBytes": 5613536
+    },
+    {
+      "name": "js2wasm",
+      "collector": "copying",
+      "path": "/private/tmp/v8x-deno-followup-20260908/target/release/examples/hello_world",
+      "artifacts": [
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/core-bulk-strings-copying-speed.cwasm",
+          "bytes": 50102616,
+          "sha256": "cdefe232abd6f48b98890f3f5afc72ed41a3ddfd21cd933cc29be9dfda3f42fb"
+        }
+      ],
+      "original": {
+        "path": "/private/tmp/v8x-deno-followup-20260908/target/release/examples/hello_world",
+        "bytes": 2124320,
+        "sha256": "a525e18420f2fd5549d7ac9205ab7d1e71f9fc9b9387fca443c840d1140214b8"
+      },
+      "sharedLibraries": [
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk-strings/libv8.dylib",
+          "bytes": 6388528,
+          "sha256": "8efc1f16f860281097442c9ff3603f3bad8344a069f611ce07439921d1c04af9"
+        },
+        {
+          "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk-strings/libstd-09bec66e14073fe6.dylib",
+          "bytes": 1216576,
+          "sha256": "51b1103464864cae2cdf6e60eecd8b2ed81bc5da9a72f20db6fa21cd586c400d"
+        }
+      ],
+      "stripped": {
+        "path": "/private/tmp/deno-profile.RCcI44/comparison-bulk-strings/hello-world-js2wasm",
+        "bytes": 1691456,
+        "sha256": "444bba9515fb9afef3d3a245ddc2096492f603dc94b45e0441dbacab0f309913"
+      },
+      "payloadBytes": 59399176
+    }
+  ],
+  "runs": [
+    {
+      "engine": "v8",
+      "round": 1,
+      "wallMs": 593.402667,
+      "peakRssBytes": 21217280,
+      "peakPhysicalFootprintBytes": 6751408,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 1,
+      "wallMs": 302.795708,
+      "peakRssBytes": 18694144,
+      "peakPhysicalFootprintBytes": 11239808,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 1,
+      "wallMs": 776.643458,
+      "peakRssBytes": 54689792,
+      "peakPhysicalFootprintBytes": 6177248,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 2,
+      "wallMs": 22.38237499999991,
+      "peakRssBytes": 18694144,
+      "peakPhysicalFootprintBytes": 11239808,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 2,
+      "wallMs": 75.77025000000003,
+      "peakRssBytes": 54722560,
+      "peakPhysicalFootprintBytes": 6210016,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 2,
+      "wallMs": 7.8722499999998945,
+      "peakRssBytes": 21184512,
+      "peakPhysicalFootprintBytes": 6702256,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 3,
+      "wallMs": 75.50149999999985,
+      "peakRssBytes": 54706176,
+      "peakPhysicalFootprintBytes": 6193632,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 3,
+      "wallMs": 8.206249999999727,
+      "peakRssBytes": 21233664,
+      "peakPhysicalFootprintBytes": 6767816,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 3,
+      "wallMs": 22.351333000000068,
+      "peakRssBytes": 18710528,
+      "peakPhysicalFootprintBytes": 11256192,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 4,
+      "wallMs": 7.8022500000001855,
+      "peakRssBytes": 21217280,
+      "peakPhysicalFootprintBytes": 6767840,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 4,
+      "wallMs": 22.479874999999993,
+      "peakRssBytes": 18759680,
+      "peakPhysicalFootprintBytes": 11305344,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 4,
+      "wallMs": 75.63949999999977,
+      "peakRssBytes": 54591488,
+      "peakPhysicalFootprintBytes": 6078944,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 5,
+      "wallMs": 24.46304199999986,
+      "peakRssBytes": 18677760,
+      "peakPhysicalFootprintBytes": 11223424,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 5,
+      "wallMs": 77.16879199999994,
+      "peakRssBytes": 54657024,
+      "peakPhysicalFootprintBytes": 6144480,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 5,
+      "wallMs": 8.139415999999983,
+      "peakRssBytes": 21184512,
+      "peakPhysicalFootprintBytes": 6735048,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 6,
+      "wallMs": 75.691417,
+      "peakRssBytes": 54640640,
+      "peakPhysicalFootprintBytes": 6128096,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 6,
+      "wallMs": 8.124083000000155,
+      "peakRssBytes": 21217280,
+      "peakPhysicalFootprintBytes": 6751432,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 6,
+      "wallMs": 22.43079200000011,
+      "peakRssBytes": 18726912,
+      "peakPhysicalFootprintBytes": 11272576,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 7,
+      "wallMs": 7.767709000000195,
+      "peakRssBytes": 21200896,
+      "peakPhysicalFootprintBytes": 6735048,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 7,
+      "wallMs": 22.31925000000001,
+      "peakRssBytes": 18726912,
+      "peakPhysicalFootprintBytes": 11272576,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 7,
+      "wallMs": 79.5629170000002,
+      "peakRssBytes": 54689792,
+      "peakPhysicalFootprintBytes": 6177248,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    }
+  ]
+}

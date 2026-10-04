@@ -20,9 +20,10 @@
 # rejects, upstream touched a patched file — reconcile by hand. New v8__* that
 # upstream declares surface as undefined-symbol link errors on the next build.
 #
-# Usage: setup_vendor.sh [rusty_v8|quickjs]
+# Usage: setup_vendor.sh [rusty_v8|quickjs|js2wasm]
 #   rusty_v8  (default) only the Rust API surface — enough for the JSC backend
 #   quickjs             also the QuickJS + WAMR engine submodules
+#   js2wasm             Rust API surface without Chromium ICU test data
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -106,8 +107,9 @@ apply_series vendor/rusty_v8 rusty_v8
 # rusty_v8's tests embed third_party/icu/common/icudtl.dat at compile time. Keep
 # the real pinned Chromium ICU data available, but do not commit the 10 MiB blob
 # in this repo (the path is ignored at the top level).
-if [ ! -s vendor/rusty_v8/third_party/icu/common/icudtl.dat ] || \
-   [ "$(wc -c < vendor/rusty_v8/third_party/icu/common/icudtl.dat 2>/dev/null || echo 0)" -lt 1048576 ]; then
+if [ "$MODE" != js2wasm ] && { \
+   [ ! -s vendor/rusty_v8/third_party/icu/common/icudtl.dat ] || \
+   [ "$(wc -c < vendor/rusty_v8/third_party/icu/common/icudtl.dat 2>/dev/null || echo 0)" -lt 1048576 ]; }; then
   rm -rf vendor/rusty_v8/third_party/icu
   git -C vendor/rusty_v8 submodule update --init third_party/icu
 fi

@@ -1,0 +1,1281 @@
+// Copyright 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+use super::*;
+
+struct SharedModule(v8::Global<v8::Module>);
+
+struct CachedFailure {
+  payload: v8::Global<v8::Value>,
+  calls: Cell<u32>,
+}
+
+struct FailureGraphModules(Vec<(String, v8::Global<v8::Module>)>);
+
+struct NativeSourceDependency {
+  module: v8::Global<v8::Module>,
+  marker: v8::Global<v8::Value>,
+  calls: Cell<u32>,
+}
+
+fn native_export_evaluation<'s>(
+  context: v8::Local<'s, v8::Context>,
+  module: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Value>> {
+  v8::callback_scope!(unsafe scope, context);
+  let state = context.get_slot::<NativeSourceDependency>().unwrap();
+  state.calls.set(state.calls.get() + 1);
+  let marker = v8::Local::new(scope, &state.marker);
+  let key = v8::String::new(scope, "value").unwrap();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, marker),
+    Some(true)
+  );
+  let resolver = v8::PromiseResolver::new(scope).unwrap();
+  let undefined = v8::undefined(scope);
+  assert_eq!(resolver.resolve(scope, undefined.into()), Some(true));
+  Some(resolver.get_promise(scope).into())
+}
+
+#[test]
+#[ignore = "requires precompiled Context with live getter bridge"]
+fn native_synthetic_namespace_reads_authoritative_export_slots() {
+  unsafe extern "C" fn exported_callback(
+    info: *const v8::FunctionCallbackInfo,
+  ) {
+    let parts = unsafe { &*info }.get_parts();
+    let mut result = parts.return_value;
+    result.set_double(42.0);
+  }
+  fn resolve<'s>(
+    _context: v8::Local<'s, v8::Context>,
+    _specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    panic!("synthetic Module cannot have imports");
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let marker: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  let name = v8::String::new(scope, "custom:native").unwrap();
+  let key = v8::String::new(scope, "value").unwrap();
+  let module = v8::Module::create_synthetic_module(
+    scope,
+    name,
+    &[key],
+    native_export_evaluation,
+  );
+  context.set_slot(Rc::new(NativeSourceDependency {
+    module: v8::Global::new(scope, module),
+    marker: v8::Global::new(scope, marker),
+    calls: Cell::new(0),
+  }));
+  assert_eq!(module.instantiate_module(scope, resolve), Some(true));
+  assert!(
+    v8::js2wasm_bind_synthetic_namespace_for_test(&context, &module).is_err()
+  );
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    0
+  );
+  let result = module.evaluate(scope).unwrap();
+  assert_eq!(
+    v8::Local::<v8::Promise>::try_from(result).unwrap().state(),
+    v8::PromiseState::Fulfilled
+  );
+  let namespace = module.get_module_namespace();
+  v8::js2wasm_bind_synthetic_namespace_for_test(&context, &module).unwrap();
+  let namespace_object = v8::Local::<v8::Object>::try_from(namespace).unwrap();
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(marker)
+  );
+  assert!(namespace_object.get_prototype(scope).unwrap().is_null());
+  let replacement: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, replacement),
+    Some(true)
+  );
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  assert_eq!(namespace_object.set(scope, key.into(), marker), Some(false));
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  let callable = v8::Function::new_raw(scope, exported_callback).unwrap();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, callable.into()),
+    Some(true)
+  );
+  let observed = namespace_object.get(scope, key.into()).unwrap();
+  assert!(observed.strict_equals(callable.into()));
+  let observed = v8::Local::<v8::Function>::try_from(observed).unwrap();
+  assert_eq!(
+    observed
+      .call(scope, namespace, &[])
+      .unwrap()
+      .number_value(scope),
+    Some(42.0)
+  );
+  let symbol: v8::Local<v8::Value> = v8::Symbol::new(scope, None).into();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, symbol),
+    Some(true)
+  );
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(symbol)
+  );
+  let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+  assert_eq!(
+    module.set_synthetic_module_export(scope, key, undefined),
+    Some(true)
+  );
+  assert!(
+    namespace_object
+      .get(scope, key.into())
+      .unwrap()
+      .is_undefined()
+  );
+  v8::js2wasm_bind_synthetic_namespace_for_test(&context, &module).unwrap();
+  assert!(module.get_module_namespace().strict_equals(namespace));
+  assert!(module.evaluate(scope).unwrap().strict_equals(result));
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    1
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound synthetic/source graph"]
+fn aot_source_imports_live_synthetic_exports() {
+  fn evaluate<'s>(
+    context: v8::Local<'s, v8::Context>,
+    module: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+    let state = context.get_slot::<NativeSourceDependency>().unwrap();
+    state.calls.set(state.calls.get() + 1);
+    let marker = v8::Local::new(scope, &state.marker);
+    let key = v8::String::new(scope, "value").unwrap();
+    assert_eq!(
+      module.set_synthetic_module_export(scope, key, marker),
+      Some(true)
+    );
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let undefined = v8::undefined(scope);
+    assert_eq!(resolver.resolve(scope, undefined.into()), Some(true));
+    Some(resolver.get_promise(scope).into())
+  }
+  fn resolve<'s>(
+    context: v8::Local<'s, v8::Context>,
+    specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    v8::callback_scope!(unsafe scope, context);
+    assert_eq!(specifier.to_rust_string_lossy(scope), "custom:native");
+    Some(v8::Local::new(
+      scope,
+      &context.get_slot::<NativeSourceDependency>()?.module,
+    ))
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let marker: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  let name = v8::String::new(scope, "custom:native").unwrap();
+  let key = v8::String::new(scope, "value").unwrap();
+  let native =
+    v8::Module::create_synthetic_module(scope, name, &[key], evaluate);
+  context.set_slot(Rc::new(NativeSourceDependency {
+    module: v8::Global::new(scope, native),
+    marker: v8::Global::new(scope, marker),
+    calls: Cell::new(0),
+  }));
+  let entry = compile(
+    scope,
+    "file:///synthetic-source/entry.js",
+    include_str!("fixtures/js2wasm-synthetic-source/entry.js"),
+  );
+  assert_eq!(entry.instantiate_module(scope, resolve), Some(true));
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    0
+  );
+  let result = entry.evaluate(scope).unwrap();
+  assert_eq!(native.get_status(), v8::ModuleStatus::Evaluated);
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    1
+  );
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  let namespace =
+    v8::Local::<v8::Object>::try_from(entry.get_module_namespace()).unwrap();
+  let observed = v8::String::new(scope, "observed").unwrap();
+  assert!(
+    namespace
+      .get(scope, observed.into())
+      .unwrap()
+      .strict_equals(marker)
+  );
+  let live = v8::String::new(scope, "live").unwrap();
+  let live = v8::Local::<v8::Function>::try_from(
+    namespace.get(scope, live.into()).unwrap(),
+  )
+  .unwrap();
+  let replacement: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  assert_eq!(
+    native.set_synthetic_module_export(scope, key, replacement),
+    Some(true)
+  );
+  assert!(
+    live
+      .call(scope, namespace.into(), &[])
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  assert!(
+    namespace
+      .get(scope, observed.into())
+      .unwrap()
+      .strict_equals(marker)
+  );
+  let getter = v8::String::new(scope, "namespace").unwrap();
+  let getter = v8::Local::<v8::Function>::try_from(
+    namespace.get(scope, getter.into()).unwrap(),
+  )
+  .unwrap();
+  let actual = getter.call(scope, namespace.into(), &[]).unwrap();
+  assert!(actual.strict_equals(native.get_module_namespace()));
+  let actual = v8::Local::<v8::Object>::try_from(actual).unwrap();
+  assert_eq!(actual.set(scope, key.into(), marker), Some(false));
+  assert!(
+    actual
+      .get(scope, key.into())
+      .unwrap()
+      .strict_equals(replacement)
+  );
+  assert!(entry.evaluate(scope).unwrap().strict_equals(result));
+  assert_eq!(
+    context
+      .get_slot::<NativeSourceDependency>()
+      .unwrap()
+      .calls
+      .get(),
+    1
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+struct NestedFailure {
+  module: v8::Global<v8::Module>,
+  calls: Cell<u32>,
+}
+
+unsafe extern "C" fn nested_module_host(info: *const v8::FunctionCallbackInfo) {
+  let parts = unsafe { &*info }.get_parts();
+  v8::callback_scope!(unsafe scope, &parts);
+  let context = scope.get_current_context();
+  let state = context.get_slot::<NestedFailure>().unwrap();
+  state.calls.set(state.calls.get() + 1);
+  let module = v8::Local::new(scope, &state.module);
+  v8::tc_scope!(let caught, scope);
+  let result = module.evaluate(caught).expect("nested evaluation Promise");
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert_eq!(module.get_status(), v8::ModuleStatus::Errored);
+  let payload = promise.result(caught);
+  assert!(payload.is_object());
+  assert!(module.get_exception().strict_equals(payload));
+  assert!(module.evaluate(caught).unwrap().strict_equals(result));
+  promise.mark_as_handled();
+  assert!(!caught.has_caught());
+  caught.throw_exception(payload);
+  caught.rethrow();
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound nested failure graphs"]
+fn aot_nested_module_failure_preserves_original_exception() {
+  fn resolve<'s>(
+    _context: v8::Local<'s, v8::Context>,
+    _specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    panic!("single-source graphs must not resolve dependencies");
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let nested = compile(
+    scope,
+    "file:///failed-module/shared.js",
+    include_str!("fixtures/js2wasm-failed-module/shared.js"),
+  );
+  assert_eq!(nested.instantiate_module(scope, resolve), Some(true));
+  context.set_slot(Rc::new(NestedFailure {
+    module: v8::Global::new(scope, nested),
+    calls: Cell::new(0),
+  }));
+  let global = context.global(scope);
+  let host = v8::Function::new_raw(scope, nested_module_host).unwrap();
+  let key = v8::String::new(scope, "nestedModuleHost").unwrap();
+  assert_eq!(global.set(scope, key.into(), host.into()), Some(true));
+  let entry = compile(
+    scope,
+    "file:///failed-module/nested-entry.js",
+    include_str!("fixtures/js2wasm-failed-module/nested-entry.js"),
+  );
+  assert_eq!(entry.instantiate_module(scope, resolve), Some(true));
+  v8::tc_scope!(let caught, scope);
+  let result = entry.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  let key = v8::String::new(caught, "moduleThrownToken").unwrap();
+  let token = global.get(caught, key.into()).unwrap();
+  assert!(token.is_object(), "nested source must actually execute");
+  assert!(promise.result(caught).strict_equals(token));
+  assert!(entry.get_exception().strict_equals(token));
+  assert!(nested.get_exception().strict_equals(token));
+  assert!(entry.evaluate(caught).unwrap().strict_equals(result));
+  promise.mark_as_handled();
+  assert!(!caught.has_caught());
+  let key = v8::String::new(caught, "nestedModuleUnreachable").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  assert_eq!(context.get_slot::<NestedFailure>().unwrap().calls.get(), 1);
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound failure lifecycle graph"]
+fn aot_first_dependency_failure_preserves_execution_states() {
+  fn resolve<'s>(
+    context: v8::Local<'s, v8::Context>,
+    specifier: v8::Local<'s, v8::String>,
+    _attributes: v8::Local<'s, v8::FixedArray>,
+    _referrer: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Module>> {
+    v8::callback_scope!(unsafe scope, context);
+    let request = specifier.to_rust_string_lossy(scope);
+    let modules = context.get_slot::<FailureGraphModules>()?;
+    let (_, module) = modules.0.iter().find(|(name, _)| name == &request)?;
+    Some(v8::Local::new(scope, module))
+  }
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let mut modules = Vec::new();
+  for (name, text) in [
+    (
+      "prefix",
+      include_str!("fixtures/js2wasm-failed-module/prefix.js"),
+    ),
+    (
+      "shared",
+      include_str!("fixtures/js2wasm-failed-module/shared.js"),
+    ),
+    (
+      "later",
+      include_str!("fixtures/js2wasm-failed-module/later.js"),
+    ),
+    (
+      "middle",
+      include_str!("fixtures/js2wasm-failed-module/middle.js"),
+    ),
+  ] {
+    let module =
+      compile(scope, &format!("file:///failed-module/{name}.js"), text);
+    modules.push((format!("./{name}.js"), v8::Global::new(scope, module)));
+  }
+  context.set_slot(Rc::new(FailureGraphModules(modules)));
+  let entry = compile(
+    scope,
+    "file:///failed-module/entry.js",
+    include_str!("fixtures/js2wasm-failed-module/entry.js"),
+  );
+  assert_eq!(entry.instantiate_module(scope, resolve), Some(true));
+  v8::tc_scope!(let caught, scope);
+  let result = entry.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  let modules = context.get_slot::<FailureGraphModules>().unwrap();
+  assert_eq!(modules.0.len(), 4);
+  for ((name, module), expected) in modules.0.iter().zip([
+    v8::ModuleStatus::Evaluated,
+    v8::ModuleStatus::Errored,
+    v8::ModuleStatus::Instantiated,
+    v8::ModuleStatus::Errored,
+  ]) {
+    let module = v8::Local::new(caught, module);
+    assert_eq!(module.get_status(), expected, "{name} execution state");
+  }
+  let global = context.global(caught);
+  let key = v8::String::new(caught, "moduleThrownToken").unwrap();
+  let token = global.get(caught, key.into());
+  if token.is_none() {
+    let exception = caught.exception().unwrap();
+    let text = exception
+      .to_string(caught)
+      .unwrap()
+      .to_rust_string_lossy(caught);
+    panic!("failed graph global Get: {text}");
+  }
+  let token = token.unwrap();
+  assert!(token.is_object(), "failure fixture must actually execute");
+  assert!(promise.result(caught).strict_equals(token));
+  assert!(entry.get_exception().strict_equals(token));
+  assert!(!caught.has_caught());
+  promise.mark_as_handled();
+  let key = v8::String::new(caught, "prefixRuns").unwrap();
+  assert_eq!(
+    global.get(caught, key.into()).unwrap().number_value(caught),
+    Some(1.0)
+  );
+  let key = v8::String::new(caught, "laterRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  let key = v8::String::new(caught, "middleRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  let modules = context.get_slot::<FailureGraphModules>().unwrap();
+  for ((name, module), expected) in modules.0.iter().zip([
+    v8::ModuleStatus::Evaluated,
+    v8::ModuleStatus::Errored,
+    v8::ModuleStatus::Instantiated,
+    v8::ModuleStatus::Errored,
+  ]) {
+    let module = v8::Local::new(caught, module);
+    assert_eq!(module.get_status(), expected, "{name} execution state");
+    if expected == v8::ModuleStatus::Errored {
+      assert!(module.get_exception().strict_equals(token));
+      let result = module.evaluate(caught).unwrap();
+      let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+      assert_eq!(promise.state(), v8::PromiseState::Rejected);
+      assert!(promise.result(caught).strict_equals(token));
+      assert!(module.evaluate(caught).unwrap().strict_equals(result));
+      promise.mark_as_handled();
+    }
+    if expected == v8::ModuleStatus::Evaluated {
+      let namespace =
+        v8::Local::<v8::Object>::try_from(module.get_module_namespace())
+          .unwrap();
+      let key = v8::String::new(caught, "value").unwrap();
+      assert_eq!(
+        namespace
+          .get(caught, key.into())
+          .unwrap()
+          .number_value(caught),
+        Some(7.0)
+      );
+      let result = module.evaluate(caught).unwrap();
+      let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+      assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+      assert!(module.evaluate(caught).unwrap().strict_equals(result));
+    }
+  }
+  assert!(entry.evaluate(caught).unwrap().strict_equals(result));
+  let prefix = v8::Local::new(caught, &modules.0[0].1);
+  let prefix_namespace = prefix.get_module_namespace();
+  let prefix_object =
+    v8::Local::<v8::Object>::try_from(prefix_namespace).unwrap();
+  let key = v8::String::new(caught, "bump").unwrap();
+  let bump = v8::Local::<v8::Function>::try_from(
+    prefix_object.get(caught, key.into()).unwrap(),
+  )
+  .unwrap();
+  assert!(bump.call(caught, prefix_namespace, &[]).is_some());
+  let key = v8::String::new(caught, "value").unwrap();
+  assert_eq!(
+    prefix_object
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let key = v8::String::new(caught, "snapshot").unwrap();
+  let snapshot = v8::Local::<v8::Function>::try_from(
+    prefix_object.get(caught, key.into()).unwrap(),
+  )
+  .unwrap();
+  let snapshot = v8::Local::<v8::Object>::try_from(
+    snapshot.call(caught, prefix_namespace, &[]).unwrap(),
+  )
+  .unwrap();
+  let key = v8::String::new(caught, "value").unwrap();
+  assert_eq!(
+    snapshot
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let consumer = compile(
+    caught,
+    "file:///failed-module/consumer.js",
+    include_str!("fixtures/js2wasm-failed-module/consumer.js"),
+  );
+  assert_eq!(consumer.instantiate_module(caught, resolve), Some(true));
+  let result = consumer.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  let namespace =
+    v8::Local::<v8::Object>::try_from(consumer.get_module_namespace()).unwrap();
+  let key = v8::String::new(caught, "observed").unwrap();
+  assert_eq!(
+    namespace
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let key = v8::String::new(caught, "prefix").unwrap();
+  assert!(
+    namespace
+      .get(caught, key.into())
+      .unwrap()
+      .strict_equals(prefix_namespace)
+  );
+  assert!(bump.call(caught, prefix_namespace, &[]).is_some());
+  let key = v8::String::new(caught, "live").unwrap();
+  let live = v8::Local::<v8::Function>::try_from(
+    namespace.get(caught, key.into()).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(
+    live
+      .call(caught, namespace.into(), &[])
+      .unwrap()
+      .number_value(caught),
+    Some(9.0)
+  );
+  let key = v8::String::new(caught, "observed").unwrap();
+  assert_eq!(
+    namespace
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(8.0)
+  );
+  let key = v8::String::new(caught, "prefixRuns").unwrap();
+  assert_eq!(
+    global.get(caught, key.into()).unwrap().number_value(caught),
+    Some(1.0)
+  );
+  assert!(!caught.has_caught());
+  // A fresh same-URL Module is not the previously completed prefix. Its body
+  // must run before the cached dependency rejection, without rerunning shared.
+  let fresh_prefix = compile(
+    caught,
+    "file:///failed-module/prefix.js",
+    include_str!("fixtures/js2wasm-failed-module/prefix.js"),
+  );
+  let untouched = compile(
+    caught,
+    "file:///failed-module/later.js",
+    include_str!("fixtures/js2wasm-failed-module/later.js"),
+  );
+  let failed = v8::Local::new(caught, &modules.0[1].1);
+  context.set_slot(Rc::new(FailureGraphModules(vec![
+    ("./prefix.js".into(), v8::Global::new(caught, fresh_prefix)),
+    ("./shared.js".into(), v8::Global::new(caught, failed)),
+    ("./later.js".into(), v8::Global::new(caught, untouched)),
+  ])));
+  let cached = compile(
+    caught,
+    "file:///failed-module/cached-entry.js",
+    include_str!("fixtures/js2wasm-failed-module/cached-entry.js"),
+  );
+  assert_eq!(cached.instantiate_module(caught, resolve), Some(true));
+  let result = cached.evaluate(caught).unwrap();
+  let rejection = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(rejection.state(), v8::PromiseState::Rejected);
+  let key = v8::String::new(caught, "prefixRuns").unwrap();
+  assert_eq!(
+    global.get(caught, key.into()).unwrap().number_value(caught),
+    Some(2.0)
+  );
+  assert!(rejection.result(caught).strict_equals(token));
+  assert!(cached.get_exception().strict_equals(token));
+  assert!(failed.get_exception().strict_equals(token));
+  assert_eq!(fresh_prefix.get_status(), v8::ModuleStatus::Evaluated);
+  assert_eq!(untouched.get_status(), v8::ModuleStatus::Instantiated);
+  let fresh_namespace = fresh_prefix.get_module_namespace();
+  assert!(!fresh_namespace.strict_equals(prefix_namespace));
+  let fresh_object =
+    v8::Local::<v8::Object>::try_from(fresh_namespace).unwrap();
+  let key = v8::String::new(caught, "value").unwrap();
+  assert_eq!(
+    fresh_object
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(7.0)
+  );
+  assert_eq!(
+    prefix_object
+      .get(caught, key.into())
+      .unwrap()
+      .number_value(caught),
+    Some(9.0)
+  );
+  let key = v8::String::new(caught, "laterRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  let key = v8::String::new(caught, "cachedEntryRuns").unwrap();
+  assert!(global.get(caught, key.into()).unwrap().is_undefined());
+  assert!(cached.evaluate(caught).unwrap().strict_equals(result));
+  rejection.mark_as_handled();
+  assert!(!caught.has_caught());
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+fn cached_dependency_failure_rejects_with_original_payload_without_reexecution()
+{
+  fn fail<'s>(
+    context: v8::Local<'s, v8::Context>,
+    _module: v8::Local<'s, v8::Module>,
+  ) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+    let failure = context.get_slot::<CachedFailure>().unwrap().clone();
+    failure.calls.set(failure.calls.get() + 1);
+    let payload = v8::Local::new(scope, &failure.payload);
+    scope.throw_exception(payload);
+    None
+  }
+  initialize();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let payload: v8::Local<v8::Value> = v8::Object::new(scope).into();
+  let failure = Rc::new(CachedFailure {
+    payload: v8::Global::new(scope, payload),
+    calls: Cell::new(0),
+  });
+  context.set_slot(failure.clone());
+  let name =
+    v8::String::new(scope, "file:///cached-failure/shared.js").unwrap();
+  let shared = v8::Module::create_synthetic_module(scope, name, &[], fail);
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, shared))));
+  assert_eq!(shared.instantiate_module(scope, resolve_shared), Some(true));
+  let rejected = shared.evaluate(scope).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(rejected).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(scope).strict_equals(payload));
+  promise.mark_as_handled();
+  assert!(shared.evaluate(scope).unwrap().strict_equals(rejected));
+  for index in 0..2 {
+    let entry = compile(
+      scope,
+      &format!("file:///cached-failure/entry-{index}.js"),
+      "import './shared.js'; throw new Error('entry must not execute');",
+    );
+    assert_eq!(entry.instantiate_module(scope, resolve_shared), Some(true));
+    v8::tc_scope!(let caught, scope);
+    let prior = if index == 1 {
+      let value: v8::Local<v8::Value> = v8::Object::new(caught).into();
+      caught.throw_exception(value);
+      Some(value)
+    } else {
+      None
+    };
+    let result = entry.evaluate(caught).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+    assert_eq!(promise.state(), v8::PromiseState::Rejected);
+    assert!(
+      promise.result(caught).strict_equals(payload),
+      "entry {index} must retain the cached dependency payload"
+    );
+    assert!(entry.get_exception().strict_equals(payload));
+    if let Some(prior) = prior {
+      assert!(
+        caught.exception().unwrap().strict_equals(prior),
+        "cached delivery must preserve an unrelated caught exception"
+      );
+      caught.reset();
+    } else {
+      assert!(
+        !caught.has_caught(),
+        "dependency failure is an asynchronous rejection"
+      );
+    }
+    assert!(entry.evaluate(caught).unwrap().strict_equals(result));
+    promise.mark_as_handled();
+  }
+  let middle = compile(
+    scope,
+    "file:///cached-failure/middle.js",
+    "import './shared.js'; export const value=1;",
+  );
+  assert_eq!(middle.instantiate_module(scope, resolve_shared), Some(true));
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, middle))));
+  let leaf = compile(
+    scope,
+    "file:///cached-failure/leaf.js",
+    "import './shared.js'; throw new Error('leaf must not execute');",
+  );
+  assert_eq!(leaf.instantiate_module(scope, resolve_shared), Some(true));
+  v8::tc_scope!(let caught, scope);
+  let result = leaf.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(caught).strict_equals(payload));
+  assert_eq!(middle.get_status(), v8::ModuleStatus::Errored);
+  assert!(middle.get_exception().strict_equals(payload));
+  let middle_result = middle.evaluate(caught).unwrap();
+  let middle_promise =
+    v8::Local::<v8::Promise>::try_from(middle_result).unwrap();
+  assert_eq!(middle_promise.state(), v8::PromiseState::Rejected);
+  assert!(middle_promise.result(caught).strict_equals(payload));
+  assert!(
+    middle
+      .evaluate(caught)
+      .unwrap()
+      .strict_equals(middle_result)
+  );
+  assert!(!caught.has_caught());
+  promise.mark_as_handled();
+  middle_promise.mark_as_handled();
+  assert_eq!(failure.calls.get(), 1);
+  // A fresh synthetic dependency must execute before graph packaging. Its
+  // first callback failure has the same semantics as a previously cached one.
+  let name =
+    v8::String::new(caught, "file:///cached-failure/fresh.js").unwrap();
+  let fresh = v8::Module::create_synthetic_module(caught, name, &[], fail);
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(caught, fresh))));
+  let consumer = compile(
+    caught,
+    "file:///cached-failure/fresh-consumer.js",
+    "import './shared.js'; throw new Error('consumer must not execute');",
+  );
+  assert_eq!(
+    consumer.instantiate_module(caught, resolve_shared),
+    Some(true)
+  );
+  let result = consumer.evaluate(caught).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Rejected);
+  assert!(promise.result(caught).strict_equals(payload));
+  assert_eq!(fresh.get_status(), v8::ModuleStatus::Errored);
+  assert!(fresh.get_exception().strict_equals(payload));
+  assert!(consumer.get_exception().strict_equals(payload));
+  assert!(consumer.evaluate(caught).unwrap().strict_equals(result));
+  assert!(!caught.has_caught());
+  assert_eq!(failure.calls.get(), 2);
+  promise.mark_as_handled();
+  let dependency_result = fresh.evaluate(caught).unwrap();
+  let dependency_promise =
+    v8::Local::<v8::Promise>::try_from(dependency_result).unwrap();
+  assert!(dependency_promise.result(caught).strict_equals(payload));
+  dependency_promise.mark_as_handled();
+  assert_eq!(failure.calls.get(), 2);
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+fn resolve_shared<'s>(
+  context: v8::Local<'s, v8::Context>,
+  specifier: v8::Local<'s, v8::String>,
+  _attributes: v8::Local<'s, v8::FixedArray>,
+  _referrer: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Module>> {
+  v8::callback_scope!(unsafe scope, context);
+  assert!(matches!(
+    specifier.to_rust_string_lossy(scope).as_str(),
+    "./shared.js" | "./shared.ts"
+  ));
+  Some(v8::Local::new(
+    scope,
+    &context.get_slot::<SharedModule>()?.0,
+  ))
+}
+
+fn compile<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  name: &str,
+  text: &str,
+) -> v8::Local<'s, v8::Module> {
+  let text = v8::String::new(scope, text).unwrap();
+  let resource = v8::String::new(scope, name).unwrap();
+  let origin = origin(scope, resource.into());
+  let mut source = v8::script_compiler::Source::new(text, Some(&origin));
+  v8::script_compiler::compile_module(scope, &mut source).unwrap()
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound typed module graphs"]
+fn aot_typed_dependency_reads_original_numeric_export() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let shared = compile(
+    scope,
+    "file:///typed-module/shared.ts",
+    include_str!("fixtures/js2wasm-typed-module/shared.ts"),
+  );
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, shared))));
+  for name in ["first", "second"] {
+    let entry = compile(
+      scope,
+      &format!("file:///typed-module/{name}.ts"),
+      if name == "first" {
+        include_str!("fixtures/js2wasm-typed-module/first.ts")
+      } else {
+        include_str!("fixtures/js2wasm-typed-module/second.ts")
+      },
+    );
+    assert_eq!(entry.instantiate_module(scope, resolve_shared), Some(true));
+    let result = entry.evaluate(scope).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+    assert_eq!(
+      promise.state(),
+      v8::PromiseState::Fulfilled,
+      "{name} evaluation"
+    );
+    let shared_namespace =
+      v8::Local::<v8::Object>::try_from(shared.get_module_namespace()).unwrap();
+    let bump_key = v8::String::new(scope, "bump").unwrap();
+    let bump = v8::Local::<v8::Function>::try_from(
+      shared_namespace.get(scope, bump_key.into()).unwrap(),
+    )
+    .unwrap();
+    if name == "first" {
+      assert_eq!(
+        bump
+          .call(scope, shared_namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(78.0)
+      );
+    }
+    if name == "second" {
+      let namespace =
+        v8::Local::<v8::Object>::try_from(entry.get_module_namespace())
+          .unwrap();
+      let key = v8::String::new(scope, "observed").unwrap();
+      assert_eq!(
+        namespace
+          .get(scope, key.into())
+          .unwrap()
+          .number_value(scope),
+        Some(81.0)
+      );
+      let key = v8::String::new(scope, "read").unwrap();
+      let function = v8::Local::<v8::Function>::try_from(
+        namespace.get(scope, key.into()).unwrap(),
+      )
+      .unwrap();
+      assert_eq!(
+        function
+          .call(scope, namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(81.0)
+      );
+      assert_eq!(
+        bump
+          .call(scope, shared_namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(79.0)
+      );
+      assert_eq!(
+        function
+          .call(scope, namespace.into(), &[])
+          .unwrap()
+          .number_value(scope),
+        Some(82.0)
+      );
+      let key = v8::String::new(scope, "observed").unwrap();
+      assert_eq!(
+        namespace
+          .get(scope, key.into())
+          .unwrap()
+          .number_value(scope),
+        Some(81.0)
+      );
+    }
+  }
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound shared module graphs"]
+fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
+  initialize();
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  assert!(std::env::var_os("V8X_JS2WASM_AOT_GRAPH_DIR").is_some());
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let shared = compile(
+    scope,
+    "file:///shared-module/shared.js",
+    include_str!("fixtures/js2wasm-shared-module/shared.js"),
+  );
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, shared))));
+  let first = compile(
+    scope,
+    "file:///shared-module/first.js",
+    include_str!("fixtures/js2wasm-shared-module/first.js"),
+  );
+  assert_eq!(first.instantiate_module(scope, resolve_shared), Some(true));
+  let result = first.evaluate(scope).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  let namespace =
+    v8::Local::<v8::Object>::try_from(shared.get_module_namespace()).unwrap();
+  let first_namespace =
+    v8::Local::<v8::Object>::try_from(first.get_module_namespace()).unwrap();
+  let shared_key = v8::String::new(scope, "shared").unwrap();
+  let first_identity = first_namespace
+    .get(scope, shared_key.into())
+    .unwrap()
+    .strict_equals(namespace.into());
+  eprintln!("first entry namespace matches native dependency={first_identity}");
+  assert!(
+    first_identity,
+    "the first graph must already have one canonical namespace"
+  );
+  let count = v8::String::new(scope, "count").unwrap();
+  assert_eq!(
+    namespace
+      .get(scope, count.into())
+      .unwrap()
+      .number_value(scope),
+    Some(2.0)
+  );
+
+  let second = compile(
+    scope,
+    "file:///shared-module/second.js",
+    include_str!("fixtures/js2wasm-shared-module/second.js"),
+  );
+  assert_eq!(second.instantiate_module(scope, resolve_shared), Some(true));
+  let result = second.evaluate(scope).unwrap();
+  let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+  // Report side effects even when namespace publication rejects evaluation.
+  let global = context.global(scope);
+  let runs = v8::String::new(scope, "sharedModuleRuns").unwrap();
+  let executions = global.get(scope, runs.into()).unwrap().number_value(scope);
+  let second_namespace =
+    v8::Local::<v8::Object>::try_from(second.get_module_namespace()).unwrap();
+  let observed_key = v8::String::new(scope, "observed").unwrap();
+  let observed = second_namespace
+    .get(scope, observed_key.into())
+    .unwrap()
+    .number_value(scope);
+  let same = v8::String::new(scope, "same").unwrap();
+  let same_identity =
+    second_namespace.get(scope, same.into()).unwrap().is_true();
+  eprintln!(
+    "shared dependency executions={executions:?}, observed={observed:?}, same namespace={same_identity}, second state={:?}",
+    promise.state()
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+  assert_eq!(
+    executions,
+    Some(1.0),
+    "an evaluated dependency must not run again"
+  );
+  assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+  for (key, expected) in [("observed", 2.0), ("runs", 1.0)] {
+    let key = v8::String::new(scope, key).unwrap();
+    assert_eq!(
+      second_namespace
+        .get(scope, key.into())
+        .unwrap()
+        .number_value(scope),
+      Some(expected)
+    );
+  }
+  assert!(same_identity);
+  assert!(
+    second_namespace
+      .get(scope, shared_key.into())
+      .unwrap()
+      .strict_equals(namespace.into())
+  );
+  let bump_key = v8::String::new(scope, "bump").unwrap();
+  let bump = v8::Local::<v8::Function>::try_from(
+    namespace.get(scope, bump_key.into()).unwrap(),
+  )
+  .unwrap();
+  assert_eq!(
+    bump
+      .call(scope, namespace.into(), &[])
+      .unwrap()
+      .number_value(scope),
+    Some(3.0)
+  );
+  for name in ["read", "readNamed"] {
+    let key = v8::String::new(scope, name).unwrap();
+    let read = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      read
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(3.0),
+      "live reader {name} must use the original dependency binding"
+    );
+  }
+  for (name, expected) in [("mutateNamespace", 4.0), ("mutateNamed", 5.0)] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected),
+      "{name}"
+    );
+  }
+  for name in ["receiverNamespace", "receiverNamed"] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let result = function.call(scope, second_namespace.into(), &[]).unwrap();
+    if name == "receiverNamespace" {
+      assert!(result.strict_equals(namespace.into()));
+    } else {
+      assert!(result.is_undefined());
+    }
+  }
+
+  for (name, expected) in [
+    ("spreadNamespace", 10.0),
+    ("spreadNamed", 15.0),
+    ("spreadMixed", 20.0),
+    ("spreadNested", 65.0),
+    ("spreadInvalid", 1.0),
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected),
+      "{name}"
+    );
+  }
+
+  for (name, expected) in [
+    ("optionalNamed", 66.0),
+    ("optionalMethod", 67.0),
+    ("optionalComputed", 68.0),
+    ("optionalNamespace", 69.0),
+    ("parenBreak", 1.0),
+    ("nonCallable", 1.0),
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected),
+      "{name}"
+    );
+  }
+  for name in [
+    "absentCall",
+    "absentReceiver",
+    "chainSkip",
+    "computedSkip",
+    "nullSkip",
+    "optionalNamedReceiver",
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .is_undefined(),
+      "{name}"
+    );
+  }
+  for name in [
+    "optionalReceiver",
+    "parenthesizedReceiver",
+    "nestedReceiver",
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let expected = if name == "nestedReceiver" {
+      let nested = v8::String::new(scope, "nested").unwrap();
+      namespace.get(scope, nested.into()).unwrap()
+    } else {
+      namespace.into()
+    };
+    assert!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .strict_equals(expected),
+      "{name}"
+    );
+  }
+
+  // A different Module with the same URL must not reuse the previous binding.
+  let replacement = compile(
+    scope,
+    "file:///shared-module/shared.js",
+    include_str!("fixtures/js2wasm-shared-module/shared.js"),
+  );
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, replacement))));
+  let another = compile(
+    scope,
+    "file:///shared-module/first.js",
+    include_str!("fixtures/js2wasm-shared-module/first.js"),
+  );
+  assert_eq!(
+    another.instantiate_module(scope, resolve_shared),
+    Some(true)
+  );
+  let result =
+    v8::Local::<v8::Promise>::try_from(another.evaluate(scope).unwrap())
+      .unwrap();
+  assert_eq!(result.state(), v8::PromiseState::Fulfilled);
+  let replacement_namespace =
+    v8::Local::<v8::Object>::try_from(replacement.get_module_namespace())
+      .unwrap();
+  assert!(!replacement_namespace.strict_equals(namespace.into()));
+  assert_eq!(
+    replacement_namespace
+      .get(scope, count.into())
+      .unwrap()
+      .number_value(scope),
+    Some(2.0)
+  );
+  assert_eq!(
+    namespace
+      .get(scope, count.into())
+      .unwrap()
+      .number_value(scope),
+    Some(70.0)
+  );
+  assert_eq!(
+    global.get(scope, runs.into()).unwrap().number_value(scope),
+    Some(2.0)
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}

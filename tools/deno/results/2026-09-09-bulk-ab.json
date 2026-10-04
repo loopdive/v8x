@@ -1,0 +1,91 @@
+{
+  "inputs": {
+    "scalar": "/private/tmp/deno-profile.RCcI44/comparison-shared-speed/hello-world-js2wasm",
+    "bulk": "/private/tmp/deno-profile.RCcI44/comparison-bulk/hello-world-js2wasm",
+    "scalarCore": "/private/tmp/deno-profile.RCcI44/core-speed.cwasm",
+    "bulkCore": "/private/tmp/deno-profile.RCcI44/core-bulk-speed.cwasm",
+    "provider": "/private/tmp/deno-profile.RCcI44/provider-speed.cwasm"
+  },
+  "rows": [
+    {
+      "name": "scalar",
+      "round": 0,
+      "ms": 13262.012625,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       13.26 real        12.71 user         0.28 sys\n           352911360  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               21460  page reclaims\n                4694  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                  10  voluntary context switches\n                2265  involuntary context switches\n        229851420601  instructions retired\n         52472928459  cycles elapsed\n             9929424  peak memory footprint\n"
+    },
+    {
+      "name": "bulk",
+      "round": 0,
+      "ms": 12346.300500000001,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       12.34 real        11.36 user         0.22 sys\n           354369536  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26223  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   1  voluntary context switches\n                 361  involuntary context switches\n        169377952104  instructions retired\n         47051655899  cycles elapsed\n            10044136  peak memory footprint\n"
+    },
+    {
+      "name": "bulk",
+      "round": 1,
+      "ms": 11648.145416,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       11.64 real        11.40 user         0.23 sys\n           354336768  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26233  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 263  involuntary context switches\n        169377338666  instructions retired\n         47189449378  cycles elapsed\n             9994960  peak memory footprint\n"
+    },
+    {
+      "name": "scalar",
+      "round": 1,
+      "ms": 13104.327707999997,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       13.10 real        12.82 user         0.26 sys\n           352960512  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26137  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   1  voluntary context switches\n                 367  involuntary context switches\n        229704903477  instructions retired\n         52792075566  cycles elapsed\n             9978576  peak memory footprint\n"
+    },
+    {
+      "name": "scalar",
+      "round": 2,
+      "ms": 13043.948958,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       13.04 real        12.75 user         0.28 sys\n           352862208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26131  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 276  involuntary context switches\n        229716060818  instructions retired\n         52742985110  cycles elapsed\n             9880272  peak memory footprint\n"
+    },
+    {
+      "name": "bulk",
+      "round": 2,
+      "ms": 11578.515707999999,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       11.57 real        11.34 user         0.22 sys\n           354271232  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26229  page reclaims\n                  10  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   1  voluntary context switches\n                 267  involuntary context switches\n        169260054368  instructions retired\n         47039038366  cycles elapsed\n             9945832  peak memory footprint\n"
+    },
+    {
+      "name": "bulk",
+      "round": 3,
+      "ms": 11581.282416999995,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       11.57 real        11.34 user         0.22 sys\n           354271232  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26213  page reclaims\n                  24  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 249  involuntary context switches\n        169261372555  instructions retired\n         46985304530  cycles elapsed\n             9929424  peak memory footprint\n"
+    },
+    {
+      "name": "scalar",
+      "round": 3,
+      "ms": 13060.222582999995,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       13.05 real        12.79 user         0.26 sys\n           352993280  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26139  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   4  voluntary context switches\n                 287  involuntary context switches\n        229699211851  instructions retired\n         52824703390  cycles elapsed\n            10011344  peak memory footprint\n"
+    },
+    {
+      "name": "scalar",
+      "round": 4,
+      "ms": 13421.227457999994,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       13.41 real        13.15 user         0.26 sys\n           352976896  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               26138  page reclaims\n                  20  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                 563  involuntary context switches\n        229741459543  instructions retired\n         52422188247  cycles elapsed\n             9994960  peak memory footprint\n"
+    },
+    {
+      "name": "bulk",
+      "round": 4,
+      "ms": 12093.519082999992,
+      "status": 0,
+      "stdout": "The sum of\n1,2,3\nis\n6\nException:\nTypeError: serde_v8 error: invalid type; expected: array, got: Number\n",
+      "stderr": "       12.09 real        11.76 user         0.16 sys\n           354271232  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               21452  page reclaims\n                4787  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   6  messages sent\n                   0  messages received\n                   0  signals received\n                   4  voluntary context switches\n                3138  involuntary context switches\n        169472625856  instructions retired\n         47087562348  cycles elapsed\n             9929424  peak memory footprint\n"
+    }
+  ]
+}

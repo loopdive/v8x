@@ -1,0 +1,1080 @@
+use super::*;
+use crate::js2wasm_spike::{DenoRuntime, RealmAccess, RealmValue};
+#[path = "realm_callback_access.rs"]
+pub(super) mod callback_access;
+#[path = "realm_host_callbacks.rs"]
+mod host_callbacks;
+#[path = "realm_host_values.rs"]
+mod host_values;
+#[path = "realm_native_promises.rs"]
+mod native_promises;
+#[path = "realm_property_names.rs"]
+mod property_names;
+#[path = "realm_stack_trace.rs"]
+mod stack_trace;
+#[path = "realm_symbols.rs"]
+mod symbols;
+#[path = "realm_synthetic_namespace.rs"]
+mod synthetic_namespace;
+pub(super) use host_callbacks::HostCallbackBinding;
+pub(crate) use host_callbacks::invoke_host;
+pub(super) use native_promises::NativePromiseMirror;
+pub(super) use native_promises::settle as settle_native_promise_mirror;
+
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[doc(hidden)]
+pub fn js2wasm_bind_synthetic_namespace_for_test(
+  context: &Context,
+  module: &Module,
+) -> Result<(), String> {
+  let owner = binding(v8__Context__Global(context))
+    .ok_or("native namespace test requires an attached Context")?
+    .runtime;
+  callback_access::with_owner(&owner, |access| match existing_module_namespace(
+    context,
+    module,
+    Rc::as_ptr(&owner) as usize,
+    access,
+  )? {
+    ModuleNamespaceCapability::Namespace(_) => Ok(()),
+    ModuleNamespaceCapability::Pending => {
+      Err("native namespace requires an evaluated Module".into())
+    }
+    ModuleNamespaceCapability::Exception(_) => {
+      Err("native namespace requires successful evaluation".into())
+    }
+  })
+}
+
+pub(crate) fn instantiate_callback_graph(
+  owner: &Rc<RefCell<DenoRuntime>>,
+  module: &wasmtime::Module,
+  bindings: &crate::js2wasm_spike::NativeModuleGraph,
+) -> Result<bool, String> {
+  if !callback_access::has_active_owner(owner) {
+    return Ok(false);
+  }
+  callback_access::with_owner(owner, |access| {
+    let (normal, value) =
+      access.realm_instantiate_callback_graph(module, bindings)?;
+    if !normal {
+      let exception = from_realm(access, owner, value)?;
+      record_exception(current_isolate(), exception);
+      return Err("nested module initializer threw a JS value".into());
+    }
+    Ok(true)
+  })
+}
+
+pub(crate) fn record_module_exception(
+  owner: &Rc<RefCell<DenoRuntime>>,
+) -> Result<bool, String> {
+  // Caller-owned nested initialization roots and records its thrown value
+  // directly above. It never populates Runtime.pending_module_exception, and
+  // borrowing that Runtime here would fail while the outer graph is executing.
+  // Return false rather than inventing a payload for a non-JS nested trap.
+  if callback_access::has_active_owner(owner) {
+    return Ok(false);
+  }
+  let value = owner
+    .try_borrow_mut()
+    .map_err(|_| "module exception owner is already executing")?
+    .take_module_exception();
+  let Some(value) = value else {
+    return Ok(false);
+  };
+  let value = callback_access::with_owner(owner, |access| {
+    from_realm(access, owner, value)
+  })?;
+  record_exception(current_isolate(), value);
+  Ok(true)
+}
+
+pub(crate) fn import_meta_handle(
+  access: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  module: *const Module,
+  context: *const Context,
+) -> Result<f64, String> {
+  callback_access::with_active(owner, access, || {
+    let isolate = current_isolate();
+    let mut caught = [0usize; 6];
+    v8__TryCatch__CONSTRUCT(caught.as_mut_ptr(), isolate);
+    let result = super::import_meta::get(module, context);
+    let exception = v8__TryCatch__Exception(caught.as_ptr());
+    v8__TryCatch__Reset(caught.as_mut_ptr());
+    v8__TryCatch__DESTRUCT(caught.as_mut_ptr());
+    let meta = result?;
+    let thrown = !exception.is_null();
+    let value = if thrown { exception } else { meta.cast() };
+    callback_access::with_owner(owner, |access| {
+      let value = into_realm(access, owner, value)?;
+      let handle = access.realm_check(value)?;
+      Ok(if thrown { -handle - 1.0 } else { handle })
+    })
+  })
+}
+
+pub(crate) fn import_meta_owner(
+  context: *const Context,
+  identity: usize,
+) -> Result<Rc<RefCell<DenoRuntime>>, String> {
+  let isolate = current_isolate();
+  if isolate.is_null()
+    || identity == 0
+    || !unsafe { isolate_state(isolate) }
+      .owned_contexts
+      .contains(&context)
+  {
+    return Err("import-meta capability has no owned Context".to_string());
+  }
+  let Some(HeapValue::Context(state)) = (unsafe { heap_value(context) }) else {
+    return Err("import-meta Context disappeared".to_string());
+  };
+  state
+    .deno_core_bootstrap
+    .iter()
+    .chain(state.module_runtime.iter())
+    .find(|owner| Rc::as_ptr(owner) as usize == identity)
+    .cloned()
+    .ok_or_else(|| {
+      "import-meta capability requires its published Context runtime"
+        .to_string()
+    })
+}
+
+pub(crate) enum ModuleNamespaceCapability {
+  Pending,
+  Namespace(RealmValue),
+  Exception(RealmValue),
+}
+
+pub(crate) fn existing_module_namespace(
+  context: *const Context,
+  module: *const Module,
+  identity: usize,
+  access: &mut dyn RealmAccess,
+) -> Result<ModuleNamespaceCapability, String> {
+  let owner = import_meta_owner(context, identity)?;
+  let state = unsafe { module_state(module) }
+    .ok_or_else(|| "namespace capability lost its native Module".to_string())?;
+  if state.status == STATUS_ERRORED {
+    let exception = state.exception;
+    if exception.is_null() {
+      return Err("errored Module has no cached exception".into());
+    }
+    return into_realm(access, &owner, exception)
+      .map(ModuleNamespaceCapability::Exception);
+  }
+  if state.status != STATUS_EVALUATED {
+    return Ok(ModuleNamespaceCapability::Pending);
+  }
+  if state.synthetic.is_some() {
+    return synthetic_namespace::bind(access, &owner, module)
+      .map(ModuleNamespaceCapability::Namespace);
+  }
+  let previous = binding(state.namespace).ok_or_else(|| {
+    "evaluated Module has no canonical namespace binding".to_string()
+  })?;
+  if !Rc::ptr_eq(&owner, &previous.runtime) {
+    return Err("namespace capability belongs to a different Context".into());
+  }
+  Ok(ModuleNamespaceCapability::Namespace(previous.value))
+}
+pub(super) use property_names::own_property_names;
+
+#[derive(Clone)]
+pub(super) struct RealmObjectBinding {
+  host: *const Object,
+  runtime: Rc<RefCell<DenoRuntime>>,
+  value: RealmValue,
+}
+
+fn binding(object: *const Object) -> Option<RealmObjectBinding> {
+  unsafe { isolate_state(current_isolate()) }
+    .realm_objects
+    .iter()
+    .find(|entry| entry.host == object)
+    .cloned()
+}
+
+fn into_realm(
+  runtime: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  value: *const Value,
+) -> Result<RealmValue, String> {
+  if matches!(unsafe { heap_value(value) }, Some(HeapValue::Symbol(_))) {
+    return symbols::into_realm(runtime, owner, value);
+  }
+  if let Some(entry) = binding(value.cast()) {
+    if !Rc::ptr_eq(owner, &entry.runtime) {
+      return Err("cannot transfer an object between realms".to_string());
+    }
+    return Ok(entry.value);
+  }
+  match unsafe { heap_value(value) } {
+    Some(HeapValue::Undefined) => Ok(runtime.realm_undefined()),
+    Some(HeapValue::Null) => runtime.realm_null(),
+    Some(HeapValue::Boolean(value)) => runtime.realm_boolean(*value),
+    Some(HeapValue::Number(number)) => runtime.realm_number(*number),
+    Some(HeapValue::String(text)) => {
+      let units: Vec<_> = text.encode_utf16().collect();
+      runtime.realm_string(&units)
+    }
+    Some(HeapValue::Promise(_)) => native_promises::transfer(runtime, owner, value.cast()),
+    Some(HeapValue::Object(_)) | Some(HeapValue::Array(_)) | Some(HeapValue::Function(_)) => {
+      host_values::transfer(runtime, owner, value)
+    }
+    Some(HeapValue::Error { name, message }) => {
+      let name = name.to_string();
+      let message = message.clone();
+      let name = runtime.realm_string(&name.encode_utf16().collect::<Vec<_>>())?;
+      let message = runtime.realm_string(&message.encode_utf16().collect::<Vec<_>>())?;
+      let handle = runtime.realm_handle("__v8x_value_error",
+        &[runtime.realm_check(name)?, runtime.realm_check(message)?])?;
+      unsafe { isolate_state(current_isolate()) }.realm_objects.push(RealmObjectBinding {
+        host: value.cast(), runtime: owner.clone(), value: handle,
+      });
+      Ok(handle)
+    }
+
+    Some(HeapValue::ArrayBuffer(_)) => {
+      let handle = runtime.realm_adopt_buffer(RetainedHostBuffer::new(value.cast())?)?;
+      unsafe { isolate_state(current_isolate()) }.realm_objects.push(RealmObjectBinding {
+        host: value.cast(), runtime: owner.clone(), value: handle,
+      });
+      Ok(handle)
+    }
+    Some(HeapValue::TypedArray(state)) => {
+      if !state.properties.is_empty() {
+        return Err("host typed-array custom properties are not transferable yet".to_string());
+      }
+      let kind = match state.kind {
+        TypedArrayKind::Uint8 => 0.0,
+        TypedArrayKind::Uint16 => 1.0,
+        TypedArrayKind::Uint32 => 2.0,
+        TypedArrayKind::Int32 => 3.0,
+        TypedArrayKind::BigUint64 => 4.0,
+        TypedArrayKind::BigInt64 => 5.0,
+      };
+      let buffer = state.buffer;
+      let offset = state.byte_offset as f64;
+      let length = state.length as f64;
+      let buffer = into_realm(runtime, owner, buffer.cast())?;
+      let handle = runtime.realm_handle("__v8x_value_typed_array",
+        &[runtime.realm_check(buffer)?, kind, offset, length])?;
+      unsafe { isolate_state(current_isolate()) }.realm_objects.push(RealmObjectBinding {
+        host: value.cast(), runtime: owner.clone(), value: handle,
+      });
+      Ok(handle)
+    }
+    _ => Err("host value conversion to the compiled realm is not implemented for this type".to_string()),
+
+  }
+}
+
+pub(super) fn from_realm(
+  runtime: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  value: RealmValue,
+) -> Result<*const Value, String> {
+  match runtime.realm_kind(value)? {
+    0 => Ok(v8__Undefined(current_isolate()).cast()),
+    1 => Ok(v8__Null(current_isolate()).cast()),
+    2 => {
+      let boolean = runtime.realm_as_boolean(value)?;
+      Ok(allocate(current_isolate(), HeapValue::Boolean(boolean)))
+    }
+    3 => {
+      let number = runtime.realm_as_number(value)?;
+      Ok(allocate(current_isolate(), HeapValue::Number(number)))
+    }
+    4 => {
+      let units = runtime.realm_as_utf16(value)?;
+      let text = String::from_utf16(&units).map_err(|_| {
+        "Rust string backing cannot yet represent unpaired UTF-16 surrogates"
+          .to_string()
+      })?;
+      Ok(new_string(current_isolate(), text).cast())
+    }
+    8 => symbols::from_realm(runtime, owner, value),
+    kind @ (5 | 6 | 9) => {
+      if let Some(entry) = unsafe { isolate_state(current_isolate()) }
+        .realm_objects
+        .iter()
+        .find(|entry| entry.value == value && Rc::ptr_eq(owner, &entry.runtime))
+      {
+        return Ok(entry.host.cast());
+      }
+      let native_error = if kind == 5 {
+        runtime.realm_native_error_snapshot(runtime.realm_check(value)?)?
+      } else {
+        None
+      };
+      let host = if let Some((name, message)) = native_error {
+        // Retain the binding below. This wrapper only records native branding;
+        // property reads still use the live compiled object and owning graph.
+        let name = runtime.realm_from_handle(name)?;
+        let name = String::from_utf16(&runtime.realm_as_utf16(name)?)
+          .map_err(|_| "native Error name contains unpaired UTF-16")?;
+        let message = runtime.realm_from_handle(message)?;
+        let message = String::from_utf16(&runtime.realm_as_utf16(message)?)
+          .map_err(|_| "native Error message contains unpaired UTF-16")?;
+        allocate_error(new_string(current_isolate(), message), &name).cast()
+      } else if kind == 5
+        && runtime
+          .realm_promise_snapshot(runtime.realm_check(value)?)?
+          .is_some()
+      {
+        // Native storage is only the wrapper identity. Reads must query the
+        // live Wasm-owned promise, never this placeholder's settlement.
+        allocate_promise(
+          current_isolate(),
+          PromiseSettlement::Pending,
+          ptr::null(),
+        )
+        .cast()
+      } else if kind == 6 {
+        let key =
+          runtime.realm_string(&"name".encode_utf16().collect::<Vec<_>>())?;
+        let name_value = runtime.realm_get(value, key)?;
+        // A configurable JS name property is not proof of callability.
+        // Keep non-string public names on the bound realm value; the native
+        // wrapper has no string display name to cache in that case.
+        let name = if runtime.realm_kind(name_value)? == 4 {
+          String::from_utf16(&runtime.realm_as_utf16(name_value)?)
+            .map_err(|_| "function name contains unpaired UTF-16".to_string())?
+        } else {
+          String::new()
+        };
+        let name = new_string(current_isolate(), name);
+        allocate_function(
+          current_isolate(),
+          unbound_realm_callback,
+          ptr::null(),
+          Vec::new(),
+          name,
+        )
+        .cast()
+      } else if kind == 9 {
+        allocate(
+          current_isolate(),
+          HeapValue::Array(ArrayState {
+            elements: Vec::new(),
+            properties: Vec::new(),
+          }),
+        )
+      } else {
+        new_object(current_isolate())
+      };
+      unsafe { isolate_state(current_isolate()) }
+        .realm_objects
+        .push(RealmObjectBinding {
+          host,
+          runtime: owner.clone(),
+          value,
+        });
+      Ok(host.cast())
+    }
+    kind => Err(format!(
+      "compiled realm value kind {kind} has no Rust wrapper yet"
+    )),
+  }
+}
+
+/// Flush after the Store borrow ends. One isolate-wide guard prevents a
+/// callback entering another realm from overtaking previously queued events.
+pub(crate) fn flush_rejection_events(
+  _owner: &Rc<RefCell<DenoRuntime>>,
+) -> Result<(), String> {
+  let isolate = current_isolate();
+  if isolate.is_null() {
+    return Err("rejection flush has no active isolate".into());
+  }
+  if unsafe { isolate_state(isolate) }.flushing_rejections {
+    return Ok(());
+  }
+  unsafe { isolate_state(isolate) }.flushing_rejections = true;
+  struct FlushGuard(*mut RealIsolate);
+  impl Drop for FlushGuard {
+    fn drop(&mut self) {
+      unsafe { isolate_state(self.0) }.flushing_rejections = false;
+    }
+  }
+  let _guard = FlushGuard(isolate);
+  loop {
+    let Some(event) = unsafe { isolate_state(isolate) }
+      .compiled_rejections
+      .front()
+      .copied()
+    else {
+      break;
+    };
+    let owner = {
+      let state = unsafe { isolate_state(isolate) };
+      state.owned_contexts.iter().find_map(|context| {
+        let Some(HeapValue::Context(state)) = (unsafe { heap_value(*context) })
+        else {
+          return None;
+        };
+        [&state.deno_core_bootstrap, &state.module_runtime]
+          .into_iter()
+          .flatten()
+          .find(|runtime| {
+            Rc::as_ptr(runtime) as usize == event.realm_owner_identity
+          })
+          .map(|runtime| (*context, runtime.clone()))
+      })
+    }
+    .ok_or_else(|| "queued rejection realm owner is unavailable".to_string())?;
+    // Reentrant execution can finish in one realm while an outer Store is
+    // still running in another. Leave the head queued; never skip it or try
+    // to convert values through the borrowed Store. The outer boundary flushes.
+    let Ok(mut runtime) = owner.1.try_borrow_mut() else {
+      return Ok(());
+    };
+    if event.realm_id != runtime.realm_id() || event.isolate != isolate as usize
+    {
+      return Err(
+        "rejection notification has a different realm or isolate owner".into(),
+      );
+    }
+    unsafe { isolate_state(isolate) }
+      .compiled_rejections
+      .pop_front();
+    struct ContextGuard(*const Context);
+    impl Drop for ContextGuard {
+      fn drop(&mut self) {
+        v8__Context__Exit(self.0);
+      }
+    }
+    v8__Context__Enter(owner.0);
+    let _context = ContextGuard(owner.0);
+    let translated = {
+      let promise_value = runtime.realm_from_handle(event.promise)?;
+      let promise = from_realm(&mut *runtime, &owner.1, promise_value)?;
+      if !matches!(unsafe { heap_value(promise) }, Some(HeapValue::Promise(_)))
+      {
+        return Err("rejection event carrier is not a native Promise".into());
+      }
+      let reason = if event.event == 1 {
+        ptr::null()
+      } else {
+        let value = runtime.realm_from_handle(event.reason)?;
+        from_realm(&mut *runtime, &owner.1, value)?
+      };
+      let kind = match event.event {
+        0 => crate::PromiseRejectEvent::PromiseRejectWithNoHandler,
+        1 => crate::PromiseRejectEvent::PromiseHandlerAddedAfterReject,
+        2 => crate::PromiseRejectEvent::PromiseRejectAfterResolved,
+        3 => crate::PromiseRejectEvent::PromiseResolveAfterResolved,
+        _ => return Err("invalid queued Promise rejection event".into()),
+      };
+      (
+        event.isolate as *mut RealIsolate,
+        promise.cast(),
+        reason,
+        kind,
+        event.continuation_data as *const Value,
+      )
+    };
+    drop(runtime);
+    let _restore = continuation::enter(translated.0, translated.4);
+    promise_reject::notify(
+      translated.0,
+      translated.1,
+      translated.2,
+      translated.3,
+    );
+  }
+  Ok(())
+}
+
+pub(super) fn is_bound(object: *const Object) -> bool {
+  binding(object).is_some()
+}
+
+pub(super) fn promise_snapshot(
+  promise: *const Promise,
+) -> Option<Result<(PromiseState, *const Value), String>> {
+  let entry = binding(promise.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let handle = runtime.realm_check(entry.value)?;
+    let (state, value) = runtime
+      .realm_promise_snapshot(handle)?
+      .ok_or("bound Promise lost its compiled Promise ABI")?;
+    let state = match state {
+      0 => PromiseState::Pending,
+      1 => PromiseState::Fulfilled,
+      2 => PromiseState::Rejected,
+      _ => return Err("invalid compiled Promise state".to_string()),
+    };
+    let value = if state == PromiseState::Pending {
+      ptr::null()
+    } else {
+      let value = runtime.realm_from_handle(value)?;
+      from_realm(runtime, &entry.runtime, value)?
+    };
+    Ok((state, value))
+  }))
+}
+
+pub(super) fn promise_handler(
+  promise: *const Promise,
+  mark: bool,
+) -> Option<Result<bool, String>> {
+  let entry = binding(promise.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let handle = runtime.realm_check(entry.value)?;
+    runtime
+      .realm_promise_handler(handle, mark)?
+      .ok_or("bound Promise lost its compiled handler ABI".to_string())
+  }))
+}
+
+pub(super) fn promise_then(
+  promise: *const Promise,
+  on_fulfilled: *const crate::Function,
+  on_rejected: *const crate::Function,
+) -> Option<Result<*const Promise, String>> {
+  let entry = binding(promise.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let mut handlers = Vec::new();
+    for handler in [on_fulfilled, on_rejected] {
+      let value = if handler.is_null() {
+        runtime.realm_undefined()
+      } else if binding(handler.cast()).is_none() {
+        host_callbacks::allocate_reaction(runtime, &entry.runtime, handler)?
+      } else {
+        into_realm(runtime, &entry.runtime, handler.cast())?
+      };
+      handlers.push(runtime.realm_check(value)?);
+    }
+    let handles = [runtime.realm_check(entry.value)?, handlers[0], handlers[1]];
+    let value = if let Some((success, handle)) =
+      runtime.realm_try_graph_promise_then(handles)?
+    {
+      let value = runtime.realm_from_handle(handle)?;
+      if !success {
+        let exception = from_realm(runtime, &entry.runtime, value)?;
+        record_exception(current_isolate(), exception);
+        return Ok(ptr::null());
+      }
+      value
+    } else {
+      runtime.realm_handle("__v8x_value_promise_then", &handles)?
+    };
+    let derived = from_realm(runtime, &entry.runtime, value)?;
+    if !matches!(unsafe { heap_value(derived) }, Some(HeapValue::Promise(_))) {
+      return Err("compiled Promise reaction did not return a Promise".into());
+    }
+    Ok(derived.cast())
+  }))
+}
+
+/// Retain the Module's original Rust identity while reading its live GC namespace.
+pub(super) fn bind_source_namespace(
+  host: *const Object,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  specifier: &str,
+) -> Result<(), String> {
+  callback_access::with_owner(owner, |runtime| {
+    bind_source_namespace_access(host, owner, specifier, runtime)
+  })
+}
+
+pub(crate) fn bind_source_namespace_access(
+  host: *const Object,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  specifier: &str,
+  runtime: &mut dyn RealmAccess,
+) -> Result<(), String> {
+  let global = runtime.realm_global()?;
+  let registry_key = runtime.realm_string(
+    &"__v8x_source_module_namespaces"
+      .encode_utf16()
+      .collect::<Vec<_>>(),
+  )?;
+  let registry = runtime.realm_get(global, registry_key)?;
+  if runtime.realm_kind(registry)? != 5 {
+    return Err(
+      "compiled source graph did not publish its namespace registry"
+        .to_string(),
+    );
+  }
+  let key =
+    runtime.realm_string(&specifier.encode_utf16().collect::<Vec<_>>())?;
+  let namespace = runtime.realm_get(registry, key)?;
+  if runtime.realm_kind(namespace)? != 5 {
+    return Err(format!(
+      "compiled graph did not publish namespace for {specifier:?}"
+    ));
+  }
+  if let Some(previous) = binding(host) {
+    if Rc::ptr_eq(owner, &previous.runtime) && previous.value == namespace {
+      return Ok(());
+    }
+    return Err(
+      "source module namespace was already bound to another value".to_string(),
+    );
+  }
+  unsafe { isolate_state(current_isolate()) }
+    .realm_objects
+    .push(RealmObjectBinding {
+      host,
+      runtime: owner.clone(),
+      value: namespace,
+    });
+  Ok(())
+}
+
+/// Bind the stable Rust namespace to the prelinked artifact's real namespace,
+/// never to a snapshot of bootstrap fields or the adapter's private helpers.
+pub(super) fn bind_prelinked_core_namespace(
+  host: *const Object,
+  owner: &Rc<RefCell<DenoRuntime>>,
+) -> Result<(), String> {
+  let mut runtime = owner.try_borrow_mut().map_err(|_| {
+    "Deno namespace publication re-entered an executing realm".to_string()
+  })?;
+  let namespace =
+    runtime.realm_handle("__v8x_deno_core_namespace_handle", &[])?;
+  if runtime.realm_kind(namespace)? != 5 {
+    return Err(
+      "prelinked Deno artifact did not return a namespace object".to_string(),
+    );
+  }
+  if let Some(previous) = binding(host) {
+    if Rc::ptr_eq(owner, &previous.runtime) && previous.value == namespace {
+      return Ok(());
+    }
+    return Err(
+      "Deno core namespace was already bound to another value".to_string(),
+    );
+  }
+  unsafe { isolate_state(current_isolate()) }
+    .realm_objects
+    .push(RealmObjectBinding {
+      host,
+      runtime: owner.clone(),
+      value: namespace,
+    });
+  Ok(())
+}
+
+pub(super) fn length(array: *const Array) -> Option<Result<u32, String>> {
+  let entry = binding(array.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let key =
+      runtime.realm_string(&"length".encode_utf16().collect::<Vec<_>>())?;
+    let value = runtime.realm_get(entry.value, key)?;
+    let length = runtime.realm_as_number(value)?;
+    if !length.is_finite()
+      || length < 0.0
+      || length > u32::MAX as f64
+      || length.fract() != 0.0
+    {
+      return Err("invalid realm array length".to_string());
+    }
+    Ok(length as u32)
+  }))
+}
+
+pub(super) fn get_prototype(
+  object: *const Object,
+) -> Option<Result<*const Value, String>> {
+  if let Err(error) = adopt_native_error(object) {
+    return Some(Err(error));
+  }
+  let entry = binding(object)?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let handles = [runtime.realm_check(entry.value)?];
+    if let Some((success, handle)) =
+      runtime.realm_try_graph_get_prototype(handles)?
+    {
+      let value = runtime.realm_from_handle(handle)?;
+      let value = from_realm(runtime, &entry.runtime, value)?;
+      if !success {
+        record_exception(current_isolate(), value);
+        return Ok(ptr::null());
+      }
+      return Ok(value);
+    }
+    let value = runtime.realm_get_prototype(entry.value)?;
+    from_realm(runtime, &entry.runtime, value)
+  }))
+}
+
+pub(super) fn set_prototype(
+  object: *const Object,
+  prototype: *const Value,
+) -> Option<Result<Option<bool>, String>> {
+  if let Err(error) = adopt_native_error(object) {
+    return Some(Err(error));
+  }
+  let entry = binding(object)?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let prototype = into_realm(runtime, &entry.runtime, prototype)?;
+    let handles = [
+      runtime.realm_check(entry.value)?,
+      runtime.realm_check(prototype)?,
+    ];
+    if let Some((success, handle)) =
+      runtime.realm_try_graph_set_prototype(handles)?
+    {
+      let value = runtime.realm_from_handle(handle)?;
+      if !success {
+        let exception = from_realm(runtime, &entry.runtime, value)?;
+        record_exception(current_isolate(), exception);
+        return Ok(None);
+      }
+      return Ok(Some(runtime.realm_as_boolean(value)?));
+    }
+    runtime
+      .realm_set_prototype(entry.value, prototype)
+      .map(Some)
+  }))
+}
+
+pub(super) fn get(
+  object: *const Object,
+  key: *const Value,
+) -> Option<Result<*const Value, String>> {
+  if let Err(error) = adopt_native_error(object) {
+    return Some(Err(error));
+  }
+  let entry = binding(object)?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let key = into_realm(runtime, &entry.runtime, key)?;
+    let handles =
+      [runtime.realm_check(entry.value)?, runtime.realm_check(key)?];
+    if let Some((success, handle)) = runtime.realm_try_graph_get(handles)? {
+      let value = runtime.realm_from_handle(handle)?;
+      let value = from_realm(runtime, &entry.runtime, value)?;
+      if !success {
+        record_exception(current_isolate(), value);
+        return Ok(ptr::null());
+      }
+      return Ok(value);
+    }
+    let value = runtime.realm_get(entry.value, key)?;
+    from_realm(runtime, &entry.runtime, value)
+  }))
+}
+
+pub(super) fn set(
+  object: *const Object,
+  key: *const Value,
+  value: *const Value,
+) -> Option<Result<Option<bool>, String>> {
+  if let Err(error) = adopt_native_error(object) {
+    return Some(Err(error));
+  }
+  let entry = binding(object)?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let key = into_realm(runtime, &entry.runtime, key)?;
+    let value = into_realm(runtime, &entry.runtime, value)?;
+    let handles = [
+      runtime.realm_check(entry.value)?,
+      runtime.realm_check(key)?,
+      runtime.realm_check(value)?,
+    ];
+    if let Some((success, handle)) = runtime.realm_try_graph_set(handles)? {
+      let result = runtime.realm_from_handle(handle)?;
+      if !success {
+        let exception = from_realm(runtime, &entry.runtime, result)?;
+        record_exception(current_isolate(), exception);
+        return Ok(None);
+      }
+      return Ok(Some(runtime.realm_as_boolean(result)?));
+    }
+    runtime.realm_set(entry.value, key, value)?;
+    Ok(Some(true))
+  }))
+}
+
+unsafe extern "C" fn unbound_realm_callback(
+  _info: *const crate::function::FunctionCallbackInfo,
+) {
+  report("realm function lost its owner binding".to_string());
+}
+
+pub(super) fn call(
+  function: *const crate::Function,
+  receiver: *const Value,
+  args: &[*const Value],
+  construct: bool,
+) -> Option<Result<*const Value, String>> {
+  let entry = binding(function.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    if construct {
+      return Err(
+        "constructing a realm-backed function is not implemented".to_string(),
+      );
+    }
+    let receiver = into_realm(runtime, &entry.runtime, receiver)?;
+    let array = runtime.realm_array()?;
+    for (index, argument) in args.iter().enumerate() {
+      let key = runtime
+        .realm_string(&index.to_string().encode_utf16().collect::<Vec<_>>())?;
+      let value = into_realm(runtime, &entry.runtime, *argument)?;
+      runtime.realm_set(array, key, value)?;
+    }
+    let handles = [
+      runtime.realm_check(entry.value)?,
+      runtime.realm_check(receiver)?,
+      runtime.realm_check(array)?,
+    ];
+    if let Some((success, handle)) = runtime.realm_try_graph_call(handles)? {
+      let value = runtime.realm_from_handle(handle)?;
+      let value = from_realm(runtime, &entry.runtime, value)?;
+      if !success {
+        record_exception(current_isolate(), value);
+        return Ok(ptr::null());
+      }
+      return Ok(value);
+    }
+    let value = runtime.realm_call(entry.value, receiver, array)?;
+    from_realm(runtime, &entry.runtime, value)
+  }))
+}
+
+pub(super) fn to_number(
+  value: *const Value,
+  context: *const Context,
+) -> Result<Option<f64>, String> {
+  let owner = binding(value.cast())
+    .or_else(|| binding(v8__Context__Global(context)))
+    .ok_or_else(|| {
+      "numeric coercion requires an attached compiled realm".to_string()
+    })?
+    .runtime;
+  callback_access::with_owner(&owner, |runtime| {
+    let value = into_realm(runtime, &owner, value)?;
+    let envelope = runtime
+      .realm_handle("__v8x_value_to_number", &[runtime.realm_check(value)?])?;
+    let zero = runtime.realm_string(&[48])?;
+    let one = runtime.realm_string(&[49])?;
+    let success = runtime.realm_get(envelope, zero)?;
+    let result = runtime.realm_get(envelope, one)?;
+    if runtime.realm_as_boolean(success)? {
+      Ok(Some(runtime.realm_as_number(result)?))
+    } else {
+      let exception = from_realm(runtime, &owner, result)?;
+      record_exception(current_isolate(), exception);
+      Ok(None)
+    }
+  })
+}
+
+pub(super) fn to_string(
+  value: *const Value,
+) -> Option<Result<*const V8String, String>> {
+  let entry = binding(value.cast())?;
+  Some(callback_access::with_owner(&entry.runtime, |runtime| {
+    let envelope = runtime.realm_handle(
+      "__v8x_value_to_string",
+      &[runtime.realm_check(entry.value)?],
+    )?;
+    let zero = runtime.realm_string(&[48])?;
+    let one = runtime.realm_string(&[49])?;
+    let success = runtime.realm_get(envelope, zero)?;
+    let result = runtime.realm_get(envelope, one)?;
+    if !runtime.realm_as_boolean(success)? {
+      let exception = from_realm(runtime, &entry.runtime, result)?;
+      record_exception(current_isolate(), exception);
+      return Ok(ptr::null());
+    }
+    if runtime.realm_kind(result)? != 4 {
+      return Err("realm String conversion did not return a string".into());
+    }
+    let units = runtime.realm_as_utf16(result)?;
+    let text = String::from_utf16(&units)
+      .map_err(|_| "realm String conversion contains unpaired UTF-16")?;
+    Ok(new_string(current_isolate(), text))
+  }))
+}
+
+pub(super) fn report(error: String) {
+  if std::env::var_os("V8X_JS2WASM_TRACE_HOST").is_some() {
+    eprintln!("v8x/js2wasm: {error}");
+  }
+  let message = new_string(current_isolate(), error);
+  let exception = allocate_error(message, "Error");
+  record_exception(current_isolate(), exception);
+}
+
+pub(crate) fn bootstrap_owner_for_attachment(
+  identity: usize,
+) -> Result<Rc<RefCell<DenoRuntime>>, String> {
+  let owner = deno_core_runtime(current_context())?;
+  // Equality token only, never dereferenced. ContextState retains the Rc.
+  if identity == 0 || identity != Rc::as_ptr(&owner) as usize {
+    return Err(
+      "context attachment requires its published runtime".to_string(),
+    );
+  }
+  Ok(owner)
+}
+
+pub(crate) fn attach_bootstrap_context(
+  access: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+) -> Result<(), String> {
+  let context = current_context();
+  let published = deno_core_runtime(context)?;
+  if !Rc::ptr_eq(owner, &published) {
+    return Err(
+      "context attachment runtime does not own this context".to_string(),
+    );
+  }
+  let global = v8__Context__Global(context);
+  if global.is_null() || binding(global).is_some() {
+    return Err("context global is missing or already attached".to_string());
+  }
+  let target = access.realm_global()?;
+  host_values::transfer_into(access, owner, global.cast(), Some(target))?;
+  stack_trace::install(access, owner, target)?;
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_bootstrap_context_for_test(
+  context: &Context,
+  path: &std::path::Path,
+) -> Result<(), String> {
+  if let Some(HeapValue::Context(state)) = unsafe { heap_value(context) } {
+    if state.deno_core_bootstrap.is_some() || state.module_runtime.is_some() {
+      return Err("Deno bootstrap context already owns a runtime".to_string());
+    }
+  }
+  crate::js2wasm_spike::bootstrap_context_for_test(path, |runtime| {
+    publish_deno_core_runtime(context, runtime)
+  })?;
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_attach_realm_for_test(
+  context: &Context,
+  path: &std::path::Path,
+) -> Result<(), String> {
+  let runtime = crate::js2wasm_spike::load_realm_for_test(path)?;
+  attach_realm_for_test(context, runtime)
+}
+
+/// Attach a trusted build-pipeline artifact without linking a Wasm compiler.
+#[cfg(not(feature = "js2wasm_deno_poc_replay"))]
+#[doc(hidden)]
+pub fn js2wasm_attach_precompiled_realm_for_test(
+  context: &Context,
+  path: &std::path::Path,
+) -> Result<(), String> {
+  let runtime = crate::js2wasm_spike::load_precompiled_realm_for_test(path)?;
+  attach_realm_for_test(context, runtime)
+}
+
+#[cfg(any(
+  feature = "js2wasm_runtime_compile",
+  not(feature = "js2wasm_deno_poc_replay")
+))]
+fn attach_realm_for_test(
+  context: &Context,
+  runtime: Rc<RefCell<crate::js2wasm_spike::DenoRuntime>>,
+) -> Result<(), String> {
+  runtime.borrow_mut().configure_heap_limit(current_isolate());
+  runtime
+    .borrow_mut()
+    .configure_realm_owner(Rc::as_ptr(&runtime) as usize)?;
+  let value = runtime.borrow_mut().realm_global()?;
+  let global = v8__Context__Global(context);
+  if global.is_null() {
+    return Err("test context has no global".to_string());
+  }
+  if binding(global).is_some() {
+    return Err("context global is already attached to a realm".to_string());
+  }
+  host_values::transfer_into(
+    &mut *runtime.borrow_mut(),
+    &runtime,
+    global.cast(),
+    Some(value),
+  )?;
+  if let Some(HeapValue::Context(state)) = unsafe { heap_value_mut(context) } {
+    state.module_runtime = Some(runtime);
+  }
+  Ok(())
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_run_core_script_for_test(
+  context: &Context,
+  phase: usize,
+) -> Result<(), String> {
+  with_deno_core_runtime(context, "test script stage", |runtime| {
+    if !runtime.run_deno_core_script(phase)? {
+      return Err("fixture has no deferred script runner".into());
+    }
+    Ok(())
+  })
+}
+
+#[cfg(feature = "js2wasm_runtime_compile")]
+#[doc(hidden)]
+pub fn js2wasm_attach_graph_for_test(
+  context: &Context,
+  path: &std::path::Path,
+) -> Result<(), String> {
+  let entry =
+    binding(v8__Context__Global(context)).ok_or("test context has no realm")?;
+  let mut runtime = entry
+    .runtime
+    .try_borrow_mut()
+    .map_err(|_| "test realm is executing")?;
+  crate::js2wasm_spike::load_graph_for_test(&mut runtime, path)
+}
+
+// Native arrays acquire the actual compiled realm's Array iterator lazily.
+// Explicit properties win, and the supplied context selects the owner rather
+// than whichever context happens to be current during a nested callback.
+pub(super) fn adopt_array_iterator(
+  object: *const Object,
+  context: *const Context,
+  key: *const Value,
+) -> Result<(), String> {
+  if context.is_null()
+    || binding(object).is_some()
+    || !matches!(unsafe { heap_value(object) }, Some(HeapValue::Array(_)))
+    || key != unsafe { isolate_state(current_isolate()).iterator_symbol }.cast()
+    || property_on_chain(object, key.cast()).is_some()
+  {
+    return Ok(());
+  }
+  let Some(global) = binding(v8__Context__Global(context)) else {
+    return Ok(());
+  };
+  callback_access::with_owner(&global.runtime, |runtime| {
+    into_realm(runtime, &global.runtime, object.cast()).map(|_| ())
+  })
+}
+
+fn adopt_native_error(object: *const Object) -> Result<(), String> {
+  if !matches!(unsafe { heap_value(object) }, Some(HeapValue::Error { .. }))
+    || binding(object).is_some()
+  {
+    return Ok(());
+  }
+  let context = current_context();
+  if context.is_null() {
+    return Ok(());
+  }
+  let Some(global) = binding(v8__Context__Global(context)) else {
+    return Ok(());
+  };
+  callback_access::with_owner(&global.runtime, |runtime| {
+    into_realm(runtime, &global.runtime, object.cast()).map(|_| ())
+  })
+}

@@ -1,0 +1,272 @@
+{
+  "date": "2026-09-09T00:08:27.052Z",
+  "platform": "darwin",
+  "arch": "arm64",
+  "repeats": 7,
+  "engines": [
+    {
+      "name": "v8",
+      "path": "/private/tmp/deno-comparison.WyCNkv/target-v8/release/examples/hello_world",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/target-v8/release/examples/hello_world",
+        "bytes": 56382208,
+        "sha256": "418c2d450aae15e9fffe32ce1bc6c0a88c0f6ee54307e1fa699e75f640e92181"
+      },
+      "stripped": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-v8",
+        "bytes": 39078032,
+        "sha256": "db2e9e9be6037207ae3e50f6e580db8ae60e9b4b63f1b44951005c77c0db93c7"
+      },
+      "payloadBytes": 39078032
+    },
+    {
+      "name": "quickjs",
+      "path": "/private/tmp/deno-comparison.WyCNkv/target-quickjs/release/examples/hello_world",
+      "artifacts": [],
+      "original": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/target-quickjs/release/examples/hello_world",
+        "bytes": 6646192,
+        "sha256": "f1269082a1505c9b364b02f4dc727d1a58488d17945b3a59f34c8608a9acda2e"
+      },
+      "stripped": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-quickjs",
+        "bytes": 5613536,
+        "sha256": "4c5d27efb48bc976e822846e6ccfb22c59f416318e29f2475d3238752b7d6893"
+      },
+      "payloadBytes": 5613536
+    },
+    {
+      "name": "js2wasm",
+      "path": "/private/tmp/v8x-deno-followup-20260908/target/release/examples/hello_world",
+      "artifacts": [
+        {
+          "path": "/private/tmp/deno-number-coercion-build.7sSHn7/core-O3.cwasm",
+          "bytes": 123368824,
+          "sha256": "bbd6c1525d62a594380f4aaa0cb6dc764dab9595db1b175108a4cc02b85975c8"
+        },
+        {
+          "path": "/private/tmp/deno-number-coercion-build.7sSHn7/provider-O3.cwasm",
+          "bytes": 446895408,
+          "sha256": "505d6cd1fcee6538a8a5e8b023b732b21f37726c5c16a35e7e303e97deda05d2"
+        }
+      ],
+      "original": {
+        "path": "/private/tmp/v8x-deno-followup-20260908/target/release/examples/hello_world",
+        "bytes": 3302928,
+        "sha256": "4cd441113902e8bf9a6da33953bd0ad833cdddd3ff4254fb72e1e08cd81bd057"
+      },
+      "stripped": {
+        "path": "/private/tmp/deno-comparison.WyCNkv/results-quiet/hello-world-js2wasm",
+        "bytes": 2396592,
+        "sha256": "f9b82013f19023b9a475f407b535ddb3d79019de6467dedaf937cda3d052b1dc"
+      },
+      "payloadBytes": 572660824
+    }
+  ],
+  "runs": [
+    {
+      "engine": "v8",
+      "round": 1,
+      "wallMs": 432.613875,
+      "peakRssBytes": 21184512,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 1,
+      "wallMs": 193.10945800000013,
+      "peakRssBytes": 18169856,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 1,
+      "wallMs": 13701.343875,
+      "peakRssBytes": 515620864,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 2,
+      "wallMs": 47.45270899999923,
+      "peakRssBytes": 18432000,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 2,
+      "wallMs": 13196.114208,
+      "peakRssBytes": 518455296,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 2,
+      "wallMs": 70.68395800000144,
+      "peakRssBytes": 21200896,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 3,
+      "wallMs": 13101.313875,
+      "peakRssBytes": 518438912,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 3,
+      "wallMs": 11.964041999999608,
+      "peakRssBytes": 21151744,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 3,
+      "wallMs": 26.7768750000032,
+      "peakRssBytes": 18415616,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 4,
+      "wallMs": 9.032541000000492,
+      "peakRssBytes": 21217280,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 4,
+      "wallMs": 25.70166700000118,
+      "peakRssBytes": 18464768,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 4,
+      "wallMs": 13127.033082999995,
+      "peakRssBytes": 518291456,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 5,
+      "wallMs": 69.69287500000064,
+      "peakRssBytes": 18235392,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 5,
+      "wallMs": 13482.247917000008,
+      "peakRssBytes": 518324224,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 5,
+      "wallMs": 64.41654199999175,
+      "peakRssBytes": 21184512,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 6,
+      "wallMs": 16468.521833000006,
+      "peakRssBytes": 515702784,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 6,
+      "wallMs": 57.72395799998776,
+      "peakRssBytes": 21151744,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 6,
+      "wallMs": 44.78495899999689,
+      "peakRssBytes": 18546688,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "v8",
+      "round": 7,
+      "wallMs": 10.784500000008848,
+      "peakRssBytes": 21135360,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "quickjs",
+      "round": 7,
+      "wallMs": 27.81433300000208,
+      "peakRssBytes": 18448384,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    },
+    {
+      "engine": "js2wasm",
+      "round": 7,
+      "wallMs": 14069.421667000002,
+      "peakRssBytes": 518438912,
+      "exitCode": 0,
+      "signal": null,
+      "valid": true
+    }
+  ],
+  "provenance": {
+    "deno": "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44",
+    "denoCore": "0.407.0",
+    "rustyV8": "149.4.0",
+    "runtime": "0eaa1d8cb4aaeeb3ce159951e1bc1e652f36aecf",
+    "compiler": "bda15bdf70baefc3d7620f32a03dc3660c2fd005",
+    "quickjs": "034f2aba47ab6e7aacd869af7aa796b110d0ea2e",
+    "wasmtime": "47.0.3",
+    "binaryen": "125",
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "os": "macOS 26.6.2 (25G83)",
+    "cpu": "Apple M4",
+    "wasmOpt": "--no-inline -O3 --pass-arg=no-inline@__new_* --all-features --disable-custom-descriptors -g"
+  }
+}

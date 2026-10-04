@@ -33,4 +33,45 @@ The system-JSC row is a deliberate trade. A closed-graph restriction is
 stronger than a partial emulation of hooks Apple's framework does not
 expose, and it is much easier to test.
 
+The experimental js2wasm backend keys module state by native wrapper identity.
+When the next dependency has already failed, later evaluation returns a cached
+rejected Promise with the original exception object. This includes transitive
+dependencies and does not rerun the failed callback. An earlier unevaluated
+dependency prevents this shortcut so its execution order is retained.
+Leading synthetic dependencies execute their native callbacks before source
+graph packaging. A first callback failure retains the original exception too.
+Successful synthetic/source graph composition is not yet supported.
+The Context value bridge can define live getter properties backed by native
+callbacks. Compiled-Wasm and Wasmtime controls verify deferred reads, replacement
+object identity and write protection. This is an accessor transport primitive,
+not a complete module namespace. An experimental carrier reads authoritative
+native export slots and supplies live data descriptors, but its compiled
+own-key ordering control fails. The final carrier's native replay and
+authenticated mixed-graph packaging remain unfinished.
+Opt-in source lifecycle packages publish a completed dependency's namespace
+before a later source fails. Completed dependencies remain usable, executing
+sources and their consumers retain the original exception, and later siblings
+remain untouched. Calls into the completed dependency retain its original
+allocation owner even before the failed entry's export registry is ready.
+Packages without lifecycle events cannot recover these per-source states.
+If a fresh source dependency precedes a cached source failure, its body runs
+first. The namespace capability then throws the original cached JS object
+through the Context's shared exception tag. The consumer's rejected Promise
+retains that object without reexecuting the failed source.
+The shared-module, typed-module, module-evaluation, and selected Deno module
+test package builders explicitly enable lifecycle events. Generic graph
+packaging still defaults to disabled.
+Pinned-original Deno packages also cover main/side loader identity and the
+test_mods import/host-op case. The latter checks that instantiation alone does
+not execute source and that evaluation dispatches the Rust op exactly once.
+Pinned-original lazy loading also covers aliased imports and evaluation of a
+pre-instantiated sibling from a native callback. Nested initialization and
+namespace publication use the active Caller store access instead of borrowing
+the executing runtime again. Nine selected unchanged Deno module tests pass;
+this is not certification of the full 431-test suite. A separate native AOT
+control verifies a nested throwing module's original object, cached rejection
+Promise, and propagation to the outer module without executing its next write.
+General cyclic evaluation, snapshots, and complete Deno integration remain
+unverified.
+
 #next("snapshots", [Snapshots: record and replay])
