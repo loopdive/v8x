@@ -1,5 +1,24 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Wrap-up: owner-aware method call
+
+Runtime compiler pin: ffea2d022fde6c76b189b0958ca91c4b86fc3369.
+The foreign method call control is no longer an expected failure. Context-owned
+callees dispatch through __v8x_context_call; the method is resolved once and its
+receiver is retained. Full compiler focused suite passes 41/41; TypeScript and
+scoped lint pass. These are compiler controls, not native lazy-loader evidence.
+
+Resume with caller-owned callback and getter/argument ordering controls, then a
+fresh clean pinned Context/Script rebuild using Binaryen 125 and Wasmtime 47.0.3.
+Replay unchanged lazy-loader, WebIDL and conversions before claiming native
+progress. Latest native evidence is 17/17 WebIDL, 2/2 derived conversions and
+0/1 lazy-loader. Full 431-test run aborted at unsupported SnapshotCreator without
+a summary. Complete module graphs, macro-generated inputs, host operations,
+snapshots, transport gaps and matched V8/QuickJS/Porffor benchmarks remain open.
+Existing adapter PR https://github.com/loopdive/v8x/pull/2 and compiler PR
+https://github.com/loopdive/js2/pull/6468 remain drafts, not merge-ready.
+Historical sections below describe their stated revisions, not this new pin.
+
 ## Ambient global read diagnosis, 2026-10-04
 
 Current runtime compiler pin: 825eb75e74db913184480cf9182793db8549e0e4.
