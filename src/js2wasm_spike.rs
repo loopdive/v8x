@@ -37,6 +37,8 @@ mod graph_packages;
 mod realm_values;
 #[path = "js2wasm_rejection_events.rs"]
 pub(crate) mod rejection_events;
+#[path = "js2wasm_script_packages.rs"]
+mod script_packages;
 #[path = "js2wasm_shared_buffers.rs"]
 mod shared_buffers;
 #[path = "js2wasm_shared_strings.rs"]
@@ -1841,6 +1843,14 @@ impl SharedDenoRuntime {
     modules: &[SourceModule],
   ) -> Result<PreparedModule, String> {
     let graph_sha256 = graph_digest(entry, modules);
+    self.precompiled_bound_file(artifact, graph_sha256)
+  }
+
+  fn precompiled_bound_file(
+    &self,
+    artifact: &Path,
+    graph_sha256: String,
+  ) -> Result<PreparedModule, String> {
     let artifact_sha256 = bound_artifact_digest(artifact, &graph_sha256)?;
     let artifact = artifact.canonicalize().map_err(|error| {
       format!(
@@ -2734,6 +2744,22 @@ impl DenoRuntime {
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
   ) -> Result<(), String> {
+    let instance = self.retain_graph_instance(shared, prepared)?;
+    let primary = std::mem::replace(&mut self.instance, instance);
+    let result = (|| {
+      self.run_deferred_module_init()?;
+      self.verify_cwd_probe()?;
+      self.verify_runtime_eval_state_probe()
+    })();
+    self.instance = primary;
+    result
+  }
+
+  fn retain_graph_instance(
+    &mut self,
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+  ) -> Result<Instance, String> {
     let instance = Self::instantiate_in_store(
       shared,
       prepared,
@@ -2746,21 +2772,14 @@ impl DenoRuntime {
     self.graph_instances.push(instance);
     self.store.data_mut().aot_call_graphs.push(instance);
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
-    let primary = std::mem::replace(&mut self.instance, instance);
-    let result = (|| {
-      self.run_deferred_module_init()?;
-      self.verify_cwd_probe()?;
-      self.verify_runtime_eval_state_probe()
-    })();
-    self.instance = primary;
-    result
+    Ok(instance)
   }
 
   fn instantiate_script(
     &mut self,
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
-  ) -> Result<f64, String> {
+  ) -> Result<(bool, f64), String> {
     self
       .realm_instance
       .get_typed_func::<(), ()>(
@@ -2770,8 +2789,42 @@ impl DenoRuntime {
       .map_err(|error| format!("Script completion reset: {error}"))?
       .call(&mut self.store, ())
       .map_err(|error| format!("Script completion reset: {error}"))?;
-    self.instantiate_graph(shared, prepared)?;
-    self
+    let instance = self.retain_graph_instance(shared, prepared)?;
+    if let Some(init) = instance.get_func(&mut self.store, "__module_init") {
+      let init = init
+        .typed::<(), ()>(&self.store)
+        .map_err(|error| format!("Script initializer ABI: {error}"))?;
+      if let Err(error) = init.call(&mut self.store, ()) {
+        use wasmtime::{AsContextMut, RootScope, Val};
+        let mut scope = RootScope::new(&mut self.store);
+        let exception = scope
+          .as_context_mut()
+          .take_pending_exception()
+          .ok_or_else(|| format!("Script trapped: {error:#}"))?;
+        let fields = exception
+          .fields(&mut scope)
+          .map_err(|error| format!("Script exception fields: {error}"))?
+          .collect::<Vec<_>>();
+        let [payload @ Val::ExternRef(_)] = fields.as_slice() else {
+          return Err(
+            "Script exception must carry exactly one JS value".into(),
+          );
+        };
+        let keep = self
+          .realm_instance
+          .get_func(&mut scope, "__v8x_value_keep")
+          .ok_or("Context lacks exception rooting ABI")?;
+        let mut result = [Val::F64(0)];
+        keep
+          .call(&mut scope, &[*payload], &mut result)
+          .map_err(|error| format!("root Script exception: {error:#}"))?;
+        return Ok((
+          false,
+          result[0].f64().ok_or("invalid Script exception handle")?,
+        ));
+      }
+    }
+    let handle = self
       .realm_instance
       .get_typed_func::<(), f64>(
         &mut self.store,
@@ -2779,7 +2832,26 @@ impl DenoRuntime {
       )
       .map_err(|error| format!("Script completion handle: {error}"))?
       .call(&mut self.store, ())
-      .map_err(|error| format!("Script completion handle: {error}"))
+      .map_err(|error| format!("Script completion handle: {error}"))?;
+    Ok((true, handle))
+  }
+
+  pub(crate) fn run_aot_script(
+    &mut self,
+    specifier: &str,
+    source: &str,
+  ) -> Result<Option<(bool, RealmValue)>, String> {
+    let Some(path) = script_packages::configured_input(specifier, source)
+    else {
+      return Ok(None);
+    };
+    let shared = shared_runtime()?;
+    let prepared = shared.precompiled_bound_file(
+      &path,
+      script_packages::digest(specifier, source),
+    )?;
+    let (normal, handle) = self.instantiate_script(shared, &prepared)?;
+    Ok(Some((normal, self.realm_from_handle(handle)?)))
   }
 
   pub(crate) fn bind_deno_ops(

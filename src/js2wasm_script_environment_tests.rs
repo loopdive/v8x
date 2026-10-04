@@ -69,14 +69,14 @@ pub fn precompiled_scripts_share_context_lexicals(
     43.0
   );
   let number_handle = first.instantiate_script(&shared, &scripts[8])?;
-  assert!(number_handle > 0.0);
+  assert!(number_handle.0 && number_handle.1 > 0.0);
   assert_eq!(
     read_number(&mut first, "__v8x_probe_completion_number")?,
     42.0
   );
-  assert_eq!(first.instantiate_script(&shared, &scripts[9])?, 0.0);
+  assert_eq!(first.instantiate_script(&shared, &scripts[9])?, (true, 0.0));
   let object_handle = first.instantiate_script(&shared, &scripts[10])?;
-  assert!(object_handle > 0.0);
+  assert!(object_handle.0 && object_handle.1 > 0.0);
   assert_eq!(read_bool(&mut first, "__v8x_probe_completion_identity")?, 1);
   assert_eq!(
     read_number(&mut second, "__v8x_script_completion_handle")?,

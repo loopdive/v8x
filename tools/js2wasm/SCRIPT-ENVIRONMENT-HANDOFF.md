@@ -99,3 +99,58 @@ tests before claiming a compatibility gain. Existing full-core replay
 measurements use the older compiler pin, not this checkpoint. Factoring
 compiler helpers into an external shared library and fresh footprint/speed
 benchmarks also remain open. Do not advance suite baselines from this fixture.
+
+## Public Script package checkpoint (2026-10-04)
+
+This continuation is intentionally unfinished and belongs in the existing
+draft PR https://github.com/loopdive/v8x/pull/2, with compiler companion
+https://github.com/loopdive/js2/pull/6468. Compiler HEAD remains
+`3d4c1dfdaf61f101cb07c7139b5a3ed65052d520`; the compiler PR targets the
+callback-construction branch, not main. No full integration claim is made.
+
+`src/js2wasm_script_packages.rs` defines an independent Script digest domain,
+length-framing the exact resource specifier and original source. The proposed
+lookup is `V8X_JS2WASM_AOT_SCRIPT_DIR/<digest>.cwasm`. It reuses the trusted
+artifact binding reader and its `.graph-sha256` sidecar format, treating the
+Script digest as the binding key. This is not a finished packaging format:
+there is no Script package writer or independent Script-goal/completion-ABI
+validation yet. Native deserialization remains restricted to trusted build
+artifacts, never arbitrary tenant-provided native bytes.
+
+`precompiled_bound_file` factors the existing verified-byte loader for both
+graph and Script binding keys. `retain_graph_instance` separates retention
+from initialization. `instantiate_script` now returns `(normal, handle)` and
+calls the native initializer directly so a JS exception can be rooted through
+the Context keeper before another error renderer consumes it. A Wasmtime trap
+without a pending JS exception remains an infrastructure error. The initial
+compile failure was the RootScope API: use
+`scope.as_context_mut().take_pending_exception()`, not a RootScope method.
+
+Fresh verification after that fix: the compiler-free feature profile builds;
+the native Script fixture passes 1/1 (36 filtered, 0.11 seconds); the ordinary
+adapter binary reports 30 passes, zero failures and seven ignored out of 37;
+runtime option tests pass 10/10. The fixture reuses the twelve trusted native
+artifacts at `/private/tmp/deno-script-completion.8HrA0L`, not freshly rebuilt
+full Deno artifacts. Thrown-value preservation and the new package lookup have
+not been independently exercised. Cargo warns that `run_aot_script` and its
+lookup helpers are unused, correctly reflecting the missing public wiring.
+
+Resume in this order:
+
+1. Add a trusted Script package writer and ABI/Script-goal validation, with
+   exact-source/specifier/byte mismatch controls that fail before Script effects.
+2. Call `DenoRuntime::run_aot_script` from public `v8__Script__Run` before the
+   existing staged paths when a package directory is configured. A missing or
+   mismatched configured package must not fall back to matching or interpreting
+   source text. With no directory configured, preserve existing behavior.
+3. Adopt normal values and thrown values through the existing realm wrappers,
+   preserving object identity rather than JSON conversion or a replacement Error.
+   Cover throw identity, repeat execution, Context isolation and zero runtime
+   compilations/eval instances through the public rusty_v8 surface.
+4. Configure or explicitly reject the compiler's pure source Program completion
+   path. Rebuild the full Context with the pinned compiler and run unchanged
+   Deno/WebIDL conformance before claiming compatibility gains.
+
+No Deno/vendor test or baseline was modified. Unrelated `.tmp/` content is
+excluded. Fresh footprint/speed measurements and shared-library factoring
+remain outstanding; do not reuse old measurements as results of this change.
