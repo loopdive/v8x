@@ -1,5 +1,41 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Owner-aware Module calls verified
+
+The expanded shared dependency control now passes **1/1**, 51 filtered /52,
+including live reads, mutations, namespace/bare receivers, same-URL distinct
+Modules and zero compiler/interpreter counts. Compiler function-value reads
+retain the original namespace's function. Native owner-aware routing now
+recognizes Module graph allocation exports as well as Script allocation exports.
+Calls use the owner's receiver state, not a compatible closure layout in a
+different graph. New owning getter/call exports require allocation proof.
+
+The five selected unchanged Deno module tests pass **5/5**, each selecting 1
+with 430 filtered /431. Builtin core import is newly passing. Removing its
+graph package fails **0/1** at loading. An exploratory import_meta_ prefix run
+passed two tests then aborted at unsupported SnapshotCreator; no full population
+claim is made. Existing positive/throwing native AOT controls remain 2/2 and
+ordinary scoped controls remain 34 passed, 17 ignored, 1 filtered /52.
+
+Fresh development packages are `/private/tmp/deno-module-linking.pmIWQ4/deno`.
+Graphs use Binaryen 125 O3 /Wasmtime 47.0.3; four assertion Scripts were built
+with an explicit Node `--import tsx` loader after the combined builder failed
+without it. These use a dirty development compiler, not a clean published pin.
+Full/small Context artifacts are unchanged. No benchmark was rerun.
+
+Rebuild the original Deno runner using
+`RUSTFLAGS='--cfg tokio_unstable' cargo test --offline -p deno_core --lib --no-run`.
+This removes the macOS linker configuration failure without editing source/tests.
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-promise-full.X2WdwN/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-module-linking.pmIWQ4/deno/scripts V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-linking.pmIWQ4/deno/graphs target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::builtin_core_module --nocapture --test-threads=1
+```
+
+Next: clean pinned artifact replay, prepared IR initialization, cycles/TDZ,
+cached failures, optional/spread call coverage and negative owner/capability
+controls, snapshots and the full unchanged population. Both PRs remain drafts.
+The failing checkpoint below is historical.
+
 ## Latest module linking checkpoint: incomplete
 
 The new instance-bound `__v8x_module_namespace_*` imports retrieve evaluated

@@ -208,16 +208,16 @@ verifies null-prototype identity and an older graph's metadata after another
 same-URL Module executes. Native plain-object CreateDataProperty supports these
 initialization callbacks; defining properties on compiled and native exotic
 objects is still explicitly refused. Full module conformance is not established.
-Unchanged metadata resolution, filename/dirname and repeated evaluation controls
-pass with exact AOT packages. Importing the built-in core from another graph
-has not been replayed with the new namespace capabilities. A two-entry control
-now retains the native dependency namespace, executes the dependency once and
-observes live named and namespace imports. The expanded control still fails
-when calling a dependency function from the later graph: it returns 1 instead
-of 4. Later receiver and distinct same-URL Module checks are not reached.
+Five selected unchanged module tests pass with exact AOT packages, including
+importing the built-in core from another graph, metadata resolution,
+filename/dirname and repeated evaluation. Missing graph packages fail loading.
+A two-entry native control retains the original dependency namespace, executes
+the dependency once and observes live named and namespace imports. Calls use
+the original function's receiver state. The control also verifies namespace
+and bare receivers, distinct same-URL Modules and no compiler or interpreter.
 The same JavaScript fixture passes under Node's V8 module evaluator.
-Canonical shared-module linking remains incomplete; the existing binding is
-never silently replaced. Prepared IR initialization still needs guarding.
+Canonical shared-module linking remains experimental. Prepared IR initialization,
+cycles, temporal dead zones and full unchanged population still need coverage.
 Within one graph, repeated namespace imports, namespace re-exports and native
 publication share one object. Compiler controls and the first entry of the
 native shared-dependency control verify this identity.

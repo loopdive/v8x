@@ -433,6 +433,27 @@ fn dispatch(
     .call(&mut scope, &[Val::F64(handles[0].to_bits())], &mut callable)
     .map_err(|error| format!("unwrap graph callable: {error:#}"))?;
   for (graph, matcher, dispatch_name, script) in routes {
+    // Export reachability is not allocation ownership: a newer graph may
+    // re-export an older graph's function. Its structurally compatible call
+    // dispatcher cannot install `this` in that function's original globals.
+    if !script && dispatch_name == "__v8x_graph_call_export" {
+      let owns = graph
+        .get_func(&mut scope, "__v8x_graph_owns")
+        .ok_or("callable graph lacks allocation ownership; rebuild artifact")?;
+      let mut owned = [Val::I32(0)];
+      owns
+        .call(&mut scope, &callable, &mut owned)
+        .map_err(|error| {
+          format!("classify callable allocation owner: {error:#}")
+        })?;
+      match owned[0].i32() {
+        Some(0) => continue,
+        Some(1) => {}
+        _ => {
+          return Err("callable ownership ABI must return zero or one".into());
+        }
+      }
+    }
     let mut matches = [if script { Val::I32(0) } else { Val::F64(0) }];
     matcher
       .call(&mut scope, &callable, &mut matches)

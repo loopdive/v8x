@@ -9,9 +9,9 @@ pub(super) fn bind(
   realm: Instance,
   module: &Module,
 ) -> Result<(), String> {
-  // This protocol belongs to source-bound Scripts. Preserve existing Module
-  // graph linking until its distinct owner/getter ABI is integrated as well.
-  if module.get_export("localOwns").is_none() {
+  if module.get_export("localOwns").is_none()
+    && module.get_export("__v8x_graph_owns").is_none()
+  {
     return Ok(());
   }
   bind_foreign_ownership(linker, realm, module)?;
@@ -43,7 +43,10 @@ pub(super) fn bind(
         // An inner RootScope would unroot them before the trampoline sees them.
         let mut scope = caller;
         for graph in graphs.iter().rev() {
-          let Some(owns) = graph.get_func(&mut scope, "localOwns") else {
+          let script = graph.get_func(&mut scope, "localOwns");
+          let Some(owns) =
+            script.or_else(|| graph.get_func(&mut scope, "__v8x_graph_owns"))
+          else {
             continue;
           };
           let mut matched = [Val::I32(0)];
@@ -57,15 +60,27 @@ pub(super) fn bind(
               ));
             }
           }
-          if let Some(get) =
-            graph.get_func(&mut scope, "__v8x_script_get_export_receiver")
-          {
+          if let Some(get) = graph.get_func(
+            &mut scope,
+            if script.is_some() {
+              "__v8x_script_get_export_receiver"
+            } else {
+              "__v8x_graph_get_owned_export_receiver"
+            },
+          ) {
             // New packages expose the full Reflect.get ABI. Forward all three
             // references, including a receiver allocated by a different graph.
             return get.call(&mut scope, args, results);
           }
           let get = graph
-            .get_func(&mut scope, "__v8x_script_get_export")
+            .get_func(
+              &mut scope,
+              if script.is_some() {
+                "__v8x_script_get_export"
+              } else {
+                "__v8x_graph_get_owned_export"
+              },
+            )
             .ok_or_else(|| {
               wasmtime::Error::msg("owning Script lacks native getter")
             })?;
@@ -142,8 +157,9 @@ fn bind_foreign_ownership(
             ));
           }
         }
-        let Some(wasmtime::Extern::Func(local)) =
-          caller.get_export("localOwns")
+        let Some(wasmtime::Extern::Func(local)) = caller
+          .get_export("localOwns")
+          .or_else(|| caller.get_export("__v8x_graph_owns"))
         else {
           return Err(wasmtime::Error::msg(
             "linked caller lacks allocation ownership",
@@ -165,7 +181,10 @@ fn bind_foreign_ownership(
         }
         let graphs = caller.data().aot_call_graphs.clone();
         for graph in graphs.iter().rev() {
-          let Some(owns) = graph.get_func(&mut caller, "localOwns") else {
+          let Some(owns) = graph
+            .get_func(&mut caller, "localOwns")
+            .or_else(|| graph.get_func(&mut caller, "__v8x_graph_owns"))
+          else {
             continue;
           };
           owns.call(&mut caller, args, &mut own)?;
@@ -219,7 +238,10 @@ fn bind_foreign_call(
       move |mut caller, args, results| {
         let graphs = caller.data().aot_call_graphs.clone();
         for graph in graphs.iter().rev() {
-          let Some(owns) = graph.get_func(&mut caller, "localOwns") else {
+          let script = graph.get_func(&mut caller, "localOwns");
+          let Some(owns) =
+            script.or_else(|| graph.get_func(&mut caller, "__v8x_graph_owns"))
+          else {
             continue;
           };
           let mut own = [Val::I32(0)];
@@ -233,7 +255,14 @@ fn bind_foreign_call(
             ));
           }
           let call = graph
-            .get_func(&mut caller, "__v8x_script_call_export")
+            .get_func(
+              &mut caller,
+              if script.is_some() {
+                "__v8x_script_call_export"
+              } else {
+                "__v8x_graph_call_owned_export"
+              },
+            )
             .ok_or_else(|| {
               wasmtime::Error::msg("owning Script lacks native call")
             })?;
