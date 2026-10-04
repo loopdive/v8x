@@ -1,5 +1,52 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Shared dependency regression control
+
+The generic two-entry control fails **0 passed /1 failed, 51 filtered /52**.
+The first entry succeeds and bumps the dependency's mutable count to 2.
+Evaluating the second entry then reports executions=2 (expected 1), observed
+count=1 (expected 2), different JavaScript namespace identity and a rejected
+evaluation Promise. Runtime compilation and interpreter counters remain zero.
+This is a semantic defect, not only a namespace publication guard. Do not fix
+it by ignoring the guard or aliasing only native wrappers.
+
+The exact same three fixture sources pass **1/1** under Node's V8 module
+evaluator. That control also bumps the original dependency again and verifies
+both named imports and namespace reads see 3. Those later assertions exist in
+the native regression but are not yet reached because the earlier check fails.
+This Node control is not a full Deno/V8 comparison or performance benchmark.
+
+Fixtures: tests/fixtures/js2wasm-shared-module/*.js. Rust uses include_str!;
+build-shared-module-test-packages.mjs reads the same bytes. Compiler pin
+ba14fcaedb, Binaryen 125 O3, Wasmtime 47.0.3; packages are in
+/private/tmp/deno-shared-module.SpmGZO. First graph binding is
+a43c82a9e3b52c85ddcdbd5f819ca5fd578a0086f11f92256c303661c491df38;
+second is 16d940d5d9aa117ff7e1b46c01a4171db60284d446409e562feb40c2faca7da7.
+Native hashes and original bytes are recorded in package JSON inventories.
+
+```sh
+node --experimental-vm-modules --test tools/js2wasm/test-shared-module-fixtures.mjs
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-shared-module.SpmGZO target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_shared_dependency_keeps_namespace_live_exports_and_single_execution --ignored --nocapture --test-threads=1
+```
+
+Compiler-free test binary built with js2wasm_deno_poc, js2wasm_gc_copying and
+js2wasm_diagnostic_abi, without runtime_compile. Existing positive/throwing AOT
+module controls still pass 2/2, 50 filtered /52. Scoped ordinary controls pass
+34/34 executed, 17 ignored and 1 filtered /52. The filtered original-core
+Script test requires a separate fixtures environment: an unconfigured full
+run reports 34 passed /1 failed /17 ignored, not an all-green suite.
+Existing extractor/graph/Script controls pass 10/10. No runtime fix or new
+Deno pass is credited to this test-only change. Typst remains unavailable.
+
+Next implementation must couple three capabilities: skip already evaluated
+dependency initializers, return their canonical namespace by captured native
+Module identity, and route all named import reads/calls to original live
+bindings. NativeModuleGraph already provides instance-bound Module/Context
+identity for import-meta; extend that pattern rather than URL-global state.
+Changing only namespace materialization leaves named imports on duplicate
+globals. Changing only the initializer adapter leaves uninitialized globals.
+Preserve cycles, early TDZ, same-URL distinct Modules and failed evaluations.
+
 ## Broader unchanged module population
 
 Selected run: **4 passed /1 failed out of 5**, not full Deno integration.

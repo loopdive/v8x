@@ -210,5 +210,9 @@ initialization callbacks; defining properties on compiled and native exotic
 objects is still explicitly refused. Full module conformance is not established.
 Unchanged metadata resolution, filename/dirname and repeated evaluation controls
 pass with exact AOT packages. Importing the built-in core from another graph
-still fails a namespace identity conflict. Canonical shared-module linking is
-not yet supported; the existing binding is never silently replaced.
+still fails a namespace identity conflict. A two-entry control also fails:
+the shared dependency executes twice,
+its mutable export resets, and the entries observe different namespace objects.
+The same fixture preserves these semantics under Node's V8 module evaluator.
+Canonical shared-module linking is not yet supported; the existing binding is
+never silently replaced.

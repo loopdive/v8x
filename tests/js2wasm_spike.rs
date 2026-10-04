@@ -14,6 +14,9 @@ use std::rc::Rc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "js2wasm_shared_modules.rs"]
+mod shared_modules;
+
 const MAIN: &str = "file:///tmp/v8x-js2wasm-main.ts";
 const RUNTIME_EVAL_MAIN: &str = "file:///tmp/v8x-js2wasm-runtime-eval-main.ts";
 const DEPENDENCY: &str = "file:///tmp/v8x-js2wasm-math.ts";
