@@ -158,7 +158,7 @@ Native arrays acquire that realm's intrinsic iterator on demand. The unchanged
 Deno WebIDL integer and basic sequence conversions pass. A clean core build
 also passes the retained live-mutation iterator control after the compiler's
 first-class values factory was changed to read the original receiver live.
-The ordinary compiler-free adapter run passes 34 tests with 13 ignored; additional
+The ordinary compiler-free adapter run passes 34 tests with 14 ignored; additional
 artifact-backed controls cover function, foreign-value and module execution paths.
 This does not establish full WebIDL or Deno compatibility.
 
@@ -188,10 +188,14 @@ exception value. A Promise reaction uses its own exception scope, so a surroundi
 TryCatch cannot turn a thrown callback into a fulfilled derived Promise. Native
 controls cover missing graph artifacts and synthetic thrown-value identity; a
 precompiled source graph also verifies observable global writes and namespace
-publication. Deno main-versus-side import metadata and native Promise transfer
-into the compiled realm remain incomplete.
+publication. Native Promise transfer into the compiled realm remains incomplete.
 
 The native import-meta callback registration and lazy object cache now retain
 Module identity across repeated and reentrant initialization. Modules with the
-same URL do not share metadata. Compiled module access is not yet connected to
-this cache, so this does not establish Deno main-versus-side behavior.
+same URL do not share metadata. Compiled module access now uses instance-bound
+host capabilities, including loader-provided properties and resolve callbacks.
+The unchanged Deno main-versus-side module control passes. A native AOT control
+verifies null-prototype identity and an older graph's metadata after another
+same-URL Module executes. Native plain-object CreateDataProperty supports these
+initialization callbacks; defining properties on compiled and native exotic
+objects is still explicitly refused. Full module conformance is not established.

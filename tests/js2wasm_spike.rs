@@ -1182,6 +1182,126 @@ fn aot_module_evaluation_executes_body_and_publishes_namespace() {
   assert_eq!(stats.runtime_eval_instantiations, 0);
 }
 
+thread_local! {
+  static IMPORT_META_INITIALIZATIONS: Cell<u32> = const { Cell::new(0) };
+}
+
+unsafe extern "C" fn initialize_import_meta_probe(
+  context: v8::Local<v8::Context>,
+  _module: v8::Local<v8::Module>,
+  meta: v8::Local<v8::Object>,
+) {
+  v8::callback_scope!(unsafe scope, context);
+  let count = IMPORT_META_INITIALIZATIONS.with(|count| {
+    count.set(count.get() + 1);
+    count.get()
+  });
+  let key = v8::String::new(scope, "custom").unwrap();
+  let value = v8::Number::new(scope, count as f64);
+  assert_eq!(
+    meta.create_data_property(scope, key.into(), value.into()),
+    Some(true)
+  );
+  fn resolve(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+  ) {
+    let request = args.get(0).to_rust_string_lossy(scope);
+    let value = v8::String::new(scope, &format!("loader:{request}")).unwrap();
+    rv.set(value.into());
+  }
+  let key = v8::String::new(scope, "resolve").unwrap();
+  let value = v8::Function::new(scope, resolve).unwrap();
+  assert_eq!(
+    meta.create_data_property(scope, key.into(), value.into()),
+    Some(true)
+  );
+}
+
+#[test]
+#[ignore = "requires trusted Context and source-bound import-meta graph"]
+fn aot_import_meta_uses_loader_properties_and_retains_same_url_module_identity()
+{
+  initialize();
+  IMPORT_META_INITIALIZATIONS.with(|count| count.set(0));
+  let path = std::env::var_os("V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR").unwrap();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_host_initialize_import_meta_object_callback(
+    initialize_import_meta_probe,
+  );
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  v8::js2wasm_attach_precompiled_realm_for_test(
+    &context,
+    &Path::new(&path).join("context.cwasm"),
+  )
+  .unwrap();
+  let mut metadata = Vec::new();
+  let mut namespaces = Vec::new();
+  for expected in 1..=2 {
+    let text = v8::String::new(scope, "export const meta=import.meta; export const custom=import.meta.custom; export const resolved=import.meta.resolve(\"./child.js\"); export function read(){return import.meta;}").unwrap();
+    let resource =
+      v8::String::new(scope, "file:///import-meta-identity.js").unwrap();
+    let origin = origin(scope, resource.into());
+    let mut source = v8::script_compiler::Source::new(text, Some(&origin));
+    let module =
+      v8::script_compiler::compile_module(scope, &mut source).unwrap();
+    assert_eq!(
+      module.instantiate_module(scope, resolve_dependency),
+      Some(true)
+    );
+    let result = module.evaluate(scope).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+    assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+    let namespace =
+      v8::Local::<v8::Object>::try_from(module.get_module_namespace()).unwrap();
+    let key = v8::String::new(scope, "custom").unwrap();
+    assert_eq!(
+      namespace
+        .get(scope, key.into())
+        .unwrap()
+        .number_value(scope),
+      Some(expected as f64)
+    );
+    let key = v8::String::new(scope, "resolved").unwrap();
+    assert_eq!(
+      namespace
+        .get(scope, key.into())
+        .unwrap()
+        .to_rust_string_lossy(scope),
+      "loader:./child.js"
+    );
+    let key = v8::String::new(scope, "meta").unwrap();
+    let meta = namespace.get(scope, key.into()).unwrap();
+    let object = v8::Local::<v8::Object>::try_from(meta).unwrap();
+    assert!(object.get_prototype(scope).unwrap().is_null());
+    metadata.push(meta);
+    namespaces.push(namespace);
+    assert!(result.strict_equals(module.evaluate(scope).unwrap()));
+  }
+  assert!(!metadata[0].strict_equals(metadata[1]));
+  // An older graph's capability must not start resolving to the newer Module.
+  for (namespace, meta) in namespaces.into_iter().zip(metadata) {
+    let key = v8::String::new(scope, "read").unwrap();
+    let read = v8::Local::<v8::Function>::try_from(
+      namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+      read
+        .call(scope, namespace.into(), &[])
+        .unwrap()
+        .strict_equals(meta)
+    );
+  }
+  IMPORT_META_INITIALIZATIONS.with(|count| assert_eq!(count.get(), 2));
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
+}
+
 #[test]
 fn promise_reaction_throw_rejects_under_an_outer_try_catch() {
   initialize();

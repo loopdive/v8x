@@ -3695,6 +3695,55 @@ pub extern "C" fn v8__Object__GetIndex(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__CreateDataProperty(
+  object: *const Object,
+  _context: *const Context,
+  key: *const crate::Name,
+  value: *const Value,
+) -> MaybeBool {
+  if key.is_null() || value.is_null() {
+    return MaybeBool::Nothing;
+  }
+  if !matches!(unsafe { heap_value(object) }, Some(HeapValue::Object(_))) {
+    realm_objects::report(
+      "CreateDataProperty on native exotic objects is not implemented"
+        .to_string(),
+    );
+    return MaybeBool::Nothing;
+  }
+  if v8__Value__IsModuleNamespaceObject(object.cast()) {
+    return MaybeBool::JustFalse;
+  }
+  if realm_objects::is_bound(object) {
+    realm_objects::report("CreateDataProperty on compiled objects requires a result-aware define-property bridge".to_string());
+    return MaybeBool::Nothing;
+  }
+  let Some(properties) = properties_mut(object) else {
+    return MaybeBool::Nothing;
+  };
+  if let Some(property) = properties
+    .iter_mut()
+    .rev()
+    .find(|property| same_property_key(property.key.cast(), key.cast()))
+  {
+    // CreateDataProperty requests configurable/enumerable/writable, so even
+    // assigning the same value cannot redefine a non-configurable property.
+    if property.attributes & 4 != 0 {
+      return MaybeBool::JustFalse;
+    }
+    property.value = value.cast();
+    property.attributes = 0;
+  } else {
+    properties.push(TemplateProperty {
+      key: key.cast(),
+      value: value.cast(),
+      attributes: 0,
+    });
+  }
+  MaybeBool::JustTrue
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__Set(
   object: *const Object,
   _context: *const Context,
@@ -7944,6 +7993,7 @@ fn collect_graph(
   module: *const Module,
   seen: &mut HashSet<usize>,
   sources: &mut Vec<crate::js2wasm_spike::SourceModule>,
+  bindings: &mut Vec<(String, usize)>,
 ) -> Result<(), String> {
   if !seen.insert(module as usize) {
     return Ok(());
@@ -7963,9 +8013,10 @@ fn collect_graph(
     .ok_or_else(|| {
       "v8x/js2wasm: source graph contains a synthetic module".to_string()
     })?;
+  bindings.push((specifier.clone(), module as usize));
   sources.push(crate::js2wasm_spike::SourceModule { specifier, source });
   for dependency in dependencies {
-    collect_graph(dependency, seen, sources)?;
+    collect_graph(dependency, seen, sources, bindings)?;
   }
   Ok(())
 }
@@ -8248,6 +8299,7 @@ pub extern "C" fn v8__Module__Evaluate(
 
   let mut seen = HashSet::new();
   let mut sources = Vec::new();
+  let mut bindings = Vec::new();
   let existing = match unsafe { heap_value(context) } {
     Some(HeapValue::Context(state)) => state
       .deno_core_bootstrap
@@ -8259,28 +8311,33 @@ pub extern "C" fn v8__Module__Evaluate(
     }
   };
   let runtime =
-    match collect_graph(module, &mut seen, &mut sources).and_then(|()| {
-      crate::js2wasm_spike::compile_and_instantiate(
-        &entry,
-        &sources,
-        current_isolate() as usize,
-        existing,
-        |runtime| {
-          let Some(HeapValue::Context(state)) =
-            (unsafe { heap_value_mut(context) })
-          else {
-            return Err(
-              "module context disappeared before initialization".to_string(),
-            );
-          };
-          state.module_runtime = Some(runtime.clone());
-          if let Some(state) = unsafe { module_state(module) } {
-            state.runtime = Some(runtime);
-          }
-          Ok(())
-        },
-      )
-    }) {
+    match collect_graph(module, &mut seen, &mut sources, &mut bindings)
+      .and_then(|()| {
+        crate::js2wasm_spike::compile_and_instantiate(
+          &entry,
+          &sources,
+          current_isolate() as usize,
+          crate::js2wasm_spike::NativeModuleGraph {
+            context: context as usize,
+            modules: bindings,
+          },
+          existing,
+          |runtime| {
+            let Some(HeapValue::Context(state)) =
+              (unsafe { heap_value_mut(context) })
+            else {
+              return Err(
+                "module context disappeared before initialization".to_string(),
+              );
+            };
+            state.module_runtime = Some(runtime.clone());
+            if let Some(state) = unsafe { module_state(module) } {
+              state.runtime = Some(runtime);
+            }
+            Ok(())
+          },
+        )
+      }) {
       Ok(runtime) => runtime,
       Err(error) => {
         eprintln!("{error}");
@@ -8437,6 +8494,37 @@ mod tests {
   }
 
   #[test]
+  fn create_data_property_redefines_configurable_but_not_fixed_native_properties()
+   {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    let object = new_object(isolate);
+    let key = new_string(isolate, "key".to_string());
+    let first = allocate::<Value>(isolate, HeapValue::Number(1.0));
+    let second = allocate::<Value>(isolate, HeapValue::Number(2.0));
+    assert_eq!(
+      v8__Object__CreateDataProperty(object, ptr::null(), key.cast(), first),
+      MaybeBool::JustTrue
+    );
+    properties_mut(object).unwrap()[0].attributes = 3;
+    assert_eq!(
+      v8__Object__CreateDataProperty(object, ptr::null(), key.cast(), second),
+      MaybeBool::JustTrue
+    );
+    assert_eq!(properties(object).unwrap()[0].attributes, 0);
+    properties_mut(object).unwrap()[0].attributes = 4;
+    assert_eq!(
+      v8__Object__CreateDataProperty(object, ptr::null(), key.cast(), first),
+      MaybeBool::JustFalse
+    );
+    assert_eq!(properties(object).unwrap()[0].value, second.cast());
+    assert_eq!(properties(object).unwrap()[0].attributes, 4);
+    assert_eq!(properties(object).unwrap().len(), 1);
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
+  }
+
+  #[test]
   fn import_meta_without_callback_is_empty_and_rejects_foreign_handles() {
     let isolate = v8__Isolate__New(ptr::null());
     v8__Isolate__Enter(isolate);
@@ -8447,6 +8535,7 @@ mod tests {
     let module = test_source_module(isolate, "entry", Vec::new());
     let meta = import_meta::get(module, context).unwrap();
     assert!(properties(meta).unwrap().is_empty());
+    assert!(v8__Value__IsNull(v8__Object__GetPrototype(meta)));
     assert!(import_meta::get(module, other_context).is_err());
     assert!(import_meta::get(meta.cast(), context).is_err());
     assert!(import_meta::get(module, ptr::null()).is_err());

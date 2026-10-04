@@ -34,6 +34,12 @@ pub(super) fn get(
     };
   }
   let meta = new_object(isolate);
+  // import.meta is a null-prototype object. Preserve that explicit edge when
+  // the native object is adopted into the compiled realm.
+  let null = v8__Null(isolate).cast();
+  if let Some(HeapValue::Object(state)) = unsafe { heap_value_mut(meta) } {
+    state.prototype = Some(null);
+  }
   // Publish before calling the embedder. A reentrant access must see the same
   // object, and no mutable Module/Isolate borrow may span the callback.
   unsafe { module_state(module) }.unwrap().import_meta = Some((context, meta));

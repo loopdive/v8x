@@ -14,6 +14,59 @@ mod stack_trace;
 mod symbols;
 pub(super) use host_callbacks::HostCallbackBinding;
 pub(crate) use host_callbacks::invoke_host;
+
+pub(crate) fn import_meta_handle(
+  access: &mut dyn RealmAccess,
+  owner: &Rc<RefCell<DenoRuntime>>,
+  module: *const Module,
+  context: *const Context,
+) -> Result<f64, String> {
+  callback_access::with_active(owner, access, || {
+    let isolate = current_isolate();
+    let mut caught = [0usize; 6];
+    v8__TryCatch__CONSTRUCT(caught.as_mut_ptr(), isolate);
+    let result = super::import_meta::get(module, context);
+    let exception = v8__TryCatch__Exception(caught.as_ptr());
+    v8__TryCatch__Reset(caught.as_mut_ptr());
+    v8__TryCatch__DESTRUCT(caught.as_mut_ptr());
+    let meta = result?;
+    let thrown = !exception.is_null();
+    let value = if thrown { exception } else { meta.cast() };
+    callback_access::with_owner(owner, |access| {
+      let value = into_realm(access, owner, value)?;
+      let handle = access.realm_check(value)?;
+      Ok(if thrown { -handle - 1.0 } else { handle })
+    })
+  })
+}
+
+pub(crate) fn import_meta_owner(
+  context: *const Context,
+  identity: usize,
+) -> Result<Rc<RefCell<DenoRuntime>>, String> {
+  let isolate = current_isolate();
+  if isolate.is_null()
+    || identity == 0
+    || !unsafe { isolate_state(isolate) }
+      .owned_contexts
+      .contains(&context)
+  {
+    return Err("import-meta capability has no owned Context".to_string());
+  }
+  let Some(HeapValue::Context(state)) = (unsafe { heap_value(context) }) else {
+    return Err("import-meta Context disappeared".to_string());
+  };
+  state
+    .deno_core_bootstrap
+    .iter()
+    .chain(state.module_runtime.iter())
+    .find(|owner| Rc::as_ptr(owner) as usize == identity)
+    .cloned()
+    .ok_or_else(|| {
+      "import-meta capability requires its published Context runtime"
+        .to_string()
+    })
+}
 pub(super) use property_names::own_property_names;
 
 #[derive(Clone)]

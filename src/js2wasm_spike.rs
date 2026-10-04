@@ -35,6 +35,9 @@ mod foreign_get;
 mod graph_calls;
 #[path = "js2wasm_graph_packages.rs"]
 mod graph_packages;
+#[path = "js2wasm_import_meta.rs"]
+mod import_meta;
+pub(crate) use import_meta::NativeModuleGraph;
 #[path = "js2wasm_realm_values.rs"]
 mod realm_values;
 #[path = "js2wasm_rejection_events.rs"]
@@ -1984,6 +1987,8 @@ impl SharedDenoRuntime {
     for import in module.imports() {
       let known_deno_import = import.module() == DENO_IMPORT_MODULE
         && DENO_HOST_IMPORTS.contains(&import.name());
+      let import_meta_import = import.module() == DENO_IMPORT_MODULE
+        && import.name().starts_with("__v8x_import_meta_");
       let runtime_eval_import = (import.module() == RUNTIME_EVAL_IMPORT_MODULE
         && match import.ty() {
           wasmtime::ExternType::Func(_) => {
@@ -2007,13 +2012,15 @@ impl SharedDenoRuntime {
           }
           _ => false,
         };
-      needs_runtime_eval |= runtime_eval_import || context_import;
+      needs_runtime_eval |=
+        runtime_eval_import || context_import || import_meta_import;
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
         .any(|candidate| *candidate == (import.module(), import.name()));
       if !known_deno_import
         && !runtime_eval_import
         && !context_import
+        && !import_meta_import
         && !deferred_bootstrap_import
       {
         return Err(format!(
@@ -2533,7 +2540,7 @@ impl DenoRuntime {
     heap_isolate: usize,
   ) -> Result<Self, String> {
     let mut runtime =
-      Self::instantiate_deferred(shared, prepared, cwd, heap_isolate)?;
+      Self::instantiate_deferred(shared, prepared, cwd, heap_isolate, None)?;
     runtime.initialize_primary()?;
     Ok(runtime)
   }
@@ -2545,11 +2552,30 @@ impl DenoRuntime {
     heap_isolate: usize,
     publish: impl FnOnce(Rc<RefCell<Self>>) -> Result<(), String>,
   ) -> Result<Rc<RefCell<Self>>, String> {
+    Self::instantiate_published_bound(
+      shared,
+      prepared,
+      cwd,
+      heap_isolate,
+      None,
+      publish,
+    )
+  }
+
+  fn instantiate_published_bound(
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    cwd: PathBuf,
+    heap_isolate: usize,
+    graph_bindings: Option<&NativeModuleGraph>,
+    publish: impl FnOnce(Rc<RefCell<Self>>) -> Result<(), String>,
+  ) -> Result<Rc<RefCell<Self>>, String> {
     let runtime = Rc::new(RefCell::new(Self::instantiate_deferred(
       shared,
       prepared,
       cwd,
       heap_isolate,
+      graph_bindings,
     )?));
     // Publish before user top-level code can install values and then throw.
     // No heap/context borrow is held across execution of that code.
@@ -2565,6 +2591,7 @@ impl DenoRuntime {
     prepared: &PreparedModule,
     cwd: PathBuf,
     heap_isolate: usize,
+    graph_bindings: Option<&NativeModuleGraph>,
   ) -> Result<Self, String> {
     let _phase = DenoPhaseTimer::new("store-and-instances");
     let realm_id = NEXT_REALM_ID
@@ -2602,12 +2629,13 @@ impl DenoRuntime {
     store.limiter(|state| &mut state.limiter);
     store.call_hook(shared_buffers::synchronize);
     let mut runtime_eval_provider = None;
-    let instance = Self::instantiate_in_store(
+    let instance = Self::instantiate_in_store_bound(
       shared,
       prepared,
       &mut store,
       &mut runtime_eval_provider,
       None,
+      graph_bindings,
     )?;
     shared.instantiations.fetch_add(1, Ordering::Relaxed);
     store.data_mut().realm_instance = Some(instance);
@@ -2648,6 +2676,24 @@ impl DenoRuntime {
     store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
     existing_provider: &mut Option<Instance>,
     context_instance: Option<Instance>,
+  ) -> Result<Instance, String> {
+    Self::instantiate_in_store_bound(
+      shared,
+      prepared,
+      store,
+      existing_provider,
+      context_instance,
+      None,
+    )
+  }
+
+  fn instantiate_in_store_bound(
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
+    existing_provider: &mut Option<Instance>,
+    context_instance: Option<Instance>,
+    graph_bindings: Option<&NativeModuleGraph>,
   ) -> Result<Instance, String> {
     let result = match prepared {
       PreparedModule::Prelinked(instance_pre) => {
@@ -2728,6 +2774,7 @@ impl DenoRuntime {
             format!("bind js2wasm context provider exports: {error:#}")
           })?;
         foreign_get::bind(&mut linker, realm, module)?;
+        import_meta::bind(&mut linker, realm, module, graph_bindings)?;
         linker
           .define_unknown_imports_as_traps(module)
           .map_err(|error| {
@@ -2748,7 +2795,17 @@ impl DenoRuntime {
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
   ) -> Result<(), String> {
-    let instance = self.retain_graph_instance(shared, prepared)?;
+    self.instantiate_graph_bound(shared, prepared, None)
+  }
+
+  fn instantiate_graph_bound(
+    &mut self,
+    shared: &SharedDenoRuntime,
+    prepared: &PreparedModule,
+    graph_bindings: Option<&NativeModuleGraph>,
+  ) -> Result<(), String> {
+    let instance =
+      self.retain_graph_instance(shared, prepared, graph_bindings)?;
     let primary = std::mem::replace(&mut self.instance, instance);
     let result = (|| {
       self.run_deferred_module_init()?;
@@ -2763,13 +2820,15 @@ impl DenoRuntime {
     &mut self,
     shared: &SharedDenoRuntime,
     prepared: &PreparedModule,
+    graph_bindings: Option<&NativeModuleGraph>,
   ) -> Result<Instance, String> {
-    let instance = Self::instantiate_in_store(
+    let instance = Self::instantiate_in_store_bound(
       shared,
       prepared,
       &mut self.store,
       &mut self._runtime_eval_provider,
       Some(self.realm_instance),
+      graph_bindings,
     )?;
     // Keep the graph alive even if initialization throws after publishing
     // values. Restore the primary instance used by the Deno core bridge.
@@ -3475,6 +3534,7 @@ pub(crate) fn compile_and_instantiate(
   entry: &str,
   modules: &[SourceModule],
   heap_isolate: usize,
+  graph_bindings: NativeModuleGraph,
   existing: Option<Rc<RefCell<DenoRuntime>>>,
   publish: impl FnOnce(Rc<RefCell<DenoRuntime>>) -> Result<(), String>,
 ) -> Result<Rc<RefCell<DenoRuntime>>, String> {
@@ -3508,16 +3568,23 @@ pub(crate) fn compile_and_instantiate(
       let mut owner = runtime
         .try_borrow_mut()
         .map_err(|_| "js2wasm context is already executing".to_string())?;
+      owner.store.data_mut().realm_owner_identity =
+        Rc::as_ptr(&runtime) as usize;
       owner.configure_heap_limit(heap_isolate as *mut crate::RealIsolate);
-      owner.instantiate_graph(shared, &prepared)?;
+      owner.instantiate_graph_bound(
+        shared,
+        &prepared,
+        Some(&graph_bindings),
+      )?;
     }
     Ok(runtime)
   } else {
-    DenoRuntime::instantiate_published(
+    DenoRuntime::instantiate_published_bound(
       shared,
       &prepared,
       cwd,
       heap_isolate,
+      Some(&graph_bindings),
       publish,
     )
   }
