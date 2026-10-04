@@ -8,6 +8,7 @@
 
 mod boolean;
 mod compiled_function;
+mod import_meta;
 mod private;
 mod promise_reject;
 mod retained_buffer;
@@ -82,6 +83,7 @@ struct ModuleState {
   module_requests: *const FixedArray,
   namespace: *const Object,
   prelinked_deno_module: bool,
+  import_meta: Option<(*const Context, *const Object)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,6 +375,8 @@ struct IsolateState {
   microtasks: VecDeque<Microtask>,
   running_microtasks: bool,
   promise_reject_callback: Option<crate::isolate::PromiseRejectCallback>,
+  import_meta_callback:
+    Option<crate::isolate::HostInitializeImportMetaObjectCallback>,
   compiled_rejections:
     VecDeque<crate::js2wasm_spike::rejection_events::PendingPromiseRejection>,
   flushing_rejections: bool,
@@ -1886,6 +1890,7 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     microtasks: VecDeque::new(),
     running_microtasks: false,
     promise_reject_callback: None,
+    import_meta_callback: None,
     compiled_rejections: VecDeque::new(),
     flushing_rejections: false,
     continuation_data: ptr::null(),
@@ -2352,9 +2357,12 @@ pub extern "C" fn v8__Isolate__SetPrepareStackTraceCallback(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__SetHostInitializeImportMetaObjectCallback(
-  _isolate: *mut RealIsolate,
-  _callback: crate::isolate::HostInitializeImportMetaObjectCallback,
+  isolate: *mut RealIsolate,
+  callback: crate::isolate::HostInitializeImportMetaObjectCallback,
 ) {
+  if !isolate.is_null() {
+    unsafe { isolate_state(isolate) }.import_meta_callback = Some(callback);
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -7370,6 +7378,7 @@ pub extern "C" fn v8__ScriptCompiler__CompileModule(
       module_requests,
       namespace,
       prelinked_deno_module,
+      import_meta: None,
     }),
   )
 }
@@ -7439,6 +7448,7 @@ pub extern "C" fn v8__Module__CreateSyntheticModule(
       module_requests: ptr::null(),
       namespace,
       prelinked_deno_module: false,
+      import_meta: None,
     }),
   )
 }
@@ -8344,6 +8354,7 @@ mod tests {
         module_requests: ptr::null(),
         namespace: new_object(isolate),
         prelinked_deno_module: false,
+        import_meta: None,
       }),
     )
   }
@@ -8355,6 +8366,98 @@ mod tests {
       attributes: Vec::new(),
       phase: StaticImportPhase::Evaluation,
     }
+  }
+
+  thread_local! {
+    static IMPORT_META_CALLS: RefCell<Vec<(usize, usize, usize)>> =
+      const { RefCell::new(Vec::new()) };
+  }
+
+  unsafe extern "C" fn initialize_test_import_meta(
+    context: crate::Local<'_, Context>,
+    module: crate::Local<'_, Module>,
+    meta: crate::Local<'_, Object>,
+  ) {
+    let context = &*context as *const Context;
+    let module = &*module as *const Module;
+    let meta = &*meta as *const Object;
+    IMPORT_META_CALLS.with(|calls| {
+      calls.borrow_mut().push((
+        context as usize,
+        module as usize,
+        meta as usize,
+      ));
+    });
+    assert_eq!(import_meta::get(module, context).unwrap(), meta);
+    let isolate = current_isolate();
+    let key = new_string(isolate, "loaderMarker".to_string());
+    let value = allocate::<Value>(isolate, HeapValue::Number(91.0));
+    properties_mut(meta).unwrap().push(TemplateProperty {
+      key: key.cast(),
+      value: value.cast(),
+      attributes: 0,
+    });
+  }
+
+  #[test]
+  fn import_meta_callback_is_lazy_cached_and_reentrant_by_module_identity() {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    IMPORT_META_CALLS.with(|calls| calls.borrow_mut().clear());
+    let context =
+      v8__Context__New(isolate, ptr::null(), ptr::null(), ptr::null_mut());
+    let first = test_source_module(isolate, "same-url", Vec::new());
+    let second = test_source_module(isolate, "same-url", Vec::new());
+    v8__Isolate__SetHostInitializeImportMetaObjectCallback(
+      isolate,
+      initialize_test_import_meta,
+    );
+    IMPORT_META_CALLS.with(|calls| assert!(calls.borrow().is_empty()));
+    let meta = import_meta::get(first, context).unwrap();
+    assert_eq!(import_meta::get(first, context).unwrap(), meta);
+    assert_ne!(import_meta::get(second, context).unwrap(), meta);
+    IMPORT_META_CALLS.with(|calls| {
+      let calls = calls.borrow();
+      assert_eq!(calls.len(), 2);
+      assert_eq!(calls[0], (context as usize, first as usize, meta as usize));
+      assert_eq!(calls[1].1, second as usize);
+    });
+    let properties = properties(meta).unwrap();
+    assert_eq!(properties.len(), 1);
+    assert_eq!(
+      unsafe { string_value(properties[0].key) },
+      Some("loaderMarker")
+    );
+    assert!(matches!(
+      unsafe { heap_value(properties[0].value) },
+      Some(HeapValue::Number(91.0))
+    ));
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
+  }
+
+  #[test]
+  fn import_meta_without_callback_is_empty_and_rejects_foreign_handles() {
+    let isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(isolate);
+    let context =
+      v8__Context__New(isolate, ptr::null(), ptr::null(), ptr::null_mut());
+    let other_context =
+      v8__Context__New(isolate, ptr::null(), ptr::null(), ptr::null_mut());
+    let module = test_source_module(isolate, "entry", Vec::new());
+    let meta = import_meta::get(module, context).unwrap();
+    assert!(properties(meta).unwrap().is_empty());
+    assert!(import_meta::get(module, other_context).is_err());
+    assert!(import_meta::get(meta.cast(), context).is_err());
+    assert!(import_meta::get(module, ptr::null()).is_err());
+    let other_isolate = v8__Isolate__New(ptr::null());
+    v8__Isolate__Enter(other_isolate);
+    assert!(import_meta::get(module, context).is_err());
+    v8__Isolate__Exit(other_isolate);
+    v8__Isolate__Dispose(other_isolate);
+    assert_eq!(import_meta::get(module, context).unwrap(), meta);
+    v8__Isolate__Exit(isolate);
+    v8__Isolate__Dispose(isolate);
   }
 
   #[test]

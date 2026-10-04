@@ -1,5 +1,31 @@
 # Native Script environment checkpoint, 2026-10-04
 
+## Host import-meta lifecycle foundation, 2026-10-04
+
+`SetHostInitializeImportMetaObjectCallback` now records the isolate-local
+callback. The new `src/js2wasm/import_meta.rs` helper lazily creates and caches
+an object by native Module identity, remembers its Context, and publishes it
+before calling the embedder. No mutable Module/Isolate borrow spans the callback.
+Two focused controls pass 2/2: callback mutation, exact module/context handles,
+reentrant identity, distinct modules with identical URLs, no-callback emptiness,
+and foreign-isolate/wrong-context rejection. Scoped native js2wasm unit controls
+pass 14/14 (16 filtered /30); ordinary compiler-free integration controls remain
+34 passed /0 failed /13 ignored out of 47.
+
+This helper is not yet called by compiled module access. The compiler still
+folds import.meta.main using entry identity, so unchanged Deno main/side support
+is not fixed or claimed. Next, bind an internal host capability to each exact
+native graph instance and Context, lower the full import.meta object to that
+capability, and transfer the cached native object through the active CallerRealm.
+Do not use a global URL lookup: two native Modules can share the same URL and
+have different loader roles. Keep callbacks reentrant and retain capability
+bindings for exported functions called after another graph is evaluated.
+
+The broad unfiltered library run aborted at the fail-loud unsupported
+`v8__V8__IsSandboxEnabled` diagnostic symbol before these controls. It is not a
+full-library pass. Deno replay and artifact rebuilding were not repeated for
+this foundation. No Deno/vendor sources changed; no interpreter was introduced.
+
 ## Module evaluation and rejection checkpoint, 2026-10-04
 
 Adapter source 9a4e13a1cdfcd0b22f52caa24a2ba421b50970e1 now returns a cached

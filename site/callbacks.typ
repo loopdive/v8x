@@ -190,3 +190,8 @@ controls cover missing graph artifacts and synthetic thrown-value identity; a
 precompiled source graph also verifies observable global writes and namespace
 publication. Deno main-versus-side import metadata and native Promise transfer
 into the compiled realm remain incomplete.
+
+The native import-meta callback registration and lazy object cache now retain
+Module identity across repeated and reentrant initialization. Modules with the
+same URL do not share metadata. Compiled module access is not yet connected to
+this cache, so this does not establish Deno main-versus-side behavior.
