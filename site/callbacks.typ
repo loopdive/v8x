@@ -210,12 +210,14 @@ initialization callbacks; defining properties on compiled and native exotic
 objects is still explicitly refused. Full module conformance is not established.
 Unchanged metadata resolution, filename/dirname and repeated evaluation controls
 pass with exact AOT packages. Importing the built-in core from another graph
-still fails a namespace identity conflict. A two-entry control also fails:
-the shared dependency executes twice,
-its mutable export resets, and the entries observe different namespace objects.
-The same fixture preserves these semantics under Node's V8 module evaluator.
-Canonical shared-module linking is not yet supported; the existing binding is
-never silently replaced.
+has not been replayed with the new namespace capabilities. A two-entry control
+now retains the native dependency namespace, executes the dependency once and
+observes live named and namespace imports. The expanded control still fails
+when calling a dependency function from the later graph: it returns 1 instead
+of 4. Later receiver and distinct same-URL Module checks are not reached.
+The same JavaScript fixture passes under Node's V8 module evaluator.
+Canonical shared-module linking remains incomplete; the existing binding is
+never silently replaced. Prepared IR initialization still needs guarding.
 Within one graph, repeated namespace imports, namespace re-exports and native
 publication share one object. Compiler controls and the first entry of the
 native shared-dependency control verify this identity.

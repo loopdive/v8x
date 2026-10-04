@@ -37,6 +37,8 @@ mod graph_calls;
 mod graph_packages;
 #[path = "js2wasm_import_meta.rs"]
 mod import_meta;
+#[path = "js2wasm_module_namespaces.rs"]
+mod module_namespaces;
 pub(crate) use import_meta::NativeModuleGraph;
 #[path = "js2wasm_realm_values.rs"]
 mod realm_values;
@@ -1996,6 +1998,8 @@ impl SharedDenoRuntime {
         && DENO_HOST_IMPORTS.contains(&import.name());
       let import_meta_import = import.module() == DENO_IMPORT_MODULE
         && import.name().starts_with("__v8x_import_meta_");
+      let module_namespace_import = import.module() == DENO_IMPORT_MODULE
+        && import.name().starts_with("__v8x_module_namespace_");
       let runtime_eval_import = (import.module() == RUNTIME_EVAL_IMPORT_MODULE
         && match import.ty() {
           wasmtime::ExternType::Func(_) => {
@@ -2019,8 +2023,10 @@ impl SharedDenoRuntime {
           }
           _ => false,
         };
-      needs_runtime_eval |=
-        runtime_eval_import || context_import || import_meta_import;
+      needs_runtime_eval |= runtime_eval_import
+        || context_import
+        || import_meta_import
+        || module_namespace_import;
       let deferred_bootstrap_import = DEFERRED_BOOTSTRAP_IMPORTS
         .iter()
         .any(|candidate| *candidate == (import.module(), import.name()));
@@ -2028,6 +2034,7 @@ impl SharedDenoRuntime {
         && !runtime_eval_import
         && !context_import
         && !import_meta_import
+        && !module_namespace_import
         && !deferred_bootstrap_import
       {
         return Err(format!(
@@ -2788,6 +2795,7 @@ impl DenoRuntime {
           })?;
         foreign_get::bind(&mut linker, realm, module)?;
         import_meta::bind(&mut linker, realm, module, graph_bindings)?;
+        module_namespaces::bind(&mut linker, realm, module, graph_bindings)?;
         linker
           .define_unknown_imports_as_traps(module)
           .map_err(|error| {

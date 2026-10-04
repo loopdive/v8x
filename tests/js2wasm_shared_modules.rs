@@ -157,7 +157,82 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
         .call(scope, second_namespace.into(), &[])
         .unwrap()
         .number_value(scope),
-      Some(3.0)
+      Some(3.0),
+      "live reader {name} must use the original dependency binding"
     );
   }
+  for (name, expected) in [("mutateNamespace", 4.0), ("mutateNamed", 5.0)] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected),
+      "{name}"
+    );
+  }
+  for name in ["receiverNamespace", "receiverNamed"] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let result = function.call(scope, second_namespace.into(), &[]).unwrap();
+    if name == "receiverNamespace" {
+      assert!(result.strict_equals(namespace.into()));
+    } else {
+      assert!(result.is_undefined());
+    }
+  }
+
+  // A different Module with the same URL must not reuse the previous binding.
+  let replacement = compile(
+    scope,
+    "file:///shared-module/shared.js",
+    include_str!("fixtures/js2wasm-shared-module/shared.js"),
+  );
+  context.set_slot(Rc::new(SharedModule(v8::Global::new(scope, replacement))));
+  let another = compile(
+    scope,
+    "file:///shared-module/first.js",
+    include_str!("fixtures/js2wasm-shared-module/first.js"),
+  );
+  assert_eq!(
+    another.instantiate_module(scope, resolve_shared),
+    Some(true)
+  );
+  let result =
+    v8::Local::<v8::Promise>::try_from(another.evaluate(scope).unwrap())
+      .unwrap();
+  assert_eq!(result.state(), v8::PromiseState::Fulfilled);
+  let replacement_namespace =
+    v8::Local::<v8::Object>::try_from(replacement.get_module_namespace())
+      .unwrap();
+  assert!(!replacement_namespace.strict_equals(namespace.into()));
+  assert_eq!(
+    replacement_namespace
+      .get(scope, count.into())
+      .unwrap()
+      .number_value(scope),
+    Some(2.0)
+  );
+  assert_eq!(
+    namespace
+      .get(scope, count.into())
+      .unwrap()
+      .number_value(scope),
+    Some(5.0)
+  );
+  assert_eq!(
+    global.get(scope, runs.into()).unwrap().number_value(scope),
+    Some(2.0)
+  );
+  let stats = v8::js2wasm_runtime_stats().unwrap();
+  assert_eq!(stats.compilations, 0);
+  assert_eq!(stats.runtime_eval_instantiations, 0);
 }

@@ -88,6 +88,29 @@ pub(crate) fn import_meta_owner(
         .to_string()
     })
 }
+
+pub(crate) fn existing_module_namespace(
+  context: *const Context,
+  module: *const Module,
+  identity: usize,
+) -> Result<Option<RealmValue>, String> {
+  let owner = import_meta_owner(context, identity)?;
+  let state = unsafe { module_state(module) }
+    .ok_or_else(|| "namespace capability lost its native Module".to_string())?;
+  if state.status == STATUS_ERRORED {
+    return Err("namespace capability refers to an errored Module".into());
+  }
+  if state.status != STATUS_EVALUATED {
+    return Ok(None);
+  }
+  let previous = binding(state.namespace).ok_or_else(|| {
+    "evaluated Module has no canonical namespace binding".to_string()
+  })?;
+  if !Rc::ptr_eq(&owner, &previous.runtime) {
+    return Err("namespace capability belongs to a different Context".into());
+  }
+  Ok(Some(previous.value))
+}
 pub(super) use property_names::own_property_names;
 
 #[derive(Clone)]

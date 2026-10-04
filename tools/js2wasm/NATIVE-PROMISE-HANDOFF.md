@@ -1,5 +1,44 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Latest module linking checkpoint: incomplete
+
+The new instance-bound `__v8x_module_namespace_*` imports retrieve evaluated
+native Module namespaces with Context/owner checks. The compiler guards legacy
+per-source initialization and redirects live imported reads. Native identity,
+once-only execution and later named/namespace reads now pass the preceding
+assertions. The expanded test still fails **0/1, 51 filtered /52**:
+`mutateNamespace` returns **1 instead of 4**. Later named-call, receiver and
+same-URL distinct native Module assertions are not reached. Do not suppress this
+failure or report the entire shared-module control passing.
+
+Current Node V8 fixture control passes **1/1**, including mutation and receiver
+checks. Scoped ordinary adapter run passes **34/34 executed**, 17 ignored,
+1 environment-dependent core Script test filtered /52. Cargo formatting passes.
+No new unchanged Deno or comparative benchmark result is claimed.
+
+Development graph directory is `/private/tmp/deno-module-linking.pmIWQ4`, built
+from the dirty compiler candidate with Binaryen 125 O3 /Wasmtime 47.0.3, not a
+clean published compiler pin. Current first/second graph binding digests are
+`16173d5026e480a4bd48ea39dc737035903323c69199ae9013700996314520f0` and
+`c10d47605cf2ed1389e52c98fc37b1fda72e7c86601eacc166b9a7ccb9dbbea5`.
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-linking.pmIWQ4 target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_shared_dependency_keeps_namespace_live_exports_and_single_execution --ignored --nocapture --test-threads=1
+node --experimental-vm-modules --test tools/js2wasm/test-shared-module-fixtures.mjs
+```
+
+Resume with callable owner routing in compiler `expressions/calls.ts` and
+adapter `js2wasm_graph_calls.rs`, then replay all expanded assertions. Compiler
+prepared IR M2 initialization is not guarded yet. Malformed bindings,
+wrong-Context, cycles/TDZ and failed evaluation need tests. Rebuild clean pinned
+packages and the unchanged Deno runner before replaying builtin core import.
+The last Deno runner build failed linking (exit 101); the old binary does not
+contain this adapter. Inspect linker configuration rather than editing Deno.
+
+Detailed paired handoff:
+https://github.com/loopdive/js2/blob/codex/4376-deno-lexical-checkpoint-20261004/plan/agent-context/4376-module-linking-checkpoint-2026-10-04.md
+Both existing PRs remain incomplete drafts. The records below are historical.
+
 ## Shared dependency regression control
 
 ### Within-graph identity fix verified natively

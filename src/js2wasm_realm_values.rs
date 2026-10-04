@@ -44,6 +44,15 @@ pub(crate) struct RealmValue {
   handle: f64,
 }
 
+impl RealmValue {
+  pub(super) fn checked_handle(self, realm: usize) -> Result<f64, String> {
+    if self.owner != realm {
+      return Err("value belongs to a different Wasmtime realm".to_string());
+    }
+    Ok(self.handle)
+  }
+}
+
 impl RealmAccess for DenoRuntime {
   fn realm_native_promise_settle(
     &mut self,
@@ -366,10 +375,7 @@ pub(crate) trait RealmAccess {
   }
 
   fn realm_check(&self, value: RealmValue) -> Result<f64, String> {
-    if value.owner != self.realm_id() {
-      return Err("value belongs to a different Wasmtime realm".to_string());
-    }
-    Ok(value.handle)
+    value.checked_handle(self.realm_id())
   }
 
   fn realm_undefined(&self) -> RealmValue {
