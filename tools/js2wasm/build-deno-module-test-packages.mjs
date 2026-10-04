@@ -16,7 +16,7 @@ const core = execFileSync("git", ["-C", deno, "show", `${pin}:libs/core/mod.js`]
 for (const { name, entry, source } of graphs) {
   const modules = [{ specifier: entry, source }];
   if (name === "builtin_core_module") modules.push({ specifier: "ext:core/mod.js", source: core });
-  console.log(name, packageGraph(compiler, precompiler, entry, modules, join(output, "graphs")));
+  console.log(name, packageGraph(compiler, precompiler, entry, modules, join(output, "graphs"), { lifecycle: true }));
 }
 for (const { test, specifier, source } of scripts) {
   console.log(test, specifier, await packageScript(compiler, precompiler, specifier, source, join(output, "scripts")));

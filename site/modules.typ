@@ -47,6 +47,9 @@ sources and their consumers retain the original exception, and later siblings
 remain untouched. Calls into the completed dependency retain its original
 allocation owner even before the failed entry's export registry is ready.
 Packages without lifecycle events cannot recover these per-source states.
+The shared-module, typed-module, module-evaluation, and selected Deno module
+test package builders explicitly enable lifecycle events. Generic graph
+packaging still defaults to disabled.
 General cyclic evaluation, snapshots, and complete Deno integration remain
 unverified.
 

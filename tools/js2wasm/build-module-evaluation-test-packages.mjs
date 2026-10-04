@@ -7,5 +7,5 @@ for (const [entry, source] of [
   ["file:///module-execution-probe.js", "globalThis.moduleExecutionProbe=42; export const answer=42;"],
   ["file:///module-throw-probe.js", "const token={marker:42}; globalThis.moduleThrownToken=token; throw token;"],
 ]) {
-  console.log(packageGraph(compiler, precompiler, entry, [{specifier:entry,source}], output));
+  console.log(packageGraph(compiler, precompiler, entry, [{specifier:entry,source}], output, { lifecycle: true }));
 }

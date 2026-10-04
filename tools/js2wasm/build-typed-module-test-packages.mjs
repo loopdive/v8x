@@ -12,5 +12,5 @@ const fixture = name => ({
 });
 for (const name of ["first", "second"]) {
   const entry = fixture(name);
-  console.log(name, packageGraph(compiler, precompiler, entry.specifier, [entry, fixture("shared")], output));
+  console.log(name, packageGraph(compiler, precompiler, entry.specifier, [entry, fixture("shared")], output, { lifecycle: true }));
 }

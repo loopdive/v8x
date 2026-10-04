@@ -1,5 +1,61 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Lifecycle enabled in ordinary test package builders
+
+The shared-module, typed-module, module-evaluation, and selected unchanged
+Deno module package builders now explicitly request lifecycle events. Generic
+packageGraph and the sidecar still default off. No upstream source/test bytes
+or Context artifacts changed. Fresh packages are in
+`/private/tmp/deno-lifecycle-rollout.ykaQLB`, built with clean compiler
+4a98f06ae2, Binaryen 125 O3 and Wasmtime 47.0.3. Adapter runtime is f2a743a.
+Build scripts are the only production workflow change in this slice.
+
+Artifact floors: shared 2, typed 2, evaluation 4, Deno graphs 5, Deno Scripts 4.
+Every optimized graph retains enter/complete imports: shared/typed each have
+two pairs, evaluation graphs one pair, and Deno graphs one pair except the
+core-import graph with two. This verifies optimized hook presence, not native
+prepared-IR participation or execution of every packaged core source.
+Inventory `.cwasm.json` files retain exact source bytes and native/Wasm hashes;
+`.graph-sha256` files retain source binding and native artifact hashes.
+
+Fresh native replay passes 4/4, each 1/1 (54 filtered /55): shared dependency
+identity/live exports/single execution, typed dependency numeric reads,
+successful module namespace publication, and original thrown-object rejection.
+The selected unchanged Deno replay passes 5/5, each 1/1 (430 filtered /431):
+builtin_core_module, import_meta_resolve, import_meta_filename_dirname,
+evaluate_already_evaluated_module, evaluate_already_evaluated_module_sync.
+Node fixture/binding/extractor tests pass 7/7 with --experimental-vm-modules.
+Builder syntax and diff checks pass. Site rendering still fails because
+`/opt/homebrew/bin/typst` is absent. No full-suite or benchmark claim.
+
+Build from the clean compiler checkout so the top-level tsx import resolves:
+
+```sh
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-shared-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-lifecycle-rollout.ykaQLB/shared
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-typed-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-lifecycle-rollout.ykaQLB/typed
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-module-evaluation-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-lifecycle-rollout.ykaQLB/evaluation
+node --experimental-wasm-exnref --import tsx /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/tools/js2wasm/build-deno-module-test-packages.mjs /private/tmp/deno-promise-full.X2WdwN/js2 /private/tmp/v8x-deno-resume-20260930.o0sxeO/repo/target/debug/deps/js2wasm_spike-13b131f10cc30c9d /private/tmp/deno-upstream-conformance.H6HA4g/deno /private/tmp/deno-lifecycle-rollout.ykaQLB/deno
+```
+
+Native replay from the adapter checkout, selecting the matching graph directory
+and exact test named above (success/rejection both use evaluation):
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-lifecycle-rollout.ykaQLB/shared target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_shared_dependency_keeps_namespace_live_exports_and_single_execution --ignored --nocapture --test-threads=1
+```
+
+Deno replay from the unchanged test checkout, repeating the exact five names:
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-promise-full.X2WdwN/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-lifecycle-rollout.ykaQLB/deno/scripts V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-lifecycle-rollout.ykaQLB/deno/graphs target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::builtin_core_module --nocapture --test-threads=1
+```
+
+Next: mixed fresh source prefix followed by a cached failing dependency must
+deliver the original JS exception through the capability call, without skipping
+prefix side effects. Then native prepared-IR participation, cycles/TDZ,
+synthetic/source composition, snapshots, broader Deno conformance, host
+integration and matched benchmarks. Both PRs remain incomplete drafts.
+
 ## Clean native source failure lifecycle replay
 
 The previously failing source-dependency control now passes 1/1 (54 filtered
