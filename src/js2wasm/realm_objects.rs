@@ -6,6 +6,8 @@ pub(super) mod callback_access;
 mod host_callbacks;
 #[path = "realm_host_values.rs"]
 mod host_values;
+#[path = "realm_native_promises.rs"]
+mod native_promises;
 #[path = "realm_property_names.rs"]
 mod property_names;
 #[path = "realm_stack_trace.rs"]
@@ -14,6 +16,8 @@ mod stack_trace;
 mod symbols;
 pub(super) use host_callbacks::HostCallbackBinding;
 pub(crate) use host_callbacks::invoke_host;
+pub(super) use native_promises::NativePromiseMirror;
+pub(super) use native_promises::settle as settle_native_promise_mirror;
 
 pub(crate) fn import_meta_handle(
   access: &mut dyn RealmAccess,
@@ -107,6 +111,7 @@ fn into_realm(
       let units: Vec<_> = text.encode_utf16().collect();
       runtime.realm_string(&units)
     }
+    Some(HeapValue::Promise(_)) => native_promises::transfer(runtime, owner, value.cast()),
     Some(HeapValue::Object(_)) | Some(HeapValue::Array(_)) | Some(HeapValue::Function(_)) => {
       host_values::transfer(runtime, owner, value)
     }

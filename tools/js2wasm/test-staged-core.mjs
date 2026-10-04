@@ -134,6 +134,26 @@ for (const initial of ["pendingPromise", "fulfilledPromise"]) {
   assert.equal(e.__promise_boundary_value(e.__v8x_value_unwrap(recovered)), 78);
 }
 assert.equal(failed.__v8x_deno_script_phase(), -1);
+for (const rejected of [0, 1]) {
+  const { e, reactions } = await fresh();
+  const packet = e.__v8x_value_native_promise_create();
+  const promise = e.__v8x_value_native_promise_value(packet);
+  assert.equal(e.__v8x_value_native_promise_value(packet), promise, "copy identity is stable");
+  assert.equal(e.__promise_boundary_state(e.__v8x_value_unwrap(promise)), 0);
+  const callback = e.__v8x_value_host_function(1);
+  const derived = e.__v8x_value_promise_then(promise, callback, callback);
+  const payload = e.__v8x_value_number(42);
+  e.__v8x_value_native_promise_settle(packet, payload, rejected);
+  assert.deepEqual(reactions, [], "copy settlement must enqueue, not call synchronously");
+  assert.equal(e.__promise_boundary_state(e.__v8x_value_unwrap(promise)), rejected + 1);
+  assert.equal(e.__v8x_value_keep(e.__promise_boundary_value(e.__v8x_value_unwrap(promise))), payload);
+  e.__v8x_value_native_promise_settle(packet, e.__v8x_value_number(99), 1 - rejected);
+  assert.equal(e.__promise_boundary_value(e.__v8x_value_unwrap(promise)), 42, "second settlement cannot replace the result");
+  e.__drain_microtasks();
+  assert.deepEqual(reactions, [42]);
+  assert.equal(e.__promise_boundary_value(e.__v8x_value_unwrap(derived)), 43);
+  assert.throws(() => e.__v8x_value_native_promise_settle(packet, payload, 2));
+}
 assert.throws(() => failed.__v8x_run_deno_core_script(2));
 if (process.argv[3]) writeFileSync(resolve(process.argv[3]), result.binary);
 console.log("PASS: deferred scripts, host registration gap, module publication, rejected reorder/retry, pending/settled reactions and rejection recovery");

@@ -364,6 +364,7 @@ pub(crate) struct RawFunctionCallbackInfoParts {
 
 struct IsolateState {
   realm_objects: Vec<realm_objects::RealmObjectBinding>,
+  native_promise_mirrors: Vec<realm_objects::NativePromiseMirror>,
   realm_callbacks: Vec<realm_objects::HostCallbackBinding>,
   values: Vec<*mut HeapValue>,
   contexts: Vec<*const Context>,
@@ -1881,6 +1882,7 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
   let current_heap_limit = maximum_heap_limit;
   Box::into_raw(Box::new(IsolateState {
     realm_objects: Vec::new(),
+    native_promise_mirrors: Vec::new(),
     realm_callbacks: Vec::new(),
     values: Vec::new(),
     contexts: Vec::new(),
@@ -5754,6 +5756,16 @@ fn settle_promise_value(
       derived: reaction.derived,
     }
   }));
+  let unhandled = match realm_objects::settle_native_promise_mirror(
+    promise, value, settlement,
+  ) {
+    Some(Ok(handled)) => !handled,
+    Some(Err(error)) => {
+      realm_objects::report(error);
+      return;
+    }
+    None => unhandled,
+  };
   if settlement == PromiseSettlement::Rejected && unhandled {
     promise_reject::notify(
       isolate,

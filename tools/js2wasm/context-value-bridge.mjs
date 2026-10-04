@@ -192,6 +192,21 @@ export function __v8x_value_typed_array(buffer: number, kind: number, offset: nu
 }
 export function __v8x_value_object(): number { return __v8xKeepValue({}); }
 export function __v8x_value_array(): number { return __v8xKeepValue([]); }
+export function __v8x_value_native_promise_create(): number {
+  let resolve: any;
+  let reject: any;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return __v8xKeepValue([promise, resolve, reject]);
+}
+export function __v8x_value_native_promise_value(packet: number): number {
+  return __v8xKeepValue(__v8xValueAt(packet)[0]);
+}
+export function __v8x_value_native_promise_settle(packet: number, value: number, rejected: number): void {
+  if (rejected !== 0 && rejected !== 1) throw new RangeError("invalid native Promise settlement");
+  const resolvers = __v8xValueAt(packet);
+  if (rejected === 1) resolvers[2](__v8xValueAt(value));
+  else resolvers[1](__v8xValueAt(value));
+}
 // Use the intrinsic, not an observable own then on the receiver. Reactions
 // and the derived Promise stay compiled and run through the existing queue.
 export function __v8x_value_promise_then(promise: number, fulfilled: number, rejected: number): number {
@@ -278,6 +293,9 @@ export const CONTEXT_VALUE_BRIDGE_EXPORTS = Object.freeze([
   "__v8x_value_typed_array",
   "__v8x_value_object",
   "__v8x_value_array",
+  "__v8x_value_native_promise_create",
+  "__v8x_value_native_promise_value",
+  "__v8x_value_native_promise_settle",
   "__v8x_value_promise_then",
   "__v8x_value_get_prototype",
   "__v8x_value_set_prototype",

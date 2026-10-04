@@ -1014,6 +1014,7 @@ pub(crate) struct SourceModule {
 }
 
 struct DenoHostState {
+  suppressed_native_promise_rejections: Vec<f64>,
   rejection_events: VecDeque<rejection_events::PendingPromiseRejection>,
   standalone_microtasks: VecDeque<wasmtime::Func>,
   realm_profile: realm_values::RealmCallProfile,
@@ -1574,6 +1575,12 @@ impl SharedDenoRuntime {
          reason: f64|
          -> wasmtime::Result<()> {
           let state = caller.data_mut();
+          if state
+            .suppressed_native_promise_rejections
+            .contains(&promise)
+          {
+            return Ok(());
+          }
           let mut event = rejection_events::PendingPromiseRejection::new(
             state.realm_id,
             state.heap_isolate,
@@ -2603,6 +2610,7 @@ impl DenoRuntime {
     let mut store = Store::new(
       &shared.engine,
       DenoHostState {
+        suppressed_native_promise_rejections: Vec::new(),
         rejection_events: VecDeque::new(),
         standalone_microtasks: VecDeque::new(),
         string_handles: HashMap::new(),

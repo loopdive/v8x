@@ -45,6 +45,25 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_native_promise_settle(
+    &mut self,
+    packet: RealmValue,
+    promise: RealmValue,
+    value: RealmValue,
+    rejected: bool,
+  ) -> Result<(), String> {
+    let handles = [
+      self.realm_check(packet)?,
+      self.realm_check(promise)?,
+      self.realm_check(value)?,
+    ];
+    settle_native_promise_in_store(
+      &mut self.store,
+      self.realm_instance,
+      handles,
+      rejected,
+    )
+  }
   fn realm_run_aot_script(
     &mut self,
     specifier: &str,
@@ -223,6 +242,13 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_native_promise_settle(
+    &mut self,
+    packet: RealmValue,
+    promise: RealmValue,
+    value: RealmValue,
+    rejected: bool,
+  ) -> Result<(), String>;
   fn realm_run_aot_script(
     &mut self,
     _specifier: &str,
@@ -765,6 +791,35 @@ pub(crate) struct CallerRealm<'a> {
   realm_id: usize,
   realm_instance: Instance,
 }
+
+fn settle_native_promise_in_store(
+  store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
+  realm: Instance,
+  handles: [f64; 3],
+  rejected: bool,
+) -> Result<(), String> {
+  let settle = realm
+    .get_typed_func::<(f64, f64, f64), ()>(
+      &mut *store,
+      "__v8x_value_native_promise_settle",
+    )
+    .map_err(|error| format!("native Promise settlement ABI: {error:#}"))?;
+  store
+    .as_context_mut()
+    .data_mut()
+    .suppressed_native_promise_rejections
+    .push(handles[1]);
+  let result = settle.call(
+    &mut *store,
+    (handles[0], handles[2], if rejected { 1.0 } else { 0.0 }),
+  );
+  store
+    .as_context_mut()
+    .data_mut()
+    .suppressed_native_promise_rejections
+    .pop();
+  result.map_err(|error| format!("settle native Promise copy: {error:#}"))
+}
 impl<'a> CallerRealm<'a> {
   pub(super) fn new(caller: Caller<'a, DenoHostState>) -> Result<Self, String> {
     let realm_id = caller.data().realm_id;
@@ -782,6 +837,25 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_native_promise_settle(
+    &mut self,
+    packet: RealmValue,
+    promise: RealmValue,
+    value: RealmValue,
+    rejected: bool,
+  ) -> Result<(), String> {
+    let handles = [
+      self.realm_check(packet)?,
+      self.realm_check(promise)?,
+      self.realm_check(value)?,
+    ];
+    settle_native_promise_in_store(
+      &mut self.caller,
+      self.realm_instance,
+      handles,
+      rejected,
+    )
+  }
   fn realm_run_aot_script(
     &mut self,
     specifier: &str,
