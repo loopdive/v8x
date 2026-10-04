@@ -1,5 +1,63 @@
 # Native Promise transport checkpoint, 2026-10-04
 
+## Clean selected unchanged Deno replay
+
+All five selected unchanged Deno module tests pass **5/5**, each **1/1** with
+430 filtered /431, using five graph and four Script packages rebuilt from clean
+compiler `285ac9e6f29c2a1ca82067c4e8e4f63c91571422`. Builder succeeds with
+explicit `--import tsx` from the compiler checkout. Packages:
+`/private/tmp/deno-module-conformance-clean.agpTzp`, Binaryen 125 O3 and
+Wasmtime 47.0.3. Original Deno pin remains
+1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44 with only Cargo.toml/Cargo.lock dirty.
+The full Context artifact is unchanged from its earlier compiler pin.
+
+Tests: builtin_core_module, import_meta_resolve, import_meta_filename_dirname,
+evaluate_already_evaluated_module and evaluate_already_evaluated_module_sync.
+Native builtin graph SHA256:
+`bb694c0e355fc58b4f8ed1d17b8995eeb79c592538bb3395a5e9422a177d6d08`;
+optimized Wasm SHA256:
+`23cc9d5dad463d3e1107175b3bd3dabe9966d4e4542deacd45d0e41dfb8ca683`.
+Individual package inventories retain the other hashes.
+Negative builtin control with `missing-graphs` fails **0/1**, exit 101, at
+exact-binding loading rather than silently reporting empty success.
+
+Replay from the Deno checkout:
+
+```sh
+V8X_JS2WASM_DENO_CORE_AOT_MODULE=/private/tmp/deno-promise-full.X2WdwN/deno-core.cwasm V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-module-conformance-clean.agpTzp/scripts V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-conformance-clean.agpTzp/graphs target/debug/deps/deno_core-87206ac56a2fccad --exact modules::tests::builtin_core_module --nocapture --test-threads=1
+```
+
+This supersedes the development-artifact caveat for these five selected tests
+only. No full population, Context rebuild or benchmark is claimed. Integration
+remains incomplete and both PRs remain drafts.
+
+## Optional imported references verified
+
+Clean compiler `285ac9e6f29c2a1ca82067c4e8e4f63c91571422` now routes optional
+imported calls to their original allocation owner. The entire remaining chain
+is guarded, including computed keys and arguments. Parenthesized receivers
+remain bound; ending an optional chain restores ordinary null-base throwing
+before arguments execute. A non-nullish non-callable still evaluates arguments
+before throwing. Expanded compiler controls pass **11/11** across three files.
+
+Expanded native shared-module control passes **1/1**, 51 filtered /52, with
+final compiler/interpreter counts zero. Node V8 fixture control passes **1/1**;
+ordinary native controls remain 34 passed, 17 ignored, 1 filtered /52. Fresh
+packages are `/private/tmp/deno-module-optional.lJ8lb6`, Binaryen 125 O3 and
+Wasmtime 47.0.3. Prior package hashes below no longer match these fixtures.
+
+| Entry | Binding digest | Optimized Wasm SHA256 | Native SHA256 |
+| --- | --- | --- | --- |
+| first | 8370a3b39f5842d43dc786dfc9f81f389cab05bb85988bde9fc0662268a36f8d | ec1fcd105eafbd953bad072b17a87a7b4464beb2a60911d5dd7763012a88e621 | 1d2793796b516a3e01f5c4c41120e7f548f0d0e1d6c2a5771eb68f67a5229cce |
+| second | 4b8bb15887a10ddcc8eea4a6d5ca076fde88b36071516c57dff29d79173584d5 | 712b324ac1841249b6470612a13b721abdd667fdc75eeabee70251f9ff264c2d | e1ef52d9ad74f6daef5a0b757dc6fb26c7059abb10d52e8de32bf89e8ecf9baa |
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-native-promise.6898GB V8X_JS2WASM_AOT_GRAPH_DIR=/private/tmp/deno-module-optional.lJ8lb6 target/debug/deps/js2wasm_spike-8b524eb9ef0b52c1 --exact shared_modules::aot_shared_dependency_keeps_namespace_live_exports_and_single_execution --ignored --nocapture --test-threads=1
+```
+
+Prepared IR initialization, cycles/TDZ, cached failures, full Deno population,
+snapshots and complete host integration remain. No fresh benchmark.
+
 ## Imported spread calls verified
 
 Compiler `c6dbe274881465e039490d94ec35bbc76ded7437` fixes imported spread

@@ -38,4 +38,17 @@ test("shared fixture preserves single evaluation, namespace identity and live im
   assert.equal(second.namespace.spreadNested(), 65);
   assert.equal(second.namespace.spreadInvalid(), 1);
   assert.equal(shared.namespace.count, 65);
+  for (const [name, expected] of [["optionalNamed", 66], ["optionalMethod", 67], ["optionalComputed", 68], ["optionalNamespace", 69]]) {
+    assert.equal(second.namespace[name](), expected);
+  }
+  for (const name of ["absentCall", "absentReceiver", "chainSkip", "computedSkip", "nullSkip", "optionalNamedReceiver"]) {
+    assert.equal(second.namespace[name](), undefined);
+  }
+  assert.equal(second.namespace.optionalReceiver(), shared.namespace);
+  assert.equal(second.namespace.parenthesizedReceiver(), shared.namespace);
+  assert.equal(second.namespace.nestedReceiver(), shared.namespace.nested);
+  assert.equal(second.namespace.parenBreak(), 1);
+  assert.equal(shared.namespace.count, 69);
+  assert.equal(second.namespace.nonCallable(), 1);
+  assert.equal(shared.namespace.count, 70);
 });

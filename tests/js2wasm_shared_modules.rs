@@ -212,6 +212,74 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
     );
   }
 
+  for (name, expected) in [
+    ("optionalNamed", 66.0),
+    ("optionalMethod", 67.0),
+    ("optionalComputed", 68.0),
+    ("optionalNamespace", 69.0),
+    ("parenBreak", 1.0),
+    ("nonCallable", 1.0),
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .number_value(scope),
+      Some(expected),
+      "{name}"
+    );
+  }
+  for name in [
+    "absentCall",
+    "absentReceiver",
+    "chainSkip",
+    "computedSkip",
+    "nullSkip",
+    "optionalNamedReceiver",
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .is_undefined(),
+      "{name}"
+    );
+  }
+  for name in [
+    "optionalReceiver",
+    "parenthesizedReceiver",
+    "nestedReceiver",
+  ] {
+    let key = v8::String::new(scope, name).unwrap();
+    let function = v8::Local::<v8::Function>::try_from(
+      second_namespace.get(scope, key.into()).unwrap(),
+    )
+    .unwrap();
+    let expected = if name == "nestedReceiver" {
+      let nested = v8::String::new(scope, "nested").unwrap();
+      namespace.get(scope, nested.into()).unwrap()
+    } else {
+      namespace.into()
+    };
+    assert!(
+      function
+        .call(scope, second_namespace.into(), &[])
+        .unwrap()
+        .strict_equals(expected),
+      "{name}"
+    );
+  }
+
   // A different Module with the same URL must not reuse the previous binding.
   let replacement = compile(
     scope,
@@ -248,7 +316,7 @@ fn aot_shared_dependency_keeps_namespace_live_exports_and_single_execution() {
       .get(scope, count.into())
       .unwrap()
       .number_value(scope),
-    Some(65.0)
+    Some(70.0)
   );
   assert_eq!(
     global.get(scope, runs.into()).unwrap().number_value(scope),
