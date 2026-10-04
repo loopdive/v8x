@@ -11,7 +11,11 @@ assert(output, "usage: build-deno-module-test-packages.mjs JS2 PRECOMPILER DENO 
 assert.notEqual(process.platform, "win32", "filename fixture selects the original Unix arm");
 const pin = "1d4e6c1cb855b62a7fb572c6c138e4e8b4e7fa44";
 const source = execFileSync("git", ["-C", deno, "show", `${pin}:libs/core/modules/tests.rs`], { encoding: "utf8" });
-const { graphs, scripts } = denoModuleFixtures(source);
+const readFixture = name => {
+  assert(/^[A-Za-z_]+\.js$/.test(name), "invalid pinned fixture filename");
+  return execFileSync("git", ["-C", deno, "show", `${pin}:libs/core/modules/testdata/${name}`], { encoding: "utf8" });
+};
+const { graphs, scripts } = denoModuleFixtures(source, readFixture);
 const selected = selectedTests ? new Set(selectedTests.split(",")) : null;
 if (selected) {
   assert(selected.size > 0);

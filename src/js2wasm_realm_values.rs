@@ -251,6 +251,13 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_instantiate_callback_graph(
+    &mut self,
+    _module: &wasmtime::Module,
+    _bindings: &NativeModuleGraph,
+  ) -> Result<(bool, RealmValue), String> {
+    Err("nested module instantiation requires active Caller access".into())
+  }
   fn realm_native_promise_settle(
     &mut self,
     packet: RealmValue,
@@ -847,6 +854,19 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_instantiate_callback_graph(
+    &mut self,
+    module: &wasmtime::Module,
+    bindings: &NativeModuleGraph,
+  ) -> Result<(bool, RealmValue), String> {
+    let (normal, handle) = DenoRuntime::instantiate_callback_graph_in_context(
+      &mut self.caller,
+      self.realm_instance,
+      module,
+      bindings,
+    )?;
+    Ok((normal, self.realm_from_handle(handle)?))
+  }
   fn realm_native_promise_settle(
     &mut self,
     packet: RealmValue,

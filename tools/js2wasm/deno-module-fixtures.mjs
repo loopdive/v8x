@@ -28,7 +28,7 @@ export function rawScripts(body, test) {
 
 // Preserve the exact original runtime source bytes, including whitespace.
 // Fail on unrecognized literal layouts rather than guessing Rust semantics.
-export function denoModuleFixtures(source) {
+export function denoModuleFixtures(source, readFixture) {
   const graphs = [];
   const scripts = [];
   const resolve = functionSource(source, "import_meta_resolve");
@@ -62,7 +62,23 @@ export function denoModuleFixtures(source) {
   assert.equal(setup.length, 1, "test_mods must contain its original assertion setup Script");
   assert.equal(setup[0].specifier, "setup.js");
   scripts.push(...setup);
-  assert.equal(graphs.length, 8);
+  const aliasTest = "test_lazy_loaded_esm_aliased_via_import";
+  const aliasBody = functionSource(source, aliasTest);
+  assert(aliasBody.includes('"custom:aliased" = "lazy_loaded_aliased.js"'));
+  assert.equal([...aliasBody.matchAll(/ascii_str_include!\("testdata\/lazy_loaded_importer.js"\)/g)].length, 2);
+  assert.equal(typeof readFixture, "function", "included original fixtures require a pinned reader");
+  graphs.push({ name: aliasTest, entry: "file:///importer.js", source: readFixture("lazy_loaded_importer.js"),
+    dependencies: [{ specifier: "custom:aliased", source: readFixture("lazy_loaded_aliased.js") }] });
+  const siblingTest = "test_lazy_load_esm_evaluates_pre_instantiated_sibling";
+  const siblingBody = functionSource(source, siblingTest);
+  assert(siblingBody.includes('"custom:lazy_a" = "lazy_load_sibling_a.js"'));
+  assert(siblingBody.includes('"custom:lazy_b" = "lazy_load_sibling_b.js"'));
+  assert.equal([...siblingBody.matchAll(/ascii_str_include!\("testdata\/lazy_load_sibling_main.js"\)/g)].length, 1);
+  const siblingB = { specifier: "custom:lazy_b", source: readFixture("lazy_load_sibling_b.js") };
+  graphs.push({ name: siblingTest, entry: "file:///main.js", source: readFixture("lazy_load_sibling_main.js"),
+    dependencies: [{ specifier: "custom:lazy_a", source: readFixture("lazy_load_sibling_a.js") }, siblingB] });
+  graphs.push({ name: siblingTest, entry: siblingB.specifier, source: siblingB.source });
+  assert.equal(graphs.length, 11);
   assert.equal(scripts.length, 5);
   return { graphs, scripts };
 }

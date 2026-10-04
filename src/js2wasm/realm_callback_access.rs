@@ -77,3 +77,12 @@ pub(in crate::js2wasm) fn with_owner<T>(
   }
   with_runtime_owner(owner, "realm value access", |runtime| action(runtime))
 }
+
+pub(super) fn has_active_owner(owner: &Rc<RefCell<DenoRuntime>>) -> bool {
+  ACTIVE.with(|stack| {
+    stack
+      .borrow()
+      .iter()
+      .any(|entry| Rc::ptr_eq(&entry.owner, owner))
+  })
+}

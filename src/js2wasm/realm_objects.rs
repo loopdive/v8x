@@ -19,6 +19,26 @@ pub(crate) use host_callbacks::invoke_host;
 pub(super) use native_promises::NativePromiseMirror;
 pub(super) use native_promises::settle as settle_native_promise_mirror;
 
+pub(crate) fn instantiate_callback_graph(
+  owner: &Rc<RefCell<DenoRuntime>>,
+  module: &wasmtime::Module,
+  bindings: &crate::js2wasm_spike::NativeModuleGraph,
+) -> Result<bool, String> {
+  if !callback_access::has_active_owner(owner) {
+    return Ok(false);
+  }
+  callback_access::with_owner(owner, |access| {
+    let (normal, value) =
+      access.realm_instantiate_callback_graph(module, bindings)?;
+    if !normal {
+      let exception = from_realm(access, owner, value)?;
+      record_exception(current_isolate(), exception);
+      return Err("nested module initializer threw a JS value".into());
+    }
+    Ok(true)
+  })
+}
+
 pub(crate) fn record_module_exception(
   owner: &Rc<RefCell<DenoRuntime>>,
 ) -> Result<bool, String> {
@@ -520,10 +540,9 @@ pub(super) fn bind_source_namespace(
   owner: &Rc<RefCell<DenoRuntime>>,
   specifier: &str,
 ) -> Result<(), String> {
-  let mut runtime = owner.try_borrow_mut().map_err(|_| {
-    "namespace publication re-entered an executing realm".to_string()
-  })?;
-  bind_source_namespace_access(host, owner, specifier, &mut *runtime)
+  callback_access::with_owner(owner, |runtime| {
+    bind_source_namespace_access(host, owner, specifier, runtime)
+  })
 }
 
 pub(crate) fn bind_source_namespace_access(

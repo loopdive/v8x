@@ -2875,6 +2875,77 @@ impl DenoRuntime {
     )
   }
 
+  fn instantiate_callback_graph_in_context(
+    store: &mut impl wasmtime::AsContextMut<Data = DenoHostState>,
+    realm: Instance,
+    module: &Module,
+    bindings: &NativeModuleGraph,
+  ) -> Result<(bool, f64), String> {
+    // Nested evaluation must use the callback's store lease, never reborrow
+    // its Runtime or install an interpreter provider as an incidental effect.
+    if module.imports().any(|import| {
+      matches!(
+        import.module(),
+        RUNTIME_EVAL_IMPORT_MODULE | RUNTIME_EVAL_JSON_IMPORT_MODULE
+      )
+    }) {
+      return Err(
+        "nested module graph requires an unsupported eval provider".into(),
+      );
+    }
+    let shared = shared_runtime()?;
+    let prepared = shared.prepare_module(module)?;
+    let instance = Self::instantiate_in_store_bound(
+      shared,
+      &prepared,
+      store,
+      &mut None,
+      Some(realm),
+      Some(bindings),
+    )?;
+    store
+      .as_context_mut()
+      .data_mut()
+      .aot_call_graphs
+      .push(instance);
+    shared.instantiations.fetch_add(1, Ordering::Relaxed);
+    if let Some(init) = instance.get_func(&mut *store, "__module_init") {
+      if let Err(error) = init
+        .typed::<(), ()>(&*store)
+        .map_err(|error| format!("nested module initializer ABI: {error}"))?
+        .call(&mut *store, ())
+      {
+        use wasmtime::{AsContextMut, RootScope, Val};
+        let mut scope = RootScope::new(&mut *store);
+        let exception = scope
+          .as_context_mut()
+          .take_pending_exception()
+          .ok_or_else(|| format!("nested module trapped: {error:#}"))?;
+        let fields = exception
+          .fields(&mut scope)
+          .map_err(|error| format!("nested module exception fields: {error}"))?
+          .collect::<Vec<_>>();
+        let [payload @ Val::ExternRef(_)] = fields.as_slice() else {
+          return Err("nested module exception must carry one JS value".into());
+        };
+        let keep = realm
+          .get_func(&mut scope, "__v8x_value_keep")
+          .ok_or("Context lacks nested exception rooting ABI")?;
+        let mut result = [Val::F64(0)];
+        keep
+          .call(&mut scope, &[*payload], &mut result)
+          .map_err(|error| {
+            format!("root nested module exception: {error:#}")
+          })?;
+        return Ok((
+          false,
+          result[0].f64().ok_or("invalid nested exception handle")?,
+        ));
+      }
+    }
+    Ok((true, 0.0))
+  }
+
   // A Caller already owns mutable access to the store during a host callback.
   // Use that access rather than recursively borrowing the enclosing runtime.
   fn instantiate_script_in_context(
@@ -3625,6 +3696,17 @@ pub(crate) fn compile_and_instantiate(
     .map_err(|error| format!("resolve Deno.cwd() host value: {error}"))?;
   if let Some(runtime) = existing {
     publish(runtime.clone())?;
+    let module = match &prepared {
+      PreparedModule::Prelinked(instance) => instance.module(),
+      PreparedModule::RuntimeEval(module) => module,
+    };
+    if crate::js2wasm::realm_objects::instantiate_callback_graph(
+      &runtime,
+      module,
+      &graph_bindings,
+    )? {
+      return Ok(runtime);
+    }
     {
       let mut owner = runtime
         .try_borrow_mut()

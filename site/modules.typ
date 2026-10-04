@@ -57,7 +57,12 @@ packaging still defaults to disabled.
 Pinned-original Deno packages also cover main/side loader identity and the
 test_mods import/host-op case. The latter checks that instantiation alone does
 not execute source and that evaluation dispatches the Rust op exactly once.
-General cyclic evaluation, snapshots, and complete Deno integration remain
+Pinned-original lazy loading also covers aliased imports and evaluation of a
+pre-instantiated sibling from a native callback. Nested initialization and
+namespace publication use the active Caller store access instead of borrowing
+the executing runtime again. Nine selected unchanged Deno module tests pass;
+this is not certification of the full 431-test suite. Nested throwing-module
+identity, general cyclic evaluation, snapshots, and complete Deno integration remain
 unverified.
 
 #next("snapshots", [Snapshots: record and replay])
