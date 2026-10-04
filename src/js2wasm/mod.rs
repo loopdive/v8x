@@ -311,7 +311,7 @@ enum HeapValue {
   PromiseResolver(PromiseResolverState),
   Symbol(SymbolState),
   Private(*const V8String),
-  Error { name: &'static str, message: String },
+  Error { name: String, message: String },
   External(*mut c_void),
   Boolean(bool),
   Number(f64),
@@ -638,17 +638,14 @@ pub(crate) fn enqueue_compiled_rejection(
   Ok(())
 }
 
-fn allocate_error(
-  message: *const V8String,
-  name: &'static str,
-) -> *const Value {
+fn allocate_error(message: *const V8String, name: &str) -> *const Value {
   let Some(message) = (unsafe { string_value(message) }) else {
     return ptr::null();
   };
   allocate(
     current_isolate(),
     HeapValue::Error {
-      name,
+      name: name.to_owned(),
       message: message.to_owned(),
     },
   )

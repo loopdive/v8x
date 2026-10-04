@@ -45,6 +45,16 @@ pub(crate) struct RealmValue {
 }
 
 impl RealmAccess for DenoRuntime {
+  fn realm_native_error_snapshot(
+    &mut self,
+    handle: f64,
+  ) -> Result<Option<(f64, f64)>, String> {
+    graph_calls::native_error_snapshot(
+      &mut self.store,
+      self.realm_instance,
+      handle,
+    )
+  }
   fn realm_promise_handler(
     &mut self,
     handle: f64,
@@ -193,6 +203,12 @@ impl RealmAccess for DenoRuntime {
 }
 
 pub(crate) trait RealmAccess {
+  fn realm_native_error_snapshot(
+    &mut self,
+    _handle: f64,
+  ) -> Result<Option<(f64, f64)>, String> {
+    Ok(None)
+  }
   fn realm_promise_handler(
     &mut self,
     _handle: f64,
@@ -731,6 +747,16 @@ impl<'a> CallerRealm<'a> {
   }
 }
 impl RealmAccess for CallerRealm<'_> {
+  fn realm_native_error_snapshot(
+    &mut self,
+    handle: f64,
+  ) -> Result<Option<(f64, f64)>, String> {
+    graph_calls::native_error_snapshot(
+      &mut self.caller,
+      self.realm_instance,
+      handle,
+    )
+  }
   fn realm_promise_handler(
     &mut self,
     handle: f64,

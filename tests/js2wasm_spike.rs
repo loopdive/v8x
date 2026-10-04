@@ -2357,6 +2357,39 @@ fn runs_source_bound_aot_scripts_through_public_api() {
   }
   // Byte mismatch must be rejected before the initializer writes this marker.
   // Corrupt only a fresh generated test package that has never been loaded.
+  let native_error_source = "globalThis.nativeSavedError=new TypeError(\"boom\");throw globalThis.nativeSavedError;";
+  let error = {
+    v8::tc_scope!(let caught, scope);
+    let source = v8::String::new(caught, native_error_source).unwrap();
+    assert!(
+      v8::Script::compile(caught, source, None)
+        .unwrap()
+        .run(caught)
+        .is_none()
+    );
+    let error = caught.exception().unwrap();
+    assert!(error.is_native_error());
+    let message = v8::Exception::create_message(caught, error);
+    assert_eq!(
+      message.get(caught).to_rust_string_lossy(caught),
+      "Uncaught TypeError: boom"
+    );
+    v8::Global::new(caught, error)
+  };
+  let source = v8::String::new(scope, "globalThis.nativeSavedError;").unwrap();
+  let read = v8::Script::compile(scope, source, None)
+    .unwrap()
+    .run(scope)
+    .unwrap();
+  assert!(read.strict_equals(v8::Local::new(scope, error)));
+  let source =
+    v8::String::new(scope, "({name:\"TypeError\",message:\"boom\"})").unwrap();
+  let impostor = v8::Script::compile(scope, source, None)
+    .unwrap()
+    .run(scope)
+    .unwrap();
+  assert!(!impostor.is_native_error());
+
   let package = fs::read_dir(&directory)
     .unwrap()
     .filter_map(Result::ok)

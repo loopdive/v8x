@@ -135,7 +135,22 @@ pub(super) fn from_realm(
       {
         return Ok(entry.host.cast());
       }
-      let host = if kind == 5
+      let native_error = if kind == 5 {
+        runtime.realm_native_error_snapshot(runtime.realm_check(value)?)?
+      } else {
+        None
+      };
+      let host = if let Some((name, message)) = native_error {
+        // Retain the binding below. This wrapper only records native branding;
+        // property reads still use the live compiled object and owning graph.
+        let name = runtime.realm_from_handle(name)?;
+        let name = String::from_utf16(&runtime.realm_as_utf16(name)?)
+          .map_err(|_| "native Error name contains unpaired UTF-16")?;
+        let message = runtime.realm_from_handle(message)?;
+        let message = String::from_utf16(&runtime.realm_as_utf16(message)?)
+          .map_err(|_| "native Error message contains unpaired UTF-16")?;
+        allocate_error(new_string(current_isolate(), message), &name).cast()
+      } else if kind == 5
         && runtime
           .realm_promise_snapshot(runtime.realm_check(value)?)?
           .is_some()

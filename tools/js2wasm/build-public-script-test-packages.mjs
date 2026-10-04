@@ -11,6 +11,9 @@ for (const source of [
   "throw globalThis.completionSaved;",
   "throw undefined;",
   "throw 42;",
+  'globalThis.nativeSavedError=new TypeError("boom");throw globalThis.nativeSavedError;',
+  "globalThis.nativeSavedError;",
+  '({name:"TypeError",message:"boom"})',
   "globalThis.shouldNotRun=1;42;",
 ]) {
   console.log(await packageScript(compiler, precompiler, "<anonymous>", source, output));

@@ -351,3 +351,42 @@ Then rebuild a matched Context and run the full unchanged deno_core population.
 BigInt/UTF-16, native capabilities, pure Program completion, runtime AOT routing,
 shared-library factoring and fresh performance measurements remain open.
 The existing compiler PR is stacked, not main-based; both PRs remain drafts.
+
+## Native Error adoption continuation (2026-10-04)
+
+The unchanged next-getter failure is attributed: a direct same-store probe
+observes the native exception and its four-unit message, but the Rust wrapper
+used to be an ordinary Object. Message::Get then lost the original text.
+The adapter now queries each graph's guarded native Error classifier, reads
+native name/message fields without invoking public getters, roots both through
+the Context keeper and adopts an Error wrapper retaining the original binding.
+Error names use owned strings rather than a fixed static-name shortlist.
+These are initial field snapshots for message formatting, not proof that later
+public name/message redefinitions are reflected in every cached-message API.
+
+Unchanged WebIDL passes 16/17, with dictionary array field b still failing;
+zero ignored and 414 filtered out of 431. Context and Script artifacts are the
+same older-Context/newer-Script pair in the preceding section. The native getter
+probe returns undefined for an owned `[70000]` array, so native builtin iterator
+read support remains necessary. Do not mask intentional own undefined shadows
+with an undefined-result fallback to the Context getter.
+
+Expanded public Script controls pass 1/1 (38 filtered): native Error branding,
+`Uncaught TypeError: boom`, repeated-read object identity, and rejection of an
+ordinary object with matching name/message. The same test preserves existing
+completion/mismatch/exception controls and asserts zero runtime compilations
+and zero interpreter instances. Eleven trusted packages are at
+`/private/tmp/deno-public-error-packages.EnQn7D`; its marker package was deliberately
+corrupted by the pre-effect refusal control. Build into a fresh directory for
+another complete replay. Compiler-free ordinary checks remain 31 passed,
+eight ignored, zero failed /39. Build-side checks pass 15/15.
+
+```sh
+V8X_JS2WASM_SCRIPT_ENVIRONMENT_DIR=/private/tmp/deno-script-completion.8HrA0L V8X_JS2WASM_AOT_SCRIPT_DIR=/private/tmp/deno-public-error-packages.EnQn7D target/debug/deps/js2wasm_spike-e7e456f13e693536 --exact runs_source_bound_aot_scripts_through_public_api --ignored --nocapture --test-threads=1
+```
+
+Full unchanged population measurement remains outstanding. Cargo nextest is
+not installed here; the repository harness has a libtest runner, whose default
+watchdog kills timed-out tests. Obtain approval or disable that watchdog before
+using it, in accordance with the no-test-kill rule. No full-population baseline,
+matched Context rebuild or fresh performance result is credited.

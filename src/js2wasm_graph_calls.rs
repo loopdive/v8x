@@ -2,6 +2,69 @@
 use super::*;
 use wasmtime::{AsContextMut, RootScope, Val};
 
+/// Native Error identity comes from the compiler's guarded carrier ABI, never
+/// from public properties such as name/message that an ordinary object can copy.
+pub(super) fn native_error_snapshot(
+  mut context: impl AsContextMut<Data = DenoHostState>,
+  realm: Instance,
+  handle: f64,
+) -> Result<Option<(f64, f64)>, String> {
+  let mut graphs = context.as_context().data().aot_call_graphs.clone();
+  graphs.push(realm);
+  let mut scope = RootScope::new(&mut context);
+  let unwrap = realm
+    .get_func(&mut scope, "__v8x_value_unwrap")
+    .ok_or("realm lacks same-store value unwrap ABI")?;
+  let mut value = [Val::ExternRef(None)];
+  unwrap
+    .call(&mut scope, &[Val::F64(handle.to_bits())], &mut value)
+    .map_err(|error| format!("unwrap native Error: {error:#}"))?;
+  for graph in graphs {
+    let Some(classify) =
+      graph.get_func(&mut scope, "__error_boundary_is_native")
+    else {
+      continue;
+    };
+    let mut result = [Val::I32(0)];
+    classify
+      .call(&mut scope, &value, &mut result)
+      .map_err(|error| format!("classify native Error: {error:#}"))?;
+    match result[0].i32() {
+      Some(1) => {
+        let keep = realm
+          .get_func(&mut scope, "__v8x_value_keep")
+          .ok_or("realm lacks same-store value keep ABI")?;
+        let mut fields = [0.0; 2];
+        for (index, name) in
+          ["__error_boundary_name", "__error_boundary_message"]
+            .iter()
+            .enumerate()
+        {
+          let read = graph
+            .get_func(&mut scope, name)
+            .ok_or("native Error classifier lacks field ABI")?;
+          let mut field = [Val::ExternRef(None)];
+          read
+            .call(&mut scope, &value, &mut field)
+            .map_err(|error| format!("read native Error field: {error:#}"))?;
+          let mut handle = [Val::F64(0)];
+          keep
+            .call(&mut scope, &field, &mut handle)
+            .map_err(|error| format!("retain native Error field: {error:#}"))?;
+          fields[index] =
+            handle[0].f64().ok_or("invalid Error field handle")?;
+        }
+        return Ok(Some((fields[0], fields[1])));
+      }
+      Some(0) => {}
+      _ => {
+        return Err("native Error classifier must return zero or one".into());
+      }
+    }
+  }
+  Ok(None)
+}
+
 /// Drain every graph in this store to a verified fixed point. Graphs with
 /// promise jobs must publish both drain and pending-count exports.
 pub(super) fn drain_microtasks(
